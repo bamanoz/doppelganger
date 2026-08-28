@@ -1,0 +1,6 @@
+version: 1
+projectId: doppelganger-runtime
+instanceId: aiden
+traits:
+  - engineer
+  - concise

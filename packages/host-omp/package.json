@@ -1,0 +1,32 @@
+{
+  "name": "@doppelganger/host-omp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@doppelganger/composition-runtime": "0.0.0",
+    "@doppelganger/extension-protocols": "0.0.0",
+    "@oh-my-pi/omptype": "18.0.9"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@oh-my-pi/pi-coding-agent": ">=18.0.5 <19"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@oh-my-pi/pi-coding-agent": "18.0.9",
+    "@types/node": "24.13.3",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -1,6 +1,6 @@
 export interface MemoryPartition {
   readonly instanceId: string
-  readonly principalId: string
+  readonly actorId: string
   readonly projectId?: string
 }
 
@@ -20,10 +20,10 @@ export function memoryEligibility(
   options: MemoryEligibilityOptions = {},
   alias = 'r',
 ): MemoryEligibilityPredicate {
-  const parameters: (number | string)[] = [partition.instanceId, partition.principalId]
+  const parameters: (number | string)[] = [partition.instanceId, partition.actorId]
   const predicates = [
     `${alias}.instance_id = ?`,
-    `${alias}.principal_id = ?`,
+    `${alias}.actor_id = ?`,
   ]
   if (partition.projectId === undefined) {
     predicates.push(`${alias}.scope_kind = 'relationship'`)

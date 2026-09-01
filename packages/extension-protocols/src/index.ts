@@ -1,4 +1,12 @@
 export {
+  ACTOR_IDENTITY_SERVICE,
+  createActorIdentity,
+  createActorIdentityPlugin,
+  type ActorIdentity,
+} from './actor.ts'
+export { ContextProtocolPlugin } from './context-plugin.ts'
+export { ToolRegistryPlugin } from './tools-plugin.ts'
+export {
   ContextProtocol,
   type AssembledContext,
   type ContextAuthority,
@@ -12,6 +20,7 @@ export {
   ToolInvocationError,
   ToolRegistry,
   type JsonPrimitive,
+  type ToolApprovalRequirement,
   type JsonValue,
   type ToolDefinition,
   type ToolDescriptor,
@@ -25,7 +34,6 @@ export {
   publishLifecycleEvent,
   serializeLifecycleValue,
   type BoundedLifecycleValue,
-  type CommittedToolOutcome,
   type LifecycleDiagnostic,
   type LifecycleError,
   type LifecycleEvent,

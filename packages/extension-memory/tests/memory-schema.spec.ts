@@ -3,11 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createPersonaActivationPlugin } from '@doppelganger/extension-persona'
+import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
+import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
 import {
   InstanceSqliteService,
   type InstanceSqliteDatabase,
-} from '@doppelganger/extension-sqlite'
+} from '@doppelganger/doppelganger-sqlite'
 import { hardDeleteMemoryRecord, migrateMemorySchema } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
@@ -22,11 +23,9 @@ async function database(): Promise<{ context: Context; database: InstanceSqliteD
   const context = new Context()
   await context.plugin(createPersonaActivationPlugin({
     instanceId: 'memory-instance',
-    principalId: 'local-user',
     sessionId: 'schema-session',
-    instanceHome,
-    definitionRoot: instanceHome,
   }))
+  await context.plugin(createActorIdentityPlugin('local-user'))
   await context.plugin(InstanceSqliteService, { home: instanceHome })
   return { context, database: await context.doppelgangerInstanceSqlite.open('memory') }
 }
@@ -101,13 +100,58 @@ function insertVersionOneFixture(database: InstanceSqliteDatabase): void {
   `)
 }
 
+
+function downgradeActorSchema(database: InstanceSqliteDatabase, version: 2 | 3): void {
+  database.exec(`
+    ALTER TABLE memory_records RENAME COLUMN actor_id TO principal_id;
+    ALTER TABLE memory_operations RENAME COLUMN actor_id TO principal_id;
+  `)
+  if (version === 2) {
+    database.exec(`
+      DROP TABLE memory_semantic_active_generation;
+      DROP TABLE memory_semantic_indexed_revisions;
+      DROP TABLE memory_vector_projection_work;
+      DROP TABLE memory_vector_deletions;
+      DROP TABLE memory_embedding_cache;
+      DROP TABLE memory_semantic_generations;
+      CREATE TABLE memory_embeddings (
+        record_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+        revision_id TEXT NOT NULL REFERENCES memory_revisions(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        dimensions INTEGER NOT NULL CHECK(dimensions > 0),
+        vector BLOB NOT NULL,
+        PRIMARY KEY(record_id, revision_id, provider)
+      );
+    `)
+  }
+  database.prepare('UPDATE memory_schema SET version = ?').run(version)
+}
+
+function insertLegacyActorFixture(database: InstanceSqliteDatabase): void {
+  const now = '2026-08-29T12:00:00.000Z'
+  database.exec(`
+    INSERT INTO memory_records(
+      id, instance_id, principal_id, kind, subject_key, scope_kind, project_id, status,
+      pinned, confidence, salience, current_revision_id, source_session_id, created_at, updated_at
+    ) VALUES ('legacy-record', 'memory-instance', 'persisted-actor', 'fact', 'legacy.actor', 'relationship', NULL,
+      'active', 0, 1, 0.5, 'legacy-revision', 'legacy-session', '${now}', '${now}');
+    INSERT INTO memory_revisions(
+      id, record_id, ordinal, content, source_session_id, source_kind, created_at
+    ) VALUES ('legacy-revision', 'legacy-record', 1, 'Persist this actor partition.', 'legacy-session', 'explicit', '${now}');
+    INSERT INTO memory_operations(
+      instance_id, principal_id, operation_id, command_kind, command_digest,
+      result_kind, result_record_id, result_revision_id, created_at
+    ) VALUES ('memory-instance', 'persisted-actor', 'legacy-operation', 'remember', 'digest',
+      'record', 'legacy-record', 'legacy-revision', '${now}');
+  `)
+}
 describe('memory schema', () => {
   it('creates production schema constraints and indexes idempotently', async () => {
     const fixture = await database()
-    migrateMemorySchema(fixture.database, { legacyPrincipalId: 'local-user' })
-    migrateMemorySchema(fixture.database, { legacyPrincipalId: 'local-user' })
+    migrateMemorySchema(fixture.database, { legacyActorId: 'local-user' })
+    migrateMemorySchema(fixture.database, { legacyActorId: 'local-user' })
 
-    expect(fixture.database.prepare('SELECT version FROM memory_schema').get()?.version).toBe(2)
+    expect(fixture.database.prepare('SELECT version FROM memory_schema').get()?.version).toBe(4)
     const tables = fixture.database.prepare(`
       SELECT name FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name
     `).all().map(row => row.name)
@@ -119,12 +163,17 @@ describe('memory schema', () => {
       'memory_candidate_evidence',
       'memory_operations',
       'memory_fts',
-      'memory_embeddings',
+      'memory_semantic_generations',
+      'memory_semantic_active_generation',
+      'memory_semantic_indexed_revisions',
+      'memory_vector_projection_work',
+      'memory_vector_deletions',
+      'memory_embedding_cache',
     ]))
     const columns = fixture.database.prepare('PRAGMA table_info(memory_records)').all().map(row => row.name)
     expect(columns).toEqual(expect.arrayContaining([
       'instance_id',
-      'principal_id',
+      'actor_id',
       'subject_key',
       'scope_kind',
       'confidence',
@@ -146,11 +195,49 @@ describe('memory schema', () => {
     ]))
     expect(() => fixture.database.prepare(`
       INSERT INTO memory_records(
-        id, instance_id, principal_id, kind, subject_key, scope_kind, project_id,
+        id, instance_id, actor_id, kind, subject_key, scope_kind, project_id,
         status, confidence, salience, current_revision_id, source_session_id, created_at, updated_at
       ) VALUES ('bad', 'memory-instance', 'local-user', 'fact', 'bad', 'relationship', 'project',
         'active', 1, 1, 'missing', 'session', 'now', 'now')
     `).run()).toThrow()
+    await fixture.context.fiber.dispose()
+  })
+
+  it.each([2, 3] as const)('migrates populated version %i actor partitions without data loss', async (version) => {
+    const fixture = await database()
+    migrateMemorySchema(fixture.database, { legacyActorId: 'bootstrap-actor' })
+    downgradeActorSchema(fixture.database, version)
+    insertLegacyActorFixture(fixture.database)
+
+    migrateMemorySchema(fixture.database, { legacyActorId: 'ignored-for-version-two-and-three' })
+
+    expect(fixture.database.prepare('SELECT version FROM memory_schema').get()?.version).toBe(4)
+    expect(fixture.database.prepare(`
+      SELECT actor_id, subject_key FROM memory_records WHERE id = 'legacy-record'
+    `).get()).toEqual({ actor_id: 'persisted-actor', subject_key: 'legacy.actor' })
+    expect(fixture.database.prepare(`
+      SELECT actor_id, result_record_id FROM memory_operations WHERE operation_id = 'legacy-operation'
+    `).get()).toEqual({ actor_id: 'persisted-actor', result_record_id: 'legacy-record' })
+    expect(fixture.database.prepare('PRAGMA table_info(memory_records)').all().map(row => row.name))
+      .not.toContain('principal_id')
+    expect(fixture.database.prepare(`SELECT name FROM sqlite_master WHERE name = 'memory_semantic_generations'`).get())
+      .toBeDefined()
+    await fixture.context.fiber.dispose()
+  })
+
+  it('rolls back a failed version three actor-column migration', async () => {
+    const fixture = await database()
+    migrateMemorySchema(fixture.database, { legacyActorId: 'bootstrap-actor' })
+    downgradeActorSchema(fixture.database, 3)
+    fixture.database.exec(`
+      ALTER TABLE memory_records ADD COLUMN actor_id TEXT;
+      ALTER TABLE memory_operations ADD COLUMN actor_id TEXT;
+    `)
+
+    expect(() => migrateMemorySchema(fixture.database, { legacyActorId: 'actor' })).toThrow()
+    expect(fixture.database.prepare('SELECT version FROM memory_schema').get()?.version).toBe(3)
+    const columns = fixture.database.prepare('PRAGMA table_info(memory_records)').all().map(row => row.name)
+    expect(columns).toEqual(expect.arrayContaining(['principal_id', 'actor_id']))
     await fixture.context.fiber.dispose()
   })
 
@@ -159,13 +246,13 @@ describe('memory schema', () => {
     createVersionOne(fixture.database)
     insertVersionOneFixture(fixture.database)
 
-    migrateMemorySchema(fixture.database, { legacyPrincipalId: 'legacy-user' })
+    migrateMemorySchema(fixture.database, { legacyActorId: 'legacy-user' })
 
-    expect(fixture.database.prepare('SELECT version FROM memory_schema').get()?.version).toBe(2)
+    expect(fixture.database.prepare('SELECT version FROM memory_schema').get()?.version).toBe(4)
     expect(fixture.database.prepare(`
-      SELECT principal_id, subject_key, scope_kind, pinned FROM memory_records WHERE id = 'relationship'
+      SELECT actor_id, subject_key, scope_kind, pinned FROM memory_records WHERE id = 'relationship'
     `).get()).toEqual({
-      principal_id: 'legacy-user',
+      actor_id: 'legacy-user',
       subject_key: 'legacy.relationship',
       scope_kind: 'relationship',
       pinned: 1,
@@ -182,7 +269,7 @@ describe('memory schema', () => {
     expect(fixture.database.prepare(`
       SELECT record_id FROM memory_fts WHERE memory_fts MATCH 'SQLite'
     `).get()?.record_id).toBe('project')
-    expect(fixture.database.prepare(`SELECT COUNT(*) AS count FROM memory_embeddings`).get()?.count).toBe(1)
+    expect(fixture.database.prepare(`SELECT name FROM sqlite_master WHERE name = 'memory_embeddings'`).get()).toBeUndefined()
     await fixture.context.fiber.dispose()
   })
 
@@ -194,7 +281,7 @@ describe('memory schema', () => {
       INSERT INTO memory_records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run('dangling', 'memory-instance', 'fact', 'global', null, 'active', 0, 'missing-revision', 'session', now, now)
 
-    expect(() => migrateMemorySchema(fixture.database, { legacyPrincipalId: 'legacy-user' }))
+    expect(() => migrateMemorySchema(fixture.database, { legacyActorId: 'legacy-user' }))
       .toThrow('migration integrity check failed')
     expect(fixture.database.prepare('SELECT version FROM memory_schema').get()?.version).toBe(1)
     expect(fixture.database.prepare('SELECT scope_kind, current_revision_id FROM memory_records WHERE id = ?')
@@ -207,11 +294,11 @@ describe('memory schema', () => {
 
   it('hard deletion removes canonical and derived rows while retaining content-free replay protection', async () => {
     const fixture = await database()
-    migrateMemorySchema(fixture.database, { legacyPrincipalId: 'local-user' })
+    migrateMemorySchema(fixture.database, { legacyActorId: 'local-user' })
     const now = '2026-08-28T12:00:00.000Z'
     fixture.database.exec(`
       INSERT INTO memory_records(
-        id, instance_id, principal_id, kind, subject_key, scope_kind, project_id, status,
+        id, instance_id, actor_id, kind, subject_key, scope_kind, project_id, status,
         confidence, salience, current_revision_id, source_session_id, created_at, updated_at
       ) VALUES ('record-one', 'memory-instance', 'local-user', 'fact', 'project.fact', 'project', 'project-one',
         'active', 1, 0.5, 'revision-one', 'session-one', '${now}', '${now}');
@@ -224,11 +311,19 @@ describe('memory schema', () => {
       INSERT INTO memory_operations VALUES
         ('memory-instance', 'local-user', 'operation-one', 'remember', 'digest', 'record', 'record-one', 'revision-one', '${now}');
       INSERT INTO memory_fts VALUES ('record-one', 'revision-one', 'remember this');
-      INSERT INTO memory_embeddings VALUES ('record-one', 'revision-one', 'fake', 2, X'0102');
+      INSERT INTO memory_semantic_generations VALUES
+        ('generation-one', 'memory-instance', '{}', '{}', 'active', '${now}', '${now}', '${now}', NULL);
+      INSERT INTO memory_semantic_active_generation VALUES ('memory-instance', 'generation-one', '${now}');
+      INSERT INTO memory_semantic_indexed_revisions VALUES
+        ('generation-one', 'record-one', 'revision-one', '${now}');
+      INSERT INTO memory_vector_projection_work VALUES
+        ('work-one', 'generation-one', 'record-one', 'revision-one', 'upsert', 'pending', 0, '${now}', NULL, NULL, '${now}', '${now}');
+      INSERT INTO memory_embedding_cache VALUES
+        ('embedder-fingerprint', 'record-one', 'revision-one', 'content-digest', 2, X'0102', '${now}');
     `)
 
     expect(hardDeleteMemoryRecord(fixture.database, 'record-one')).toBe(true)
-    for (const table of ['memory_records', 'memory_revisions', 'memory_evidence', 'memory_candidate_evidence', 'memory_fts', 'memory_embeddings']) {
+    for (const table of ['memory_records', 'memory_revisions', 'memory_evidence', 'memory_candidate_evidence', 'memory_fts', 'memory_semantic_indexed_revisions', 'memory_vector_projection_work', 'memory_embedding_cache']) {
       expect(fixture.database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count).toBe(0)
     }
     expect(fixture.database.prepare(`

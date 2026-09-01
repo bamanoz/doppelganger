@@ -4,12 +4,14 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   OMP_RPC_PROTOCOL_VERSION,
+  type SerializedOmpActivation,
+} from '../src/contracts.ts'
+import {
   OmpAdapterSession,
-  discoverProjectManifest,
+  discoverOmpProject,
   type OmpChildConnection,
   type OmpChildFactory,
-  type SerializedCompositionActivation,
-} from '../src/index.ts'
+} from '../src/adapter.ts'
 
 const temporaryRoots: string[] = []
 
@@ -22,18 +24,21 @@ class FakeConnection implements OmpChildConnection {
   readonly notifications = new Map<string, (params: unknown) => void>()
   disposed = false
   activateVersion: number = OMP_RPC_PROTOCOL_VERSION
+  activateTools: unknown = [{
+    name: 'memory.search',
+    description: 'search',
+    inputSchema: { type: 'object' },
+    approval: { policy: 'required', reason: 'Review this mutation' },
+    available: true,
+  }]
 
   async request(method: string, params?: unknown): Promise<unknown> {
     this.requests.push({ method, params })
     if (method === 'session.activate') return {
       protocolVersion: this.activateVersion,
-      diagnostics: {},
-      tools: [{
-        name: 'memory.search',
-        description: 'search',
-        inputSchema: { type: 'object' },
-        available: true,
-      }],
+      diagnostics: { compositionRevision: 'effective-one' },
+      runtimeRevision: 'effective-one',
+      tools: this.activateTools,
     }
     return null
   }
@@ -51,40 +56,36 @@ class FakeConnection implements OmpChildConnection {
 
 class FakeFactory implements OmpChildFactory {
   readonly activateVersion: number | undefined
+  readonly activateTools: unknown
   readonly connections: FakeConnection[] = []
 
-  constructor(activateVersion?: number) {
+  constructor(activateVersion?: number, activateTools?: unknown) {
     this.activateVersion = activateVersion
+    this.activateTools = activateTools
   }
 
   async start(): Promise<OmpChildConnection> {
     const connection = new FakeConnection()
     if (this.activateVersion !== undefined) connection.activateVersion = this.activateVersion
+    if (this.activateTools !== undefined) connection.activateTools = this.activateTools
     this.connections.push(connection)
     return connection
   }
 }
 
-function activation(root: string, sessionId: string): SerializedCompositionActivation {
+function activation(root: string, sessionId: string, actorId?: string): SerializedOmpActivation {
   return {
     composition: {
-      id: 'portable-persona',
+      id: 'portable-runtime',
       revision: 'one',
-      loaderPath: join(root, 'cordis.yaml'),
-      imports: {},
-      mounts: { persona: { target: 'session', required: true }, host: { target: 'session', required: true } },
+      loaderPath: join(root, 'runtime.cordis.yml'),
+      patches: [],
     },
     sessionId,
-    mounts: {
-      persona: {
-        module: '@doppelganger/extension-persona',
-        exportName: 'createPersonaActivationPlugin',
-        mode: 'factory' as const,
-        config: { instanceId: 'portable', principalId: 'local-user', sessionId },
-      },
-    },
-    hostMount: 'host',
+    workspaceRoot: root,
+    hostKind: 'omp',
     watch: false,
+    ...(actorId === undefined ? {} : { actorId }),
   }
 }
 
@@ -100,23 +101,30 @@ describe('OMP adapter state machine', () => {
       mkdir(join(repository, 'packages', '.doppelganger'), { recursive: true }),
     ])
     const nearest = join(repository, 'packages', '.doppelganger', 'manifest.yaml')
-    await writeFile(nearest, 'version: 1\nprojectId: nearest\ninstanceId: aiden\n')
-    expect(await discoverProjectManifest(nested)).toBe(nearest)
+    await writeFile(nearest, 'version: 1\nruntimePreset: portable-runtime\n')
+    expect(await discoverOmpProject(nested)).toEqual({
+      workspaceRoot: join(repository, 'packages'),
+      manifestPath: nearest,
+    })
 
     await rm(nearest)
     const outside = join(outer, '.doppelganger', 'manifest.yaml')
     await mkdir(join(outer, '.doppelganger'), { recursive: true })
-    await writeFile(outside, 'version: 1\nprojectId: outside\ninstanceId: aiden\n')
-    expect(await discoverProjectManifest(nested)).toBeUndefined()
+    await writeFile(outside, 'version: 1\nruntimePreset: outside\n')
+    expect(await discoverOmpProject(nested)).toEqual({ workspaceRoot: repository })
   })
 
   it('executes a generic serialized activation without preset assembly', async () => {
     const root = await mkdtemp(join(tmpdir(), 'doppelganger-adapter-'))
     temporaryRoots.push(root)
-    const descriptor = activation(root, 'portable-session')
+    const descriptor = activation(root, 'portable-session', 'actor-one')
     const factory = new FakeFactory()
     const adapter = new OmpAdapterSession({ activation: descriptor, childFactory: factory })
-    expect(await adapter.start()).toMatchObject({ state: 'active', initializationAvailable: false })
+    expect(await adapter.start()).toMatchObject({
+      state: 'active',
+      initializationAvailable: false,
+      tools: [{ approval: { policy: 'required', reason: 'Review this mutation' } }],
+    })
     expect(factory.connections).toHaveLength(1)
     expect(factory.connections[0]?.requests[0]).toEqual({
       method: 'session.activate',
@@ -147,6 +155,16 @@ describe('OMP adapter state machine', () => {
     })
     expect(factory.connections).toHaveLength(0)
 
+    const invalidActor = new OmpAdapterSession({
+      activation: { ...activation(join(process.cwd(), 'fixture'), 'invalid-actor'), actorId: ' ' },
+      childFactory: factory,
+    })
+    expect(await invalidActor.start()).toMatchObject({
+      state: 'failed',
+      diagnostic: { message: 'actorId must be a non-empty string' },
+    })
+    expect(factory.connections).toHaveLength(0)
+
     const incompatibleFactory = new FakeFactory(OMP_RPC_PROTOCOL_VERSION + 1)
     const incompatible = new OmpAdapterSession({
       activation: activation(join(process.cwd(), 'fixture'), 'incompatible'),
@@ -154,5 +172,22 @@ describe('OMP adapter state machine', () => {
     })
     expect(await incompatible.start()).toMatchObject({ state: 'failed' })
     expect(incompatibleFactory.connections[0]?.disposed).toBe(true)
+    const malformedApprovalFactory = new FakeFactory(undefined, [{
+      name: 'memory.search',
+      description: 'search',
+      inputSchema: { type: 'object' },
+      approval: { policy: 'required', reason: ' ' },
+      available: true,
+    }])
+    const malformedApproval = new OmpAdapterSession({
+      activation: activation(join(process.cwd(), 'fixture'), 'malformed-approval'),
+      childFactory: malformedApprovalFactory,
+    })
+    await expect(malformedApproval.start()).resolves.toMatchObject({
+      state: 'failed',
+      diagnostic: { message: expect.stringContaining('approval.reason') },
+    })
+    expect(malformedApprovalFactory.connections[0]?.disposed).toBe(true)
+
   })
 })

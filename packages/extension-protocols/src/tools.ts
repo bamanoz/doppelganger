@@ -2,11 +2,17 @@ import { Context, Service } from '@deepseek-ai/cordis'
 
 export type JsonPrimitive = boolean | number | string | null
 export type JsonValue = JsonPrimitive | { readonly [key: string]: JsonValue } | readonly JsonValue[]
+export interface ToolApprovalRequirement {
+  readonly policy: 'required'
+  readonly reason: string
+}
+
 
 export interface ToolDefinition {
   readonly name: string
   readonly description: string
   readonly inputSchema: { readonly [key: string]: JsonValue }
+  readonly approval?: ToolApprovalRequirement
   readonly available?: boolean
   invoke(input: JsonValue): JsonValue | Promise<JsonValue>
 }
@@ -15,6 +21,7 @@ export interface ToolDescriptor {
   readonly name: string
   readonly description: string
   readonly inputSchema: { readonly [key: string]: JsonValue }
+  readonly approval?: ToolApprovalRequirement
   readonly available: boolean
 }
 
@@ -57,6 +64,34 @@ function jsonClone(value: JsonValue, label: string): JsonValue {
   if (serialized === undefined) throw new TypeError(`${label} must be JSON-serializable`)
   return JSON.parse(serialized) as JsonValue
 }
+const MAX_TOOL_APPROVAL_REASON_LENGTH = 1_024
+
+function validateApproval(
+  input: ToolApprovalRequirement | undefined,
+  name: string,
+): ToolApprovalRequirement | undefined {
+  if (input === undefined) return undefined
+  if (input === null || Array.isArray(input) || typeof input !== 'object') {
+    throw new TypeError(`tool "${name}" approval must be an object`)
+  }
+  const keys = Object.keys(input)
+  if (keys.some(key => key !== 'policy' && key !== 'reason')) {
+    throw new TypeError(`tool "${name}" approval contains unsupported fields`)
+  }
+  if (input.policy !== 'required') {
+    throw new TypeError(`tool "${name}" approval policy must be "required"`)
+  }
+  if (typeof input.reason !== 'string') {
+    throw new TypeError(`tool "${name}" approval reason must be a non-empty string`)
+  }
+  const reason = input.reason.trim()
+  if (reason.length === 0 || reason.length > MAX_TOOL_APPROVAL_REASON_LENGTH) {
+    throw new TypeError(
+      `tool "${name}" approval reason must contain 1-${MAX_TOOL_APPROVAL_REASON_LENGTH} characters`,
+    )
+  }
+  return Object.freeze({ policy: 'required', reason })
+}
 
 function validateDefinition(definition: ToolDefinition): ToolDefinition {
   const name = definition.name.trim()
@@ -70,22 +105,25 @@ function validateDefinition(definition: ToolDefinition): ToolDefinition {
     throw new TypeError(`tool "${name}" input schema must be a JSON object`)
   }
   const schema = inputSchema as { readonly [key: string]: JsonValue }
+  const approval = validateApproval(definition.approval, name)
   return Object.freeze({
-    ...definition,
     name,
     description,
     inputSchema: Object.freeze(schema),
     available: definition.available ?? true,
+    invoke: definition.invoke,
+    ...(approval === undefined ? {} : { approval }),
   })
 }
 
 export class ToolInvocationError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string,
-    public readonly data?: JsonValue,
-  ) {
+  readonly code: string
+  readonly data?: JsonValue
+
+  constructor(code: string, message: string, data?: JsonValue) {
     super(message)
+    this.code = code
+    if (data !== undefined) this.data = data
     this.name = 'ToolInvocationError'
   }
 }
@@ -133,6 +171,7 @@ export class ToolRegistry extends Service {
         description: definition.description,
         inputSchema: definition.inputSchema,
         available: definition.available ?? true,
+        ...(definition.approval === undefined ? {} : { approval: definition.approval }),
       }))
       .sort((left, right) => left.name.localeCompare(right.name))
     return Object.freeze(descriptors)

@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 1,
+  "corpusId": "memory-retrieval-bilingual-v1",
+  "clock": "2026-01-15T12:00:00.000Z",
+  "generationId": "corpus-generation-v1",
+  "dimensions": 12,
+  "records": [
+    {
+      "key": "english-lexical",
+      "projectId": "project-alpha",
+      "operationId": "corpus-english-lexical",
+      "subjectKey": "memory.lexical.english",
+      "kind": "fact",
+      "status": "active",
+      "scope": "relationship",
+      "content": "Canonical memory uses SQLite FTS5 for exact lexical recall.",
+      "vector": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "key": "russian-lexical",
+      "projectId": "project-alpha",
+      "operationId": "corpus-russian-lexical",
+      "subjectKey": "memory.lexical.russian",
+      "kind": "fact",
+      "status": "active",
+      "scope": "project",
+      "content": "Каноническая память использует SQLite FTS5 для точного лексического поиска.",
+      "vector": [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "key": "english-paraphrase",
+      "projectId": "project-alpha",
+      "operationId": "corpus-english-paraphrase",
+      "subjectKey": "release.approval.policy",
+      "kind": "procedure",
+      "status": "active",
+      "scope": "project",
+      "content": "Publishing artifacts requires human approval.",
+      "vector": [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "key": "russian-paraphrase",
+      "projectId": "project-alpha",
+      "operationId": "corpus-russian-paraphrase",
+      "subjectKey": "backup.storage.location",
+      "kind": "fact",
+      "status": "active",
+      "scope": "project",
+      "content": "Резервные копии хранятся в зашифрованном хранилище.",
+      "vector": [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "key": "technical-identifier",
+      "projectId": "project-alpha",
+      "operationId": "corpus-technical-identifier",
+      "subjectKey": "transport.frame.symbol",
+      "kind": "fact",
+      "status": "active",
+      "scope": "project",
+      "content": "RPC_FRAME_V7 separates transport messages.",
+      "vector": [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "key": "conflicting-current",
+      "projectId": "project-alpha",
+      "operationId": "corpus-conflicting-current",
+      "subjectKey": "atlas.database.engine",
+      "kind": "decision",
+      "status": "active",
+      "scope": "project",
+      "content": "ATLAS_DATABASE is PostgreSQL.",
+      "vector": [0, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0, 0.6]
+    },
+    {
+      "key": "conflicting-candidate",
+      "projectId": "project-alpha",
+      "operationId": "corpus-conflicting-candidate",
+      "subjectKey": "atlas.database.engine",
+      "kind": "decision",
+      "status": "candidate",
+      "scope": "project",
+      "content": "ATLAS_DATABASE is MySQL.",
+      "vector": [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "key": "partition-local",
+      "projectId": "project-alpha",
+      "operationId": "corpus-partition-local",
+      "subjectKey": "orbit.partition.alpha",
+      "kind": "fact",
+      "status": "active",
+      "scope": "project",
+      "content": "Alpha isolation accepts only the local orbital configuration.",
+      "vector": [0, 0, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6]
+    },
+    {
+      "key": "partition-foreign",
+      "projectId": "project-beta",
+      "operationId": "corpus-partition-foreign",
+      "subjectKey": "orbit.partition.beta",
+      "kind": "fact",
+      "status": "active",
+      "scope": "project",
+      "content": "BETA_ORBIT_SECRET selects the foreign orbital configuration.",
+      "vector": [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]
+    },
+    {
+      "key": "temporal-current",
+      "projectId": "project-alpha",
+      "operationId": "corpus-temporal-current",
+      "subjectKey": "maintenance.window.current",
+      "kind": "fact",
+      "status": "active",
+      "scope": "project",
+      "content": "The supported maintenance slot begins Saturday at 09:00 UTC.",
+      "vector": [0, 0, 0, 0, 0, 0, 0, 0.8, 0, 0, 0, 0.6]
+    },
+    {
+      "key": "temporal-expired",
+      "projectId": "project-alpha",
+      "operationId": "corpus-temporal-expired",
+      "subjectKey": "maintenance.window.expired",
+      "kind": "fact",
+      "status": "active",
+      "scope": "project",
+      "content": "TUESDAY_WINDOW_0300 was the obsolete maintenance slot.",
+      "expiresAt": "2025-12-31T23:59:59.000Z",
+      "vector": [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
+    },
+    {
+      "key": "temporal-future",
+      "projectId": "project-alpha",
+      "operationId": "corpus-temporal-future",
+      "subjectKey": "maintenance.window.future",
+      "kind": "fact",
+      "status": "active",
+      "scope": "project",
+      "content": "The future maintenance slot will begin Sunday at 11:00 UTC.",
+      "validFrom": "2027-01-01T00:00:00.000Z",
+      "vector": [0, 0, 0, 0, 0, 0, 0, 0.9, 0, 0, 0.4358899, 0]
+    },
+    {
+      "key": "current-revision",
+      "projectId": "project-alpha",
+      "operationId": "corpus-current-revision",
+      "subjectKey": "deployment.region.current",
+      "kind": "decision",
+      "status": "active",
+      "scope": "project",
+      "content": "DUBLIN_DEPLOYMENT was the deployment region.",
+      "vector": [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+      "correction": {
+        "operationId": "corpus-current-revision-correction",
+        "content": "The current deployment region is Helsinki.",
+        "vector": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0.6, 0.8, 0]
+      }
+    }
+  ],
+  "queries": [
+    {
+      "key": "english-lexical-query",
+      "language": "en",
+      "boundary": "lexical-only",
+      "query": "SQLite FTS5 lexical",
+      "vector": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "lexicalExpectedKey": "english-lexical",
+      "hybridExpectedKey": "english-lexical",
+      "forbiddenKeys": []
+    },
+    {
+      "key": "russian-lexical-query",
+      "language": "ru",
+      "boundary": "lexical-only",
+      "query": "точного лексического поиска",
+      "vector": [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "lexicalExpectedKey": "russian-lexical",
+      "hybridExpectedKey": "russian-lexical",
+      "forbiddenKeys": []
+    },
+    {
+      "key": "english-paraphrase-query",
+      "language": "en",
+      "boundary": "semantic-only-paraphrase",
+      "query": "Who must sign off before packages ship?",
+      "vector": [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "lexicalExpectedKey": null,
+      "hybridExpectedKey": "english-paraphrase",
+      "forbiddenKeys": []
+    },
+    {
+      "key": "russian-paraphrase-query",
+      "language": "ru",
+      "boundary": "semantic-only-paraphrase",
+      "query": "Где находится защищённый дубликат данных?",
+      "vector": [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+      "lexicalExpectedKey": null,
+      "hybridExpectedKey": "russian-paraphrase",
+      "forbiddenKeys": []
+    },
+    {
+      "key": "technical-identifier-query",
+      "language": "en",
+      "boundary": "technical-identifier",
+      "query": "RPC_FRAME_V7 background background background. How are messages separated?",
+      "vector": [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+      "lexicalExpectedKey": "technical-identifier",
+      "hybridExpectedKey": "technical-identifier",
+      "forbiddenKeys": []
+    },
+    {
+      "key": "conflicting-subject-query",
+      "language": "en",
+      "boundary": "conflicting-subject",
+      "query": "ATLAS_DATABASE",
+      "vector": [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+      "lexicalExpectedKey": "conflicting-current",
+      "hybridExpectedKey": "conflicting-current",
+      "forbiddenKeys": ["conflicting-candidate"],
+      "expectedContent": "ATLAS_DATABASE is PostgreSQL."
+    },
+    {
+      "key": "partition-isolation-query",
+      "language": "en",
+      "boundary": "partition-isolation",
+      "query": "BETA_ORBIT_SECRET",
+      "vector": [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+      "lexicalExpectedKey": null,
+      "hybridExpectedKey": "partition-local",
+      "forbiddenKeys": ["partition-foreign"]
+    },
+    {
+      "key": "temporal-eligibility-query",
+      "language": "en",
+      "boundary": "temporal-eligibility",
+      "query": "TUESDAY_WINDOW_0300",
+      "vector": [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+      "lexicalExpectedKey": null,
+      "hybridExpectedKey": "temporal-current",
+      "forbiddenKeys": ["temporal-expired", "temporal-future"],
+      "expectedContent": "The supported maintenance slot begins Saturday at 09:00 UTC."
+    },
+    {
+      "key": "current-revision-query",
+      "language": "en",
+      "boundary": "current-revision",
+      "query": "DUBLIN_DEPLOYMENT",
+      "vector": [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+      "lexicalExpectedKey": null,
+      "hybridExpectedKey": "current-revision",
+      "forbiddenKeys": [],
+      "expectedContent": "The current deployment region is Helsinki."
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "benchmarkId": "embeddinggemma-profile-benchmark-v1",
+  "fixtureId": "embeddinggemma-profile-bilingual-v1",
+  "measuredAt": "2026-08-30T13:21:16.400Z",
+  "runtime": {
+    "node": "v26.8.1",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "configuration": {
+    "device": "cpu",
+    "iterations": 3,
+    "topK": 3
+  },
+  "profiles": [
+    {
+      "profile": "q4-256",
+      "state": "measured",
+      "identity": {
+        "provider": "transformers.js",
+        "modelId": "onnx-community/embeddinggemma-300m-ONNX",
+        "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+        "artifactDigest": "7834419539b0d053ffcdf98223764a8060e12078bb137165f5031b03455b334e",
+        "pooling": "sentence_embedding",
+        "projection": "mrl-truncate-256-l2",
+        "dimensions": 256,
+        "normalized": true,
+        "distanceMetric": "cosine"
+      },
+      "dtype": "q4",
+      "device": "cpu",
+      "topK": 3,
+      "iterations": 3,
+      "quality": {
+        "queryCount": 8,
+        "hitCount": 8,
+        "recallAtK": 1,
+        "reciprocalRankMean": 0.9375,
+        "forbiddenHitCount": 1
+      },
+      "qualityByLanguage": {
+        "en": {
+          "queryCount": 6,
+          "hitCount": 6,
+          "recallAtK": 1,
+          "reciprocalRankMean": 1,
+          "forbiddenHitCount": 1
+        },
+        "ru": {
+          "queryCount": 2,
+          "hitCount": 2,
+          "recallAtK": 1,
+          "reciprocalRankMean": 0.75,
+          "forbiddenHitCount": 0
+        }
+      },
+      "coldAcquisitionMs": 1907.247,
+      "firstQueryMs": 34.83,
+      "warmQueryLatencyMs": {
+        "p50": 8.172,
+        "p95": 9.733,
+        "maximum": 10.795
+      },
+      "warmDocumentBatchLatencyMs": {
+        "p50": 87.041,
+        "p95": 87.998,
+        "maximum": 87.998
+      },
+      "documentBatchThroughputPerSecond": 114.617,
+      "peakRssDeltaBytes": 422543360,
+      "verifiedCacheBytes": 197245082,
+      "documentVectorBytes": 10240,
+      "querySamples": 24,
+      "documentBatchSamples": 3
+    },
+    {
+      "profile": "q8-384",
+      "state": "measured",
+      "identity": {
+        "provider": "transformers.js",
+        "modelId": "onnx-community/embeddinggemma-300m-ONNX",
+        "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+        "artifactDigest": "925cf7a13b59bc77279b08a78c8f17599939c5ab898d209efc3602b387a01f3e",
+        "pooling": "sentence_embedding",
+        "projection": "mrl-truncate-384-l2",
+        "dimensions": 384,
+        "normalized": true,
+        "distanceMetric": "cosine"
+      },
+      "dtype": "q8",
+      "device": "cpu",
+      "topK": 3,
+      "iterations": 3,
+      "quality": {
+        "queryCount": 8,
+        "hitCount": 8,
+        "recallAtK": 1,
+        "reciprocalRankMean": 0.9375,
+        "forbiddenHitCount": 1
+      },
+      "qualityByLanguage": {
+        "en": {
+          "queryCount": 6,
+          "hitCount": 6,
+          "recallAtK": 1,
+          "reciprocalRankMean": 1,
+          "forbiddenHitCount": 1
+        },
+        "ru": {
+          "queryCount": 2,
+          "hitCount": 2,
+          "recallAtK": 1,
+          "reciprocalRankMean": 0.75,
+          "forbiddenHitCount": 0
+        }
+      },
+      "coldAcquisitionMs": 485844.31,
+      "firstQueryMs": 1197.269,
+      "warmQueryLatencyMs": {
+        "p50": 48.222,
+        "p95": 53.348,
+        "maximum": 53.393
+      },
+      "warmDocumentBatchLatencyMs": {
+        "p50": 216.96,
+        "p95": 218.718,
+        "maximum": 218.718
+      },
+      "documentBatchThroughputPerSecond": 46.069,
+      "peakRssDeltaBytes": 1290616832,
+      "verifiedCacheBytes": 309458498,
+      "documentVectorBytes": 15360,
+      "querySamples": 24,
+      "documentBatchSamples": 3
+    }
+  ]
+}

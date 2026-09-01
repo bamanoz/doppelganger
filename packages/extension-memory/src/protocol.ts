@@ -3,7 +3,7 @@ import {
   ToolInvocationError,
   type ContextContribution,
   type JsonValue,
-} from '@doppelganger/extension-protocols'
+} from '@doppelganger/doppelganger-protocols'
 import {
   MemoryError,
   type MemoryKind,
@@ -20,7 +20,11 @@ function objectInput(value: JsonValue): Readonly<Record<string, JsonValue>> {
   if (value === null || Array.isArray(value) || typeof value !== 'object') {
     throw new ToolInvocationError('INVALID_INPUT', 'tool input must be an object')
   }
-  return value as Readonly<Record<string, JsonValue>>
+  const input = value as Readonly<Record<string, JsonValue>>
+  if (input.principalId !== undefined || input.actorId !== undefined) {
+    throw new ToolInvocationError('INVALID_INPUT', 'memory tool input must not select principalId or actorId')
+  }
+  return input
 }
 
 function requiredString(input: Readonly<Record<string, JsonValue>>, field: string): string {

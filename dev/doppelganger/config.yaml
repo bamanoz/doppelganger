@@ -1,5 +1,2 @@
 version: 1
-principalId: valera
-defaultInstance: aiden
-instances:
-  aiden: instances/aiden/instance.yaml
+defaultRuntimePreset: mark

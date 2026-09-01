@@ -1,5 +1,5 @@
 {
-  "name": "@doppelganger/extension-memory",
+  "name": "@doppelganger/doppelganger-memory",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts"
+    },
+    "./capture": {
+      "types": "./src/capture.ts",
+      "import": "./src/capture.ts"
     }
   },
   "scripts": {
@@ -14,16 +18,17 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@doppelganger/extension-persona": "0.0.0",
-    "@doppelganger/extension-protocols": "0.0.0",
-    "@doppelganger/extension-sqlite": "0.0.0"
+    "@deepseek-ai/schemastery": "3.18.1",
+    "@doppelganger/doppelganger-persona": "0.0.0",
+    "@doppelganger/doppelganger-protocols": "0.0.0",
+    "@doppelganger/doppelganger-sqlite": "0.0.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@types/node": "24.13.3",
+    "@types/node": "26.4.0",
     "typescript": "6.0.3",
     "vitest": "4.1.11"
   }

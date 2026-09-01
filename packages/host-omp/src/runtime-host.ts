@@ -1,17 +1,20 @@
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 import {
+  createActorIdentityPlugin,
   publishLifecycleEvent,
   type AssembledContext,
+  type ContextProtocol,
   type JsonValue,
   type LifecycleEvent,
   type ToolDescriptor,
   type ToolInvocationResult,
-} from '@doppelganger/extension-protocols'
-import type {} from '@doppelganger/extension-protocols'
+  type ToolRegistry,
+} from '@doppelganger/doppelganger-protocols'
+import type { RuntimeChangedParams } from './contracts.ts'
 
 export type RuntimeNotification =
   | { readonly method: 'tools.changed'; readonly params: readonly ToolDescriptor[] }
-  | { readonly method: 'profile.changed'; readonly params: { readonly revision: string } }
+  | { readonly method: 'runtime.changed'; readonly params: RuntimeChangedParams }
   | { readonly method: 'runtime.failed'; readonly params: { readonly message: string } }
 
 export type OmpLifecycleEvent = LifecycleEvent
@@ -29,20 +32,42 @@ export interface OmpRuntimeHostBinding {
   notify(notification: RuntimeNotification): void
 }
 
-export function createOmpRuntimeHostPlugin(binding: OmpRuntimeHostBinding): Plugin {
+const EMPTY_CONTEXT: AssembledContext = Object.freeze({
+  content: '',
+  contributions: Object.freeze([]),
+  omittedSources: Object.freeze([]),
+  tokenCount: 0,
+})
+const EMPTY_TOOLS: readonly ToolDescriptor[] = Object.freeze([])
+
+export function createOmpRuntimeHostPlugin(binding: OmpRuntimeHostBinding, actorId?: string): Plugin {
   return {
     name: 'doppelganger-omp-runtime-host',
-    inject: ['doppelgangerContext', 'doppelgangerTools'],
-    apply(ctx: Context) {
+    async apply(ctx: Context) {
+      await ctx.plugin(createActorIdentityPlugin(actorId)).await()
+      const context = () => ctx.get('doppelgangerContext', false) as ContextProtocol | undefined
+      const tools = () => ctx.get('doppelgangerTools', false) as ToolRegistry | undefined
       const host: OmpRuntimeHost = Object.freeze({
-        resolveContext: (input: string, turnId: string | undefined, tokenBudget: number) => (
-          ctx.doppelgangerContext.resolve({
+        resolveContext: (input: string, turnId: string | undefined, tokenBudget: number) => {
+          const protocol = context()
+          if (protocol === undefined) return Promise.resolve(EMPTY_CONTEXT)
+          return protocol.resolve({
             turn: { input, ...(turnId === undefined ? {} : { turnId }) },
             tokenBudget,
           })
-        ),
-        listTools: () => ctx.doppelgangerTools.list(),
-        invokeTool: (name: string, input: JsonValue) => ctx.doppelgangerTools.invoke(name, input),
+        },
+        listTools: () => tools()?.list() ?? EMPTY_TOOLS,
+        invokeTool: (name: string, input: JsonValue) => {
+          const protocol = tools()
+          if (protocol !== undefined) return protocol.invoke(name, input)
+          return Promise.resolve(Object.freeze({
+            ok: false as const,
+            error: Object.freeze({
+              code: 'TOOL_PROTOCOL_UNAVAILABLE',
+              message: 'the active Runtime Preset does not provide the tools protocol',
+            }),
+          }))
+        },
         publishEvent: (event: OmpLifecycleEvent) => publishLifecycleEvent(ctx, event),
       })
       binding.attach(host)

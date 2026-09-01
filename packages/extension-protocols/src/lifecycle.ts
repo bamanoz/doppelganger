@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonValue } from './tools.ts'
 
-export const LIFECYCLE_PROTOCOL_VERSION = 1 as const
+export const LIFECYCLE_PROTOCOL_VERSION = 2 as const
 
 export type LifecycleOutcome = 'cancelled' | 'completed' | 'failed'
 export type LifecycleTruncationReason = 'binary' | 'circular' | 'depth' | 'entries' | 'size' | 'string' | 'unsupported'
@@ -50,20 +50,12 @@ export interface TurnStartedEvent extends LifecycleEventBase {
   readonly principalInput?: BoundedLifecycleValue
 }
 
-export interface CommittedToolOutcome {
-  readonly callId: string
-  readonly name: string
-  readonly outcome: LifecycleOutcome
-  readonly result?: BoundedLifecycleValue
-  readonly error?: LifecycleError
-}
 
 export interface TurnCommittedEvent extends LifecycleEventBase {
   readonly type: 'turn-committed'
   readonly turnId: string
   readonly principalInput: BoundedLifecycleValue
   readonly assistantOutput: BoundedLifecycleValue
-  readonly toolOutcomes: readonly CommittedToolOutcome[]
   readonly outcome: LifecycleOutcome
   readonly error?: LifecycleError
 }
@@ -238,13 +230,8 @@ export function normalizeLifecycleEvent(event: LifecycleEvent): LifecycleEvent {
   if (event.type === 'session-completed' || event.type === 'turn-committed' || event.type === 'tool-completed') {
     assertOutcome(event.outcome)
   }
-  if (event.type === 'turn-committed') {
-    if (event.toolOutcomes.length > 64) throw new TypeError('turn-committed toolOutcomes exceeds 64 entries')
-    for (const outcome of event.toolOutcomes) {
-      nonEmpty('lifecycle tool outcome callId', outcome.callId)
-      nonEmpty('lifecycle tool outcome name', outcome.name)
-      assertOutcome(outcome.outcome)
-    }
+  if (event.type === 'turn-committed' && 'toolOutcomes' in event) {
+    throw new TypeError('turn-committed toolOutcomes is not supported')
   }
   const encoded = JSON.stringify(event)
   if (encoded === undefined) throw new TypeError('lifecycle event must be JSON-serializable')

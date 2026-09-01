@@ -3,8 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createPersonaActivationPlugin } from '@doppelganger/extension-persona'
-import { InstanceSqliteService } from '@doppelganger/extension-sqlite'
+import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
+import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
+import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
 import { MemoryError, MemoryService } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
@@ -17,13 +18,11 @@ async function session(instanceHome: string, sessionId: string) {
   const context = new Context()
   await context.plugin(createPersonaActivationPlugin({
     instanceId: 'aiden',
-    principalId: 'local-user',
     sessionId,
     projectId: 'project-one',
     projectRoot: join(instanceHome, 'project'),
-    instanceHome,
-    definitionRoot: instanceHome,
   }))
+  await context.plugin(createActorIdentityPlugin('local-user'))
   await context.plugin(InstanceSqliteService, { home: instanceHome })
   await context.plugin(MemoryService)
   return context

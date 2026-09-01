@@ -2,6 +2,7 @@ import { Context, type Plugin } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import {
   LIFECYCLE_PROTOCOL_VERSION,
+  normalizeLifecycleEvent,
   serializeLifecycleValue,
   type LifecycleEvent,
 } from '../src/index.ts'
@@ -54,13 +55,6 @@ describe('committed lifecycle protocol', () => {
       turnId: 'turn-one',
       principalInput: bounded('hello'),
       assistantOutput: bounded('completed answer'),
-      toolOutcomes: [{
-        callId: 'call-one',
-        name: 'memory.search',
-        outcome: 'failed',
-        result: bounded({ partial: true }),
-        error: { code: 'SEARCH_FAILED', message: 'search failed' },
-      }],
       outcome: 'completed',
     }
     await host.publish(committed)
@@ -74,16 +68,42 @@ describe('committed lifecycle protocol', () => {
       'turn-committed',
     ])
     expect(observations.at(-1)).toEqual(observations.at(-2))
+    expect(observations.at(2)).toMatchObject({
+      deliveryId: 'tool-completed:call-one',
+      sessionId: 'session-one',
+      turnId: 'turn-one',
+      callId: 'call-one',
+      outcome: 'failed',
+      result: { value: { partial: true } },
+    })
+    expect(Object.isFrozen(observations.at(2))).toBe(true)
     expect(observations.at(-1)).toMatchObject({
       deliveryId: 'turn-committed:turn-one',
       sessionId: 'session-one',
       turnId: 'turn-one',
       assistantOutput: { value: 'completed answer' },
-      toolOutcomes: [{ callId: 'call-one', outcome: 'failed', result: { value: { partial: true } } }],
       outcome: 'completed',
     })
+    expect(observations.at(-1)).not.toHaveProperty('toolOutcomes')
     expect(Object.isFrozen(observations.at(-1))).toBe(true)
     await context.fiber.dispose()
+  })
+
+  it('rejects the prior lifecycle version and legacy turn outcome aggregates', () => {
+    expect(() => normalizeLifecycleEvent({
+      ...base('old-version'),
+      protocolVersion: 1,
+      type: 'session-started',
+    } as unknown as LifecycleEvent)).toThrow('unsupported lifecycle protocol version 1')
+    expect(() => normalizeLifecycleEvent({
+      ...base('legacy-turn'),
+      type: 'turn-committed',
+      turnId: 'turn-one',
+      principalInput: bounded('hello'),
+      assistantOutput: bounded('completed answer'),
+      toolOutcomes: [],
+      outcome: 'completed',
+    } as unknown as LifecycleEvent)).toThrow('turn-committed toolOutcomes is not supported')
   })
 
   it('serializes circular, binary, oversized, deep, and unsupported host values within explicit bounds', () => {
@@ -142,7 +162,6 @@ describe('committed lifecycle protocol', () => {
       turnId: 'turn-one',
       principalInput: bounded('input'),
       assistantOutput: bounded('output'),
-      toolOutcomes: [],
       outcome: 'completed',
     })).resolves.toBeUndefined()
     expect(observed).toEqual(['committed-with-failure'])
@@ -173,7 +192,6 @@ describe('committed lifecycle protocol', () => {
         turnId: `turn-${outcome}`,
         principalInput: bounded('input'),
         assistantOutput: bounded('output'),
-        toolOutcomes: [],
         outcome,
         ...(outcome === 'failed' ? { error: { code: 'MODEL_FAILED', message: 'model failed' } } : {}),
       })

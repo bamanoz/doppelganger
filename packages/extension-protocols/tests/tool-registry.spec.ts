@@ -10,6 +10,7 @@ async function setup() {
 
 describe('tool registry', () => {
   it('discovers, updates, invokes, and removes lifecycle-owned tools', async () => {
+    const approval = { policy: 'required' as const, reason: ' Review the exact mutation ' }
     const context = await setup()
     let registration: ToolRegistration | undefined
     const owner = await context.plugin({
@@ -20,6 +21,7 @@ describe('tool registry', () => {
           name: 'memory.search',
           description: 'Search active memory',
           inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
+          approval,
           invoke: input => ({ input, revision: 1 }),
         })
       },
@@ -29,7 +31,13 @@ describe('tool registry', () => {
       name: 'memory.search',
       description: 'Search active memory',
       available: true,
+      approval: { policy: 'required', reason: 'Review the exact mutation' },
     })])
+    const descriptorApproval = context.doppelgangerTools.list()[0]?.approval
+    expect(descriptorApproval).not.toBe(approval)
+    expect(Object.isFrozen(descriptorApproval)).toBe(true)
+    approval.reason = 'Changed after registration'
+    expect(descriptorApproval?.reason).toBe('Review the exact mutation')
     await expect(context.doppelgangerTools.invoke('memory.search', { query: 'Cordis' })).resolves.toEqual({
       ok: true,
       value: { input: { query: 'Cordis' }, revision: 1 },
@@ -41,6 +49,7 @@ describe('tool registry', () => {
       inputSchema: { type: 'object' },
       invoke: () => ({ revision: 2 }),
     })
+    expect(context.doppelgangerTools.list()[0]).not.toHaveProperty('approval')
     expect(context.doppelgangerTools.list()[0]?.description).toBe('Search current memory')
     await expect(context.doppelgangerTools.invoke('memory.search', {})).resolves.toEqual({
       ok: true,
@@ -53,6 +62,34 @@ describe('tool registry', () => {
       ok: false,
       error: { code: 'TOOL_NOT_FOUND' },
     })
+    await context.fiber.dispose()
+  })
+
+  it('rejects malformed approval metadata before registration', async () => {
+    const context = await setup()
+    const definition = {
+      name: 'persona.revise',
+      description: 'Revise a Persona asset',
+      inputSchema: { type: 'object' } as const,
+      invoke: () => null,
+    }
+
+    expect(() => context.doppelgangerTools.register({
+      ...definition,
+      approval: { policy: 'required', reason: ' ' },
+    })).toThrow('approval reason must contain 1-1024 characters')
+    expect(() => context.doppelgangerTools.register({
+      ...definition,
+      approval: { policy: 'required', reason: 'x'.repeat(1_025) },
+    })).toThrow('approval reason must contain 1-1024 characters')
+    expect(() => context.doppelgangerTools.register({
+      ...definition,
+      approval: { policy: 'optional', reason: 'Review' } as never,
+    })).toThrow('approval policy must be "required"')
+    expect(() => context.doppelgangerTools.register({
+      ...definition,
+      approval: { policy: 'required', reason: 'Review', feature: 'persona' } as never,
+    })).toThrow('approval contains unsupported fields')
     await context.fiber.dispose()
   })
 

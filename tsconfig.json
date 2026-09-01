@@ -13,6 +13,7 @@
     "noUnusedParameters": true,
     "verbatimModuleSyntax": true,
     "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
     "rewriteRelativeImportExtensions": true,
     "declaration": true,
     "declarationMap": true,

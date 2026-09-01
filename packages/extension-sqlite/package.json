@@ -1,5 +1,5 @@
 {
-  "name": "@doppelganger/extension-sqlite",
+  "name": "@doppelganger/doppelganger-sqlite",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -18,7 +18,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@types/node": "24.13.3",
+    "@types/node": "26.4.0",
     "typescript": "6.0.3",
     "vitest": "4.1.11"
   }

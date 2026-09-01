@@ -1,0 +1,31 @@
+{
+  "name": "@doppelganger/doppelganger-embedding-local",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "benchmark:profiles": "node --experimental-strip-types tests/embedding-profile-benchmark.ts"
+  },
+  "dependencies": {
+    "@doppelganger/doppelganger-memory": "0.0.0",
+    "@deepseek-ai/schemastery": "3.18.1",
+    "@huggingface/transformers": "4.2.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@types/node": "26.4.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

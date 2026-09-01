@@ -5,14 +5,15 @@ import {
   FramedJsonRpcPeer,
   RpcProtocolError,
   encodeRpcMessage,
-} from '../src/index.ts'
+  type FramedJsonRpcPeerOptions,
+} from '../src/protocol.ts'
 
-function connectedPeers() {
+function connectedPeers(rightOptions: FramedJsonRpcPeerOptions = {}) {
   const leftToRight = new PassThrough()
   const rightToLeft = new PassThrough()
   return {
     left: new FramedJsonRpcPeer(rightToLeft, leftToRight),
-    right: new FramedJsonRpcPeer(leftToRight, rightToLeft),
+    right: new FramedJsonRpcPeer(leftToRight, rightToLeft, rightOptions),
   }
 }
 
@@ -64,6 +65,56 @@ describe('Content-Length JSON-RPC transport', () => {
       message: 'remote exploded',
     })
     await expect(left.request('sum', { left: 7, right: 4 })).resolves.toBe(11)
+
+    left.close()
+    right.close()
+  })
+
+  it('contains rejecting notification observers and preserves later traffic', async () => {
+    const diagnostics: unknown[] = []
+    const { left, right } = connectedPeers({
+      onNotificationObserverError(diagnostic) {
+        diagnostics.push(diagnostic)
+        throw new Error('diagnostic sink failed')
+      },
+    })
+    right.expose('sum', params => {
+      const values = params as { left: number; right: number }
+      return values.left + values.right
+    })
+    const observed: unknown[] = []
+    right.onNotification('observe', () => { throw new Error('observer failed with sensitive detail') })
+    right.onNotification('observe', params => { observed.push(params) })
+
+    left.notify('observe', { cycle: 1 })
+    await new Promise(resolve => setImmediate(resolve))
+    expect(observed).toEqual([{ cycle: 1 }])
+    expect(diagnostics).toEqual([{
+      method: 'observe',
+      message: 'observer failed with sensitive detail',
+    }])
+    await expect(left.request('sum', { left: 4, right: 5 })).resolves.toBe(9)
+    left.notify('observe', { cycle: 2 })
+    await new Promise(resolve => setImmediate(resolve))
+    expect(observed).toEqual([{ cycle: 1 }, { cycle: 2 }])
+    expect(diagnostics).toHaveLength(2)
+
+    left.close()
+    right.close()
+  })
+
+  it('bounds notification observer diagnostics', async () => {
+    const { promise, resolve } = Promise.withResolvers<{ method: string; message: string }>()
+    const { left, right } = connectedPeers({ onNotificationObserverError: resolve })
+    const method = 'm'.repeat(300)
+    right.onNotification(method, () => { throw new Error('x'.repeat(3000)) })
+
+    left.notify(method)
+    const diagnostic = await promise
+    expect(diagnostic.method).toHaveLength(256)
+    expect(diagnostic.method.endsWith('…')).toBe(true)
+    expect(diagnostic.message).toHaveLength(2048)
+    expect(diagnostic.message.endsWith('…')).toBe(true)
 
     left.close()
     right.close()

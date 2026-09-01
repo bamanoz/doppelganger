@@ -1,12 +1,15 @@
+import { createHash } from 'node:crypto'
 import { resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { Context, type Fiber, type Plugin } from '@deepseek-ai/cordis'
+import { Context, Inject, type Fiber, type Plugin } from '@deepseek-ai/cordis'
 import Group from '@deepseek-ai/cordis-plugin-group'
 import Hmr from '@deepseek-ai/cordis-plugin-hmr'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
-import Loader, { type Entry, type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
+import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
+import Loader, { type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import Timer from '@deepseek-ai/cordis-plugin-timer'
+import { loadRuntimePresetEntries } from '@doppelganger/doppelganger-runtime-presets'
 import {
   CompositionActivationError,
   activationFailures,
@@ -14,11 +17,20 @@ import {
   inspectCompositionTree,
   type CompositionDiagnostics,
 } from './activation-audit.ts'
-import { mountImportName, type CompositionDefinition } from './definition.ts'
+import type { CompositionDefinition } from './definition.ts'
+import {
+  composeCompositionEntries,
+  defineCompositionPatchLayer,
+  flattenCompositionPatches,
+  loadCompositionPatchFile,
+  type CompositionPatchLayer,
+} from './patches.ts'
+import { createRuntimeSessionMetadataPlugin } from './session-metadata.ts'
 
-const RESERVED_BUILTINS: Readonly<Record<string, true>> = { include: true, group: true }
 const runtimeOwnerPlugin: Plugin = { name: 'doppelganger-composition-runtime-owner', apply: () => undefined }
 const sessionOwnerPlugin: Plugin = { name: 'doppelganger-composition-session-owner', apply: () => undefined }
+const RUNTIME_METADATA_IMPORT = 'doppelganger-runtime-session'
+const RUNTIME_METADATA_ENTRY = 'doppelganger-runtime-session-metadata'
 let nextSessionNamespace = 0
 
 export interface CompositionWatchOptions {
@@ -34,16 +46,20 @@ export interface CompositionReloadEvent {
   readonly diagnostics: CompositionDiagnostics
 }
 
+export type CompositionReloadFailureEvent = CompositionReloadEvent
+
 export interface CompositionRuntimeOptions {
   readonly context?: Context
   readonly watch?: false | CompositionWatchOptions
   readonly onReload?: (event: CompositionReloadEvent) => void
+  readonly onReloadFailure?: (event: CompositionReloadFailureEvent) => void
 }
-
 export interface CompositionActivation {
   readonly composition: CompositionDefinition
   readonly sessionId: string
-  readonly mounts?: Readonly<Record<string, Plugin>>
+  readonly workspaceRoot?: string
+  readonly runtimePlugins?: Readonly<Record<string, Plugin>>
+  readonly runtimePluginIsolation?: Readonly<Record<string, readonly string[]>>
 }
 
 export interface CompositionSession {
@@ -56,46 +72,134 @@ export interface CompositionRuntime {
   dispose(): Promise<void>
 }
 
+interface CompositionGeneration {
+  readonly base: readonly EntryOptions[]
+  readonly layers: readonly CompositionPatchLayer[]
+  readonly patches: readonly PatchOptions[]
+  readonly effective: readonly EntryOptions[]
+  readonly revision: string
+}
+
 async function disposeFiber(fiber: Fiber): Promise<void> {
   await fiber.dispose()
   while (fiber.inertia !== undefined) await fiber.inertia
 }
 
-function validateActivation(request: CompositionActivation): Readonly<Record<string, Plugin>> {
-  if (request.sessionId.trim().length === 0) throw new TypeError('activation.sessionId must be a non-empty string')
-  const supplied = request.mounts ?? {}
-  for (const name of Object.keys(supplied)) {
-    if (request.composition.mounts[name] === undefined) {
-      throw new TypeError(`activation mount "${name}" is not declared by composition ${request.composition.id}`)
-    }
+function collectCleanupFailure(failures: unknown[], seen: Set<unknown>, error: unknown): void {
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) collectCleanupFailure(failures, seen, nested)
+    return
   }
-  for (const [name, point] of Object.entries(request.composition.mounts)) {
-    if (point.required && supplied[name] === undefined) {
-      throw new TypeError(`activation mount "${name}" is required by composition ${request.composition.id}`)
-    }
-  }
-  for (const [name, plugin] of Object.entries(supplied)) {
-    if (plugin === null || (typeof plugin !== 'object' && typeof plugin !== 'function')) {
-      throw new TypeError(`activation.mounts.${name} must be a Cordis plugin`)
-    }
-  }
-  return supplied
+  if (seen.has(error)) return
+  seen.add(error)
+  failures.push(error)
 }
 
-function mountPatches(
-  composition: CompositionDefinition,
-  mounts: Readonly<Record<string, Plugin>>,
-): PatchOptions[] {
-  const patches: PatchOptions[] = []
-  for (const [name, point] of Object.entries(composition.mounts)) {
-    if (mounts[name] === undefined) continue
-    const entry: EntryOptions = {
-      id: `doppelganger-mount-${name}`,
-      name: `cordis:${mountImportName(name)}`,
+async function settleCleanup(stages: readonly (() => Promise<void>)[], message: string): Promise<void> {
+  const failures: unknown[] = []
+  const seen = new Set<unknown>()
+  for (const stage of stages) {
+    try {
+      await stage()
+    } catch (error) {
+      collectCleanupFailure(failures, seen, error)
     }
-    patches.push(point.target === undefined ? { insert: [entry] } : { id: point.target, insert: [entry] })
   }
-  return patches
+  if (failures.length > 0) throw new AggregateError(failures, message)
+}
+
+function validRuntimePlugins(input: Readonly<Record<string, Plugin>> | undefined): Readonly<Record<string, Plugin>> {
+  const result: Record<string, Plugin> = Object.create(null)
+  for (const [name, plugin] of Object.entries(input ?? {})) {
+    if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(name)) {
+      throw new TypeError(`activation.runtimePlugins.${name} must use a lowercase kebab-case name`)
+    }
+    if (name === 'session' || name === 'session-metadata') {
+      throw new TypeError(`activation.runtimePlugins.${name} is reserved by the runtime`)
+    }
+    if (plugin === null || (typeof plugin !== 'object' && typeof plugin !== 'function')) {
+      throw new TypeError(`activation.runtimePlugins.${name} must be a Cordis plugin`)
+    }
+    result[name] = plugin
+  }
+  return Object.freeze(result)
+}
+function validRuntimePluginIsolation(
+  plugins: Readonly<Record<string, Plugin>>,
+  input: Readonly<Record<string, readonly string[]>> | undefined,
+): Readonly<Record<string, readonly string[]>> {
+  const result: Record<string, readonly string[]> = Object.create(null)
+  for (const [name, services] of Object.entries(input ?? {})) {
+    if (plugins[name] === undefined) throw new TypeError(`activation.runtimePluginIsolation.${name} has no runtime plugin`)
+    const unique = new Set<string>()
+    for (const service of services) {
+      if (typeof service !== 'string' || service.trim().length === 0 || service !== service.trim()) {
+        throw new TypeError(`activation.runtimePluginIsolation.${name} contains an invalid service name`)
+      }
+      unique.add(service)
+    }
+    result[name] = Object.freeze([...unique])
+  }
+  return Object.freeze(result)
+}
+
+function runtimeLayer(
+  runtimePlugins: Readonly<Record<string, Plugin>>,
+  runtimePluginIsolation: Readonly<Record<string, readonly string[]>>,
+): CompositionPatchLayer {
+  const insert: EntryOptions[] = [{
+    id: RUNTIME_METADATA_ENTRY,
+    name: `cordis:${RUNTIME_METADATA_IMPORT}`,
+    isolate: { doppelgangerRuntimeSession: 'session' },
+  }]
+  for (const name of Object.keys(runtimePlugins).sort()) {
+    const plugin = runtimePlugins[name]!
+    const services = new Set([
+      ...Object.keys(Inject.resolve(plugin.inject)),
+      ...(runtimePluginIsolation[name] ?? []),
+    ])
+    const isolate = Object.fromEntries([...services].map(service => [service, 'session']))
+    insert.push({
+      id: `doppelganger-runtime-${name}`,
+      name: `cordis:doppelganger-runtime-${name}`,
+      ...(Object.keys(isolate).length === 0 ? {} : { isolate }),
+    })
+  }
+  return Object.freeze({
+    source: 'runtime-owned plugins',
+    baseUrl: process.cwd(),
+    patches: Object.freeze([{ insert }]),
+  })
+}
+
+function generationRevision(entries: readonly EntryOptions[]): string {
+  return createHash('sha256').update(JSON.stringify(entries)).digest('hex')
+}
+
+async function loadGeneration(
+  composition: CompositionDefinition,
+  trustedRuntimeLayer: CompositionPatchLayer,
+): Promise<CompositionGeneration> {
+  const base = await loadRuntimePresetEntries(composition.loaderPath)
+  const layers: CompositionPatchLayer[] = []
+  for (const input of composition.patches) {
+    if ('filename' in input) {
+      const loaded = await loadCompositionPatchFile(input)
+      if (loaded !== undefined) layers.push(loaded)
+    } else {
+      layers.push(defineCompositionPatchLayer(input))
+    }
+  }
+  layers.push(trustedRuntimeLayer)
+  const patches = flattenCompositionPatches(base, layers)
+  const effective = composeCompositionEntries(base, layers)
+  return Object.freeze({
+    base,
+    layers: Object.freeze(layers),
+    patches: Object.freeze(patches),
+    effective: Object.freeze(effective),
+    revision: generationRevision(effective),
+  })
 }
 
 interface SessionTreeMount {
@@ -104,15 +208,16 @@ interface SessionTreeMount {
 }
 
 function sessionTree(
-  composition: CompositionDefinition,
-  mounts: Readonly<Record<string, Plugin>>,
+  metadataPlugin: Plugin,
+  runtimePlugins: Readonly<Record<string, Plugin>>,
 ): SessionTreeMount {
-  const builtins: Record<string, Plugin> = { group: Group }
-  for (const [name, plugin] of Object.entries(composition.imports)) {
-    if (RESERVED_BUILTINS[name] === true) throw new Error(`composition import "${name}" is reserved by the runtime`)
-    builtins[name] = plugin
+  const builtins: Record<string, Plugin> = {
+    group: Group,
+    [RUNTIME_METADATA_IMPORT]: metadataPlugin,
   }
-  for (const [name, plugin] of Object.entries(mounts)) builtins[mountImportName(name)] = plugin
+  for (const [name, plugin] of Object.entries(runtimePlugins)) {
+    builtins[`doppelganger-runtime-${name}`] = plugin
+  }
 
   const namespace = `doppelganger-composition-session-${nextSessionNamespace += 1}:`
   const trees: Include[] = []
@@ -144,7 +249,10 @@ function sessionTree(
         const builtin = builtins[name.slice('cordis:'.length)]
         if (builtin !== undefined) return builtin
       }
-      return super.import(name, getOuterStack)
+      if (name.startsWith('.') || name.startsWith('/') || /^[a-z][a-z0-9+.-]*:/iu.test(name)) {
+        return super.import(name, getOuterStack)
+      }
+      return super.import(import.meta.resolve(name), getOuterStack)
     }
 
     override write(): void {
@@ -154,26 +262,19 @@ function sessionTree(
   return { plugin: SessionTree, trees }
 }
 
+function generationDefinition(
+  composition: CompositionDefinition,
+  revision: string,
+): CompositionDefinition {
+  return Object.freeze({ ...composition, revision })
+}
+
 async function auditComposition(
   composition: CompositionDefinition,
+  revision: string,
   tree: Include,
-  mounts: Readonly<Record<string, Plugin>>,
 ): Promise<CompositionDiagnostics> {
-  const diagnostics = await inspectCompositionTree(composition, tree)
-  const ids = new Set([...tree.entries()].map(entry => entry.id))
-  const missing = Object.keys(mounts)
-    .filter(name => !ids.has(`doppelganger-mount-${name}`))
-    .map(name => Object.freeze({
-      id: `doppelganger-mount-${name}`,
-      plugin: `activation.mounts.${name}`,
-      state: 'missing' as const,
-      error: `declared mount target did not accept mount "${name}"`,
-    }))
-  if (missing.length === 0) return diagnostics
-  return Object.freeze({
-    ...diagnostics,
-    entries: Object.freeze([...diagnostics.entries, ...missing]),
-  })
+  return inspectCompositionTree(generationDefinition(composition, revision), tree)
 }
 
 export function createCompositionRuntime(options: CompositionRuntimeOptions = {}): CompositionRuntime {
@@ -194,46 +295,59 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
       ignored: [...(watch.ignored ?? ['**/node_modules', '**/.*', 'cache', 'data'])],
     })
   })()
-  const definitionWatches = new Map<string, Promise<{
+  const inputWatches = new Map<string, Promise<{
     sessions: Set<CompositionSession & { refresh(): Promise<void> }>
     dispose: () => Promise<void>
   }>>()
+  const watchSettleMs = options.watch === false ? 0 : Math.max(0, options.watch?.debounce ?? 100)
   const sessions = new Set<CompositionSession>()
   let disposed = false
   let runtimeDisposal: Promise<void> | undefined
 
   return {
     async activate(request) {
-      if (disposed) throw new Error('composition runtime is disposed')
-      const mounts = validateActivation(request)
+      if (request.sessionId.trim().length === 0) throw new TypeError('activation.sessionId must be a non-empty string')
+      const runtimePlugins = validRuntimePlugins(request.runtimePlugins)
+      const runtimePluginIsolation = validRuntimePluginIsolation(runtimePlugins, request.runtimePluginIsolation)
+      const trustedRuntimeLayer = runtimeLayer(runtimePlugins, runtimePluginIsolation)
+      const metadataPlugin = createRuntimeSessionMetadataPlugin({
+        sessionId: request.sessionId,
+        runtimePresetId: request.composition.id,
+        ...(request.workspaceRoot === undefined ? {} : { workspaceRoot: request.workspaceRoot }),
+      })
       await ready
       if (disposed) throw new Error('composition runtime is disposed')
 
       const sessionOwner = owner.ctx.plugin(sessionOwnerPlugin)
       await sessionOwner.await()
       let mounted: SessionTreeMount | undefined
+      let generation: CompositionGeneration | undefined
       let initialDiagnostics: CompositionDiagnostics | undefined
       try {
-        mounted = sessionTree(request.composition, mounts)
+        generation = await loadGeneration(request.composition, trustedRuntimeLayer)
+        mounted = sessionTree(metadataPlugin, runtimePlugins)
         await sessionOwner.ctx.plugin(mounted.plugin, {
           path: pathToFileURL(request.composition.loaderPath).href,
-          patches: mountPatches(request.composition, mounts),
+          patches: [...generation.patches],
         })
         const tree = mounted.trees[0]
         if (tree === undefined) throw new Error('composition tree did not mount')
         await tree.await()
-        initialDiagnostics = await auditComposition(request.composition, tree, mounts)
+        initialDiagnostics = await auditComposition(request.composition, generation.revision, tree)
         if (activationFailures(initialDiagnostics).length > 0) throw new CompositionActivationError(initialDiagnostics)
       } catch (error) {
         let failure = error
         if (!(failure instanceof CompositionActivationError)) {
           const tree = mounted?.trees[0]
-          const inspected = tree === undefined
+          const inspected = tree === undefined || generation === undefined
             ? undefined
-            : await auditComposition(request.composition, tree, mounts)
+            : await auditComposition(request.composition, generation.revision, tree)
           const diagnostics = inspected !== undefined && activationFailures(inspected).length > 0
             ? inspected
-            : failedCompositionDiagnostics(request.composition, error)
+            : failedCompositionDiagnostics(
+                generationDefinition(request.composition, generation?.revision ?? request.composition.revision),
+                error,
+              )
           failure = new CompositionActivationError(diagnostics, error)
         }
         await disposeFiber(sessionOwner)
@@ -241,10 +355,11 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
       }
 
       const tree = mounted.trees[0]
-      if (tree === undefined || initialDiagnostics === undefined) {
+      if (tree === undefined || generation === undefined || initialDiagnostics === undefined) {
         await disposeFiber(sessionOwner)
         throw new Error('composition activation completed without an audited tree')
       }
+      let currentGeneration = generation
       let diagnostics = initialDiagnostics
       let mutation = Promise.resolve()
       let disposing = false
@@ -254,20 +369,24 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
       const refresh = () => {
         const task = mutation.then(async () => {
           if (disposing) return
+          const previousGeneration = currentGeneration
           const previousDiagnostics = diagnostics
-          const previousConfig = structuredClone(tree.root.data)
-          let applied = false
           try {
-            await tree.refresh()
-            applied = true
+            const nextGeneration = await loadGeneration(request.composition, trustedRuntimeLayer)
+            if (nextGeneration.revision === previousGeneration.revision) return
+            await tree.root.update(structuredClone(nextGeneration.effective) as EntryOptions[])
             await tree.await()
-            const nextDiagnostics = await auditComposition(request.composition, tree, mounts)
+            const nextDiagnostics = await auditComposition(request.composition, nextGeneration.revision, tree)
             if (activationFailures(nextDiagnostics).length > 0) throw new CompositionActivationError(nextDiagnostics)
+            currentGeneration = nextGeneration
             diagnostics = nextDiagnostics
+            if (watchSettleMs > 0) {
+              await new Promise<void>(resolve => setTimeout(resolve, watchSettleMs))
+            }
             try {
               options.onReload?.(Object.freeze({
                 compositionId: request.composition.id,
-                compositionRevision: request.composition.revision,
+                compositionRevision: currentGeneration.revision,
                 diagnostics,
               }))
             } catch {
@@ -275,17 +394,16 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
             }
           } catch (error) {
             let failure = error
-            if (applied && error instanceof CompositionActivationError) {
-              try {
-                await tree.root.update(previousConfig)
-                await tree.await()
-              } catch (rollbackError) {
-                failure = new AggregateError(
-                  [error, rollbackError],
-                  `failed to roll back composition ${request.composition.id}`,
-                )
-              }
+            try {
+              await tree.root.update(structuredClone(previousGeneration.effective) as EntryOptions[])
+              await tree.await()
+            } catch (rollbackError) {
+              failure = new AggregateError(
+                [error, rollbackError],
+                `failed to roll back composition ${request.composition.id}`,
+              )
             }
+            currentGeneration = previousGeneration
             diagnostics = Object.freeze({
               ...previousDiagnostics,
               reload: Object.freeze({
@@ -293,6 +411,18 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
                 error: failure instanceof Error ? failure.stack ?? failure.message : String(failure),
               }),
             })
+            if (watchSettleMs > 0) {
+              await new Promise<void>(resolve => setTimeout(resolve, watchSettleMs))
+            }
+            try {
+              options.onReloadFailure?.(Object.freeze({
+                compositionId: request.composition.id,
+                compositionRevision: currentGeneration.revision,
+                diagnostics,
+              }))
+            } catch {
+              // Failure observers cannot invalidate the restored Loader generation.
+            }
             throw failure
           }
         })
@@ -300,16 +430,20 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
         return task
       }
 
-      const removeDefinitionWatch = async () => {
-        const registrationTask = definitionWatches.get(request.composition.loaderPath)
-        if (registrationTask === undefined) return
-        const registration = await registrationTask
-        registration.sessions.delete(session)
-        if (registration.sessions.size > 0) return
-        if (definitionWatches.get(request.composition.loaderPath) === registrationTask) {
-          definitionWatches.delete(request.composition.loaderPath)
+      const watchedPaths = [
+        request.composition.loaderPath,
+        ...request.composition.patches.flatMap(input => 'filename' in input ? [input.filename] : []),
+      ]
+      const removeInputWatches = async () => {
+        for (const filename of watchedPaths) {
+          const registrationTask = inputWatches.get(filename)
+          if (registrationTask === undefined) continue
+          const registration = await registrationTask
+          registration.sessions.delete(session)
+          if (registration.sessions.size > 0) continue
+          if (inputWatches.get(filename) === registrationTask) inputWatches.delete(filename)
+          await registration.dispose()
         }
-        await registration.dispose()
       }
 
       session = {
@@ -317,35 +451,39 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
         refresh,
         dispose: () => (sessionDisposal ??= (async () => {
           disposing = true
-          await mutation
-          await removeDefinitionWatch()
-          await disposeFiber(sessionOwner)
-          sessions.delete(session)
+          try {
+            await settleCleanup([
+              () => mutation,
+              removeInputWatches,
+              () => disposeFiber(sessionOwner),
+            ], `failed to dispose composition session ${request.sessionId}`)
+          } finally {
+            sessions.delete(session)
+          }
         })()),
       }
       sessions.add(session)
 
       if (options.watch !== false) {
-        let registrationTask = definitionWatches.get(request.composition.loaderPath)
-        if (registrationTask === undefined) {
-          const watchedSessions = new Set<CompositionSession & { refresh(): Promise<void> }>()
-          const hmr = owner.ctx.get('hmr') as Hmr | undefined
-          if (hmr !== undefined) {
-            registrationTask = hmr.registerConfig(request.composition.loaderPath, async () => {
-              await Promise.all([...watchedSessions].map(watched => watched.refresh()))
-            }).then(dispose => ({ sessions: watchedSessions, dispose }))
-            definitionWatches.set(request.composition.loaderPath, registrationTask)
-          }
-        }
-        if (registrationTask !== undefined) {
+        const hmr = owner.ctx.get('hmr') as Hmr | undefined
+        if (hmr !== undefined) {
           try {
-            const registration = await registrationTask
-            registration.sessions.add(session)
-          } catch (error) {
-            if (definitionWatches.get(request.composition.loaderPath) === registrationTask) {
-              definitionWatches.delete(request.composition.loaderPath)
+            for (const filename of watchedPaths) {
+              let registrationTask = inputWatches.get(filename)
+              if (registrationTask === undefined) {
+                const watchedSessions = new Set<CompositionSession & { refresh(): Promise<void> }>()
+                registrationTask = hmr.registerConfig(filename, async () => {
+                  await Promise.all([...watchedSessions].map(watched => watched.refresh()))
+                }).then(dispose => ({ sessions: watchedSessions, dispose }))
+                inputWatches.set(filename, registrationTask)
+              }
+              const registration = await registrationTask
+              registration.sessions.add(session)
             }
+          } catch (error) {
+            await removeInputWatches()
             await disposeFiber(sessionOwner)
+            sessions.delete(session)
             throw error
           }
         }
@@ -355,11 +493,11 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
     dispose() {
       if (runtimeDisposal !== undefined) return runtimeDisposal
       disposed = true
-      runtimeDisposal = (async () => {
-        await Promise.all([...sessions].map(session => session.dispose()))
-        await disposeFiber(owner)
-        if (ownsRoot) await context.fiber.dispose()
-      })()
+      runtimeDisposal = settleCleanup([
+        ...[...sessions].map(session => () => session.dispose()),
+        () => disposeFiber(owner),
+        ...(ownsRoot ? [() => context.fiber.dispose()] : []),
+      ], 'failed to dispose composition runtime')
       return runtimeDisposal
     },
   }

@@ -1,6 +1,0 @@
-version: 1
-id: aiden
-definition: ../../../../packages/preset-aiden/definition/persona.yaml
-settings:
-  memoryCapture:
-    enabled: false

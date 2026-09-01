@@ -1,0 +1,48 @@
+{
+  "capturedAt": "2026-08-30",
+  "commands": [
+    "npm audit --omit=dev --json",
+    "npm audit fix --dry-run --omit=dev --json",
+    "npm outdated --omit=dev --json",
+    "npm ls --omit=dev @huggingface/transformers onnxruntime-node adm-zip sharp --all --json",
+    "npm view @huggingface/transformers@latest version dependencies optionalDependencies peerDependencies engines --json",
+    "npm view onnxruntime-node@latest version engines --json",
+    "npm view adm-zip@latest version engines --json",
+    "npm view sharp@latest version engines --json"
+  ],
+  "audit": {
+    "total": 4,
+    "high": 4,
+    "fixAvailable": false,
+    "packages": [
+      "@huggingface/transformers",
+      "adm-zip",
+      "onnxruntime-node",
+      "sharp"
+    ]
+  },
+  "installedPath": {
+    "@huggingface/transformers": "4.2.0",
+    "onnxruntime-node": "1.24.3",
+    "adm-zip": "0.5.18",
+    "sharp": "0.34.5"
+  },
+  "registry": {
+    "@huggingface/transformers": {
+      "latest": "4.2.0",
+      "onnxruntime-node": "1.24.3",
+      "sharp": "^0.34.5"
+    },
+    "onnxruntime-node": {
+      "latest": "1.29.0",
+      "adm-zip": "^0.6.0"
+    },
+    "adm-zip": {
+      "latest": "0.6.0"
+    },
+    "sharp": {
+      "latest": "0.35.4"
+    }
+  },
+  "conclusion": "No compatible registry upgrade exists through the latest @huggingface/transformers release. npm audit reports fixAvailable=false for the complete installed production chain, and npm audit fix --dry-run proposes no production dependency change. The pinned chain is retained under the explicit trusted-artifact restriction."
+}

@@ -3,8 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createPersonaActivationPlugin } from '@doppelganger/extension-persona'
-import { InstanceSqliteService } from '@doppelganger/extension-sqlite'
+import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
+import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
+import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
 import { MemoryError, MemoryService } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
@@ -14,7 +15,7 @@ afterEach(async () => {
 })
 
 interface SessionOptions {
-  readonly principalId?: string
+  readonly actorId?: string
   readonly sessionId?: string
   readonly projectId?: string | null
   readonly now?: () => Date
@@ -26,15 +27,13 @@ async function session(instanceHome: string, options: SessionOptions = {}) {
   const projectId = options.projectId === undefined ? 'project-one' : options.projectId
   await context.plugin(createPersonaActivationPlugin({
     instanceId: 'aiden',
-    principalId: options.principalId ?? 'local-user',
     sessionId: options.sessionId ?? 'session-one',
     ...(projectId === null ? {} : {
       projectId,
       projectRoot: join(instanceHome, projectId),
     }),
-    instanceHome,
-    definitionRoot: instanceHome,
   }))
+  await context.plugin(createActorIdentityPlugin(options.actorId ?? 'local-user'))
   await context.plugin(InstanceSqliteService, { home: instanceHome })
   await context.plugin(MemoryService, {
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -48,6 +47,32 @@ async function root(): Promise<string> {
   temporaryRoots.push(instanceHome)
   return instanceHome
 }
+
+  it('rejects an unbound actor before opening canonical storage', async () => {
+    const context = new Context()
+    let opens = 0
+    await context.plugin(createPersonaActivationPlugin({
+      instanceId: 'aiden', sessionId: 'unbound-session',
+    }))
+    await context.plugin(createActorIdentityPlugin())
+    await context.plugin({
+      name: 'sqlite-open-probe',
+      apply(ctx) {
+        ctx.provide('doppelgangerInstanceSqlite', {
+          open() {
+            opens += 1
+            throw new Error('storage must not open for an unbound actor')
+          },
+        } as never)
+      },
+    })
+
+    const memory = context.plugin(MemoryService)
+    await expect(memory.await()).rejects.toThrow('memory requires a bound host actor')
+    expect(opens).toBe(0)
+    await context.fiber.dispose()
+  })
+
 
 describe('memory mutations', () => {
   it('preserves immutable correction history and deep hard deletion', async () => {
@@ -63,7 +88,7 @@ describe('memory mutations', () => {
     expect(remembered).toMatchObject({
       id: 'id-1',
       instanceId: 'aiden',
-      principalId: 'local-user',
+      actorId: 'local-user',
       subjectKey: 'project.loader.strategy',
       scope: { kind: 'project', projectId: 'project-one' },
       status: 'active',
@@ -143,47 +168,47 @@ describe('memory mutations', () => {
     await second.fiber.dispose()
   })
 
-  it('isolates principals and projects before direct lookup or mutation', async () => {
+  it('isolates actors and projects before direct lookup or mutation', async () => {
     const instanceHome = await root()
-    const principalOne = await session(instanceHome, { principalId: 'one', sessionId: 'one-a', projectId: 'alpha' })
-    const relationship = principalOne.doppelgangerMemory.remember({
+    const actorOne = await session(instanceHome, { actorId: 'one', sessionId: 'one-a', projectId: 'alpha' })
+    const relationship = actorOne.doppelgangerMemory.remember({
       operationId: 'one-relationship',
       subjectKey: 'preference.response.format',
       kind: 'preference',
       content: 'Use tables for comparisons.',
       scope: 'relationship',
     })
-    const project = principalOne.doppelgangerMemory.remember({
+    const project = actorOne.doppelgangerMemory.remember({
       operationId: 'one-project',
       subjectKey: 'project.database.engine',
       kind: 'decision',
       content: 'Project Alpha uses SQLite.',
     })
-    principalOne.doppelgangerMemory.propose({
+    actorOne.doppelgangerMemory.propose({
       operationId: 'one-candidate',
       subjectKey: 'project.candidate',
       kind: 'fact',
-      content: 'Principal one candidate.',
+      content: 'Actor one candidate.',
     })
-    await principalOne.fiber.dispose()
+    await actorOne.fiber.dispose()
 
-    const otherProject = await session(instanceHome, { principalId: 'one', sessionId: 'one-b', projectId: 'beta' })
+    const otherProject = await session(instanceHome, { actorId: 'one', sessionId: 'one-b', projectId: 'beta' })
     expect(otherProject.doppelgangerMemory.get(relationship.id)?.id).toBe(relationship.id)
     expect(otherProject.doppelgangerMemory.get(project.id)).toBeUndefined()
     await otherProject.fiber.dispose()
 
-    const principalTwo = await session(instanceHome, { principalId: 'two', sessionId: 'two-a', projectId: 'alpha' })
-    expect(principalTwo.doppelgangerMemory.get(relationship.id)).toBeUndefined()
-    expect(principalTwo.doppelgangerMemory.get(project.id)).toBeUndefined()
-    expect(principalTwo.doppelgangerMemory.listCandidates()).toEqual([])
-    expect(() => principalTwo.doppelgangerMemory.history(relationship.id)).toThrow('active partition')
+    const actorTwo = await session(instanceHome, { actorId: 'two', sessionId: 'two-a', projectId: 'alpha' })
+    expect(actorTwo.doppelgangerMemory.get(relationship.id)).toBeUndefined()
+    expect(actorTwo.doppelgangerMemory.get(project.id)).toBeUndefined()
+    expect(actorTwo.doppelgangerMemory.listCandidates()).toEqual([])
+    expect(() => actorTwo.doppelgangerMemory.history(relationship.id)).toThrow('active partition')
     try {
-      principalTwo.doppelgangerMemory.pin({ operationId: 'cross-principal-pin', id: relationship.id, pinned: true })
-      expect.unreachable('cross-principal pin committed')
+      actorTwo.doppelgangerMemory.pin({ operationId: 'cross-actor-pin', id: relationship.id, pinned: true })
+      expect.unreachable('cross-actor pin committed')
     } catch (error) {
       expect((error as MemoryError).code).toBe('NOT_FOUND')
     }
-    await principalTwo.fiber.dispose()
+    await actorTwo.fiber.dispose()
   })
 
   it('falls back to relationship scope when no project is active', async () => {
@@ -284,7 +309,8 @@ describe('memory mutations', () => {
       relation: 'support',
       excerpt: 'x'.repeat(2_000),
     })
-    expect(context.doppelgangerMemory.evidence(record.id).at(-1)?.excerpt).toHaveLength(1_000)
+    expect(context.doppelgangerMemory.evidence(record.id)
+      .find(evidence => evidence.sourceTurnId === 'long-turn')?.excerpt).toHaveLength(1_000)
     const count = context.doppelgangerMemory.evidence(record.id).length
     try {
       context.doppelgangerMemory.observe({

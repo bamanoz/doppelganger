@@ -1,50 +1,249 @@
 import { mkdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fromJsonSchema } from '@oh-my-pi/omptype/from-json-schema'
 import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
-import type { SerializedCompositionActivation } from '@doppelganger/composition-runtime'
+import type { CompositionPatchInput } from '@doppelganger/doppelganger-composition-runtime'
+import {
+  createRuntimePresetRoster,
+  type RuntimePresetRosterConfig,
+} from '@doppelganger/doppelganger-runtime-presets'
 import {
   LIFECYCLE_PROTOCOL_VERSION,
+  createActorIdentity,
   serializeLifecycleValue,
   type JsonValue,
+  type LifecycleError,
   type LifecycleEvent,
   type ToolDescriptor,
-  type CommittedToolOutcome,
-} from '@doppelganger/extension-protocols'
-import { OmpAdapterSession, discoverProjectManifest, type OmpChildFactory } from './adapter.ts'
+} from '@doppelganger/doppelganger-protocols'
+import { OmpAdapterSession, discoverOmpProject, type OmpChildFactory } from './adapter.ts'
+import { defineSerializedOmpActivation, type SerializedOmpActivation } from './contracts.ts'
 import { NodeOmpChildFactory } from './process.ts'
 
 const INITIALIZE_TOOL = 'doppelganger_initialize'
 const PROXY_PREFIX = 'doppelganger_'
 
+const SUPPORTED_SCHEMA_KEYWORDS = new Set([
+  '$comment', '$defs', '$id', '$ref', '$schema',
+  'additionalProperties', 'allOf', 'anyOf', 'const', 'default', 'definitions',
+  'deprecated', 'description', 'enum', 'examples', 'exclusiveMaximum',
+  'exclusiveMinimum', 'format', 'items', 'maximum', 'maxItems', 'maxLength',
+  'minimum', 'minItems', 'minLength', 'multipleOf', 'not', 'oneOf', 'pattern',
+  'prefixItems', 'properties', 'readOnly', 'required', 'title', 'type', 'writeOnly',
+])
+const SUPPORTED_SCHEMA_TYPES = new Set(['array', 'boolean', 'integer', 'null', 'number', 'object', 'string'])
+const SUPPORTED_STRING_FORMATS = new Set([
+  'date', 'date-time', 'email', 'ipv4', 'ipv6', 'regex', 'uri', 'url', 'uuid',
+])
+
+function schemaObject(value: unknown, path: string): Record<string, unknown> {
+  if (value === null || Array.isArray(value) || typeof value !== 'object') {
+    throw new TypeError(`${path} must be a JSON Schema object`)
+  }
+  return value as Record<string, unknown>
+}
+
+function schemaArray(value: unknown, path: string, allowEmpty = false): readonly unknown[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
+    throw new TypeError(`${path} must be ${allowEmpty ? 'an array' : 'a non-empty array'}`)
+  }
+  return value
+}
+
+function nonNegativeInteger(value: unknown, path: string): void {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new TypeError(`${path} must be a non-negative safe integer`)
+  }
+}
+
+function finiteNumber(value: unknown, path: string): void {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new TypeError(`${path} must be a finite number`)
+}
+
+function validateToolJsonSchema(schema: unknown, path = '$'): void {
+  if (typeof schema === 'boolean') return
+  const node = schemaObject(schema, path)
+  for (const key of Object.keys(node)) {
+    if (!SUPPORTED_SCHEMA_KEYWORDS.has(key)) {
+      throw new TypeError(`${path}.${key} is not supported by the OMP JSON Schema translator`)
+    }
+  }
+
+  if ('oneOf' in node) throw new TypeError(`${path}.oneOf is not supported by the OMP JSON Schema translator`)
+  if (node.$ref !== undefined) {
+    if (typeof node.$ref !== 'string' || !/^#(?:$|\/(?:\$defs|definitions)\/[^/]+$)/.test(node.$ref)) {
+      throw new TypeError(`${path}.$ref must be "#" or a local $defs/definitions reference`)
+    }
+    const structuralSiblings = Object.keys(node).filter(key => ![
+      '$comment', '$defs', '$id', '$ref', '$schema', 'definitions', 'description', 'title',
+    ].includes(key))
+    if (structuralSiblings.length > 0) {
+      throw new TypeError(`${path}.$ref cannot have structural sibling keywords`)
+    }
+  }
+
+  if (node.type !== undefined) {
+    const types = typeof node.type === 'string' ? [node.type] : schemaArray(node.type, `${path}.type`)
+    for (const type of types) {
+      if (typeof type !== 'string' || !SUPPORTED_SCHEMA_TYPES.has(type)) {
+        throw new TypeError(`${path}.type contains unsupported type ${JSON.stringify(type)}`)
+      }
+    }
+    if (new Set(types).size !== types.length) throw new TypeError(`${path}.type must not contain duplicates`)
+  }
+  if (node.enum !== undefined) schemaArray(node.enum, `${path}.enum`)
+  for (const keyword of ['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'] as const) {
+    if (node[keyword] !== undefined) finiteNumber(node[keyword], `${path}.${keyword}`)
+  }
+  if (typeof node.multipleOf === 'number' && node.multipleOf <= 0) {
+    throw new TypeError(`${path}.multipleOf must be greater than zero`)
+  }
+  for (const keyword of ['minLength', 'maxLength', 'minItems', 'maxItems'] as const) {
+    if (node[keyword] !== undefined) nonNegativeInteger(node[keyword], `${path}.${keyword}`)
+  }
+  if (node.pattern !== undefined) {
+    if (typeof node.pattern !== 'string') throw new TypeError(`${path}.pattern must be a string`)
+    try {
+      new RegExp(node.pattern)
+    } catch (cause) {
+      throw new TypeError(`${path}.pattern must be a valid regular expression`, { cause })
+    }
+  }
+  if (node.format !== undefined && (typeof node.format !== 'string' || !SUPPORTED_STRING_FORMATS.has(node.format))) {
+    throw new TypeError(`${path}.format is not supported by the OMP JSON Schema translator`)
+  }
+
+  if (node.required !== undefined) {
+    const required = schemaArray(node.required, `${path}.required`, true)
+    if (required.some(value => typeof value !== 'string')) throw new TypeError(`${path}.required must contain only strings`)
+    if (new Set(required).size !== required.length) throw new TypeError(`${path}.required must not contain duplicates`)
+  }
+  if (node.properties !== undefined) {
+    const properties = schemaObject(node.properties, `${path}.properties`)
+    for (const [name, property] of Object.entries(properties)) validateToolJsonSchema(property, `${path}.properties.${name}`)
+  }
+  if (node.additionalProperties !== undefined && typeof node.additionalProperties !== 'boolean') {
+    validateToolJsonSchema(node.additionalProperties, `${path}.additionalProperties`)
+  }
+  for (const keyword of ['$defs', 'definitions'] as const) {
+    if (node[keyword] === undefined) continue
+    const definitions = schemaObject(node[keyword], `${path}.${keyword}`)
+    for (const [name, definition] of Object.entries(definitions)) validateToolJsonSchema(definition, `${path}.${keyword}.${name}`)
+  }
+  for (const keyword of ['allOf', 'anyOf'] as const) {
+    if (node[keyword] === undefined) continue
+    schemaArray(node[keyword], `${path}.${keyword}`).forEach((branch, index) => {
+      validateToolJsonSchema(branch, `${path}.${keyword}[${index}]`)
+    })
+  }
+  if (node.not !== undefined) {
+    const negated = schemaObject(node.not, `${path}.not`)
+    if (Object.keys(negated).length !== 0) throw new TypeError(`${path}.not only supports the empty schema`)
+  }
+  if (node.prefixItems !== undefined) {
+    schemaArray(node.prefixItems, `${path}.prefixItems`, true).forEach((item, index) => {
+      validateToolJsonSchema(item, `${path}.prefixItems[${index}]`)
+    })
+  }
+  if (node.items !== undefined) {
+    if (Array.isArray(node.items)) throw new TypeError(`${path}.items tuple arrays are not supported; use prefixItems`)
+    validateToolJsonSchema(node.items, `${path}.items`)
+  }
+}
+
+export function ompToolParametersFromJsonSchema(schema: unknown) {
+  validateToolJsonSchema(schema)
+  return fromJsonSchema(schema)
+}
+
 export interface OmpActivationRequest {
   readonly cwd: string
   readonly sessionId: string
-  readonly projectManifestPath?: string
 }
 
-export type OmpActivationResolver = (
-  request: OmpActivationRequest,
-) => SerializedCompositionActivation | undefined | Promise<SerializedCompositionActivation | undefined>
-
 export interface DoppelgangerOmpExtensionOptions {
-  readonly activationResolver: OmpActivationResolver
+  readonly home?: string
+  readonly actorId?: string
+  readonly explicitRuntimePreset?: string
+  readonly runtimePresets?: Omit<RuntimePresetRosterConfig, 'home'>
+  readonly patches?: readonly CompositionPatchInput[]
+  readonly watch?: boolean
   readonly childFactory?: OmpChildFactory
   readonly childPath?: string
   readonly tokenBudget?: number
   readonly shutdownTimeoutMs?: number
 }
 
+export const DEFAULT_OMP_CHILD_PATH = fileURLToPath(new URL('./child.ts', import.meta.url))
+
+export function resolveOmpChildPath(options: Pick<DoppelgangerOmpExtensionOptions, 'childPath'>): string {
+  return options.childPath ?? DEFAULT_OMP_CHILD_PATH
+}
+
+function runtimePresetRoster(options: DoppelgangerOmpExtensionOptions) {
+  return createRuntimePresetRoster({
+    ...(options.runtimePresets ?? {}),
+    ...(options.home === undefined ? {} : { home: options.home }),
+  })
+}
+
+export async function resolveOmpActivation(
+  options: DoppelgangerOmpExtensionOptions,
+  request: OmpActivationRequest,
+): Promise<SerializedOmpActivation | undefined> {
+  const actor = createActorIdentity(options.actorId)
+  const project = await discoverOmpProject(request.cwd)
+  const selection = await runtimePresetRoster(options).select({
+    ...(options.explicitRuntimePreset === undefined ? {} : { explicitRuntimePreset: options.explicitRuntimePreset }),
+    ...(project?.manifestPath === undefined ? {} : { projectManifestPath: project.manifestPath }),
+  })
+  if (selection === undefined) return
+  return defineSerializedOmpActivation({
+    composition: {
+      id: selection.preset.id,
+      revision: selection.preset.revision,
+      loaderPath: selection.preset.loaderPath,
+      patches: [
+        { source: 'user Runtime Preset patch', filename: selection.userPatchPath, optional: true },
+        ...(selection.projectPatchPath === undefined
+          ? []
+          : [{ source: 'project Runtime Preset patch', filename: selection.projectPatchPath, optional: true }]),
+        ...(options.patches ?? []),
+      ],
+    },
+    sessionId: request.sessionId,
+    ...(project === undefined ? {} : { workspaceRoot: project.workspaceRoot }),
+    ...(actor.state === 'bound' ? { actorId: actor.actorId } : {}),
+    hostKind: 'omp',
+    ...(options.watch === undefined ? {} : { watch: options.watch }),
+  })
+}
+
 interface ActiveTurn {
   readonly id: string
   readonly principalInput: string
-  readonly toolOutcomes: Map<string, CommittedToolOutcome>
   started: boolean
 }
 
 function proxyName(runtimeName: string): string {
   return `${PROXY_PREFIX}${runtimeName.replace(/[^a-zA-Z0-9_-]/g, character => `_x${character.codePointAt(0)!.toString(16)}_`)}`
+}
+
+const APPROVAL_ARGUMENT_LIMIT = 2_000
+
+function canonicalJson(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) return value.map(canonicalJson)
+  if (value === null || typeof value !== 'object') return value
+  const record = value as { readonly [key: string]: JsonValue }
+  return Object.fromEntries(Object.keys(record).sort().map(key => [key, canonicalJson(record[key]!)]))
+}
+
+function boundedApprovalArguments(value: unknown): string {
+  const encoded = JSON.stringify(canonicalJson(jsonValue(value)), null, 2)
+  if (encoded.length <= APPROVAL_ARGUMENT_LIMIT) return encoded
+  const omitted = encoded.length - APPROVAL_ARGUMENT_LIMIT
+  return `${encoded.slice(0, APPROVAL_ARGUMENT_LIMIT)}[…${omitted}ch elided…]`
 }
 
 function jsonValue(value: unknown): JsonValue {
@@ -73,11 +272,35 @@ function messageText(message: unknown): string | undefined {
   return parts.length === 0 ? undefined : parts.join('\n')
 }
 
+function continuesAfterTurn(message: unknown): boolean {
+  if (message === null || typeof message !== 'object') return false
+  if ('stopReason' in message && message.stopReason === 'toolUse') return true
+  if (!('content' in message) || !Array.isArray(message.content)) return false
+  return message.content.some(part => (
+    part !== null && typeof part === 'object' && 'type' in part && part.type === 'toolCall'
+  ))
+}
+
 function turnOutcome(message: unknown): 'completed' | 'failed' | 'cancelled' {
   if (message === null || typeof message !== 'object' || !('stopReason' in message)) return 'completed'
   if (message.stopReason === 'aborted') return 'cancelled'
   if (message.stopReason === 'error') return 'failed'
   return 'completed'
+}
+
+function lifecycleFailure(code: string, fallback: string, value: unknown): LifecycleError {
+  return Object.freeze({
+    code,
+    message: messageText(value) ?? fallback,
+    data: serializeLifecycleValue(value),
+  })
+}
+
+
+function messageTimestamp(message: unknown): number {
+  if (message !== null && typeof message === 'object' && 'timestamp' in message
+    && typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)) return message.timestamp
+  return Date.now()
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -97,7 +320,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
     let adapter: OmpAdapterSession | undefined
     let turn: ActiveTurn | undefined
     let turnOrdinal = 0
-    let deliveryOrdinal = 0
+    let preCompactionOrdinal = 0
     const activeDescriptors = new Map<string, ToolDescriptor>()
     const registeredProxyNames = new Map<string, string>()
 
@@ -106,8 +329,8 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       if (ctx.hasUI) ctx.ui.notify(message, 'error')
     }
 
-    const nextDeliveryId = (sessionId: string, type: string, identity = '') => (
-      `${sessionId}:${type}:${identity}:${++deliveryOrdinal}`
+    const deliveryId = (sessionId: string, type: string, identity = 'session') => (
+      `${sessionId}:${type}:${identity}`
     )
 
     const setProjectedTools = async (tools: readonly ToolDescriptor[]) => {
@@ -124,16 +347,30 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
         registeredProxyNames.set(name, descriptor.name)
         projectedNames.add(name)
         next.set(descriptor.name, descriptor)
-        pi.registerTool({
+        const projected = {
           name,
           label: `Doppelganger: ${descriptor.name}`,
           description: descriptor.description,
-          parameters: fromJsonSchema(descriptor.inputSchema),
-          async execute(_callId, params) {
+          parameters: ompToolParametersFromJsonSchema(descriptor.inputSchema),
+          approval: () => {
+            const approval = activeDescriptors.get(descriptor.name)?.approval
+            return approval === undefined
+              ? 'exec' as const
+              : { tier: 'write', policy: 'prompt', reason: approval.reason } as const
+          },
+          formatApprovalDetails: (params: unknown) => {
+            const active = activeDescriptors.get(descriptor.name)
+            if (active?.approval === undefined) return
+            return [
+              `Portable tool: ${active.name}`,
+              `Arguments: ${boundedApprovalArguments(params)}`,
+            ]
+          },
+          async execute(_callId: string, params: unknown) {
             const active = activeDescriptors.get(descriptor.name)
             const connection = adapter?.connection()
             if (active === undefined || connection === undefined || proxyName(active.name) !== name) {
-              return textResult({ code: 'RUNTIME_UNAVAILABLE', message: 'persona runtime tool is inactive' }, true)
+              return textResult({ code: 'RUNTIME_UNAVAILABLE', message: 'runtime tool is inactive' }, true)
             }
             try {
               const result = await connection.request('tools.invoke', {
@@ -146,7 +383,8 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
               return textResult({ code: 'TOOL_PROXY_FAILED', message: cause instanceof Error ? cause.message : String(cause) }, true)
             }
           },
-        })
+        }
+        pi.registerTool(projected)
       }
       activeDescriptors.clear()
       for (const [name, descriptor] of next) activeDescriptors.set(name, descriptor)
@@ -168,18 +406,16 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
     const start = async (ctx: ExtensionContext) => {
       if (adapter !== undefined) return adapter.snapshot()
       const childFactory = options.childFactory ?? new NodeOmpChildFactory({
-        childPath: options.childPath ?? fileURLToPath(new URL('./child.ts', import.meta.url)),
+        childPath: resolveOmpChildPath(options),
         ...(options.shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs: options.shutdownTimeoutMs }),
+        onNotificationObserverError: diagnostic => {
+          report(ctx, `Doppelganger RPC notification observer ${diagnostic.method}: ${diagnostic.message}`)
+        },
       })
       const sessionId = ctx.sessionManager.getSessionId()
-      let activation: SerializedCompositionActivation | undefined
+      let activation: SerializedOmpActivation | undefined
       try {
-        const projectManifestPath = await discoverProjectManifest(ctx.cwd)
-        activation = await options.activationResolver({
-          cwd: ctx.cwd,
-          sessionId,
-          ...(projectManifestPath === undefined ? {} : { projectManifestPath }),
-        })
+        activation = await resolveOmpActivation(options, { cwd: ctx.cwd, sessionId })
       } catch (cause) {
         const code = cause !== null && typeof cause === 'object' && 'code' in cause && typeof cause.code === 'string'
           ? cause.code
@@ -201,7 +437,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
         await publish({
           protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
           type: 'session-started',
-          deliveryId: nextDeliveryId(sessionId, 'session-started'),
+          deliveryId: deliveryId(sessionId, 'session-started'),
           sessionId,
           timestamp: Date.now(),
         })
@@ -212,28 +448,41 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
     pi.registerTool({
       name: INITIALIZE_TOOL,
       label: 'Initialize Doppelganger',
-      description: 'Create this project’s Doppelganger persona selection and activate it.',
+      description: 'Select and activate a discovered Runtime Preset for this workspace.',
       defaultInactive: true,
       parameters: pi.zod.object({
-        projectId: pi.zod.string().min(1),
-        instanceId: pi.zod.string().min(1),
+        runtimePreset: pi.zod.string().min(1),
       }),
       async execute(_callId, params, _signal, _onUpdate, ctx) {
-        const input = params as { projectId: string; instanceId: string }
+        if (params === null || typeof params !== 'object' || !('runtimePreset' in params)
+          || typeof params.runtimePreset !== 'string') {
+          return textResult({ code: 'INVALID_RUNTIME_PRESET', message: 'runtimePreset must be a string' }, true)
+        }
+        const runtimePreset = params.runtimePreset
         if (adapter?.snapshot().state === 'active') return textResult({ active: true })
-        const directory = join(ctx.cwd, '.doppelganger')
-        await mkdir(directory, { recursive: true })
-        await writeFile(join(directory, 'manifest.yaml'), [
-          'version: 1',
-          `projectId: ${JSON.stringify(input.projectId)}`,
-          `instanceId: ${JSON.stringify(input.instanceId)}`,
-        ].join('\n'))
-        await adapter?.dispose()
-        adapter = undefined
-        const snapshot = await start(ctx)
-        return snapshot.state === 'active'
-          ? textResult({ active: true, instanceId: input.instanceId })
-          : textResult(snapshot.diagnostic ?? { code: 'ACTIVATION_FAILED' }, true)
+        try {
+          await runtimePresetRoster(options).select({ explicitRuntimePreset: runtimePreset })
+          const project = await discoverOmpProject(ctx.cwd)
+          const workspaceRoot = project?.workspaceRoot ?? resolve(ctx.cwd)
+          const directory = join(workspaceRoot, '.doppelganger')
+          await mkdir(directory, { recursive: true })
+          await writeFile(join(directory, 'manifest.yaml'), [
+            'version: 1',
+            `runtimePreset: ${JSON.stringify(runtimePreset)}`,
+            '',
+          ].join('\n'))
+          await adapter?.dispose()
+          adapter = undefined
+          const snapshot = await start(ctx)
+          return snapshot.state === 'active'
+            ? textResult({ active: true, runtimePreset })
+            : textResult(snapshot.diagnostic ?? { code: 'ACTIVATION_FAILED' }, true)
+        } catch (cause) {
+          return textResult({
+            code: cause !== null && typeof cause === 'object' && 'code' in cause ? String(cause.code) : 'INITIALIZATION_FAILED',
+            message: cause instanceof Error ? cause.message : String(cause),
+          }, true)
+        }
       },
     })
 
@@ -242,18 +491,18 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       const snapshot = await start(ctx)
       if (snapshot.state !== 'active') return
       const sessionId = ctx.sessionManager.getSessionId()
-      turn = {
+      const currentTurn: ActiveTurn = {
         id: `${sessionId}:turn:${++turnOrdinal}`,
         principalInput: event.prompt,
-        toolOutcomes: new Map(),
         started: false,
       }
+      turn = currentTurn
       try {
         const connection = adapter?.connection()
         if (connection === undefined) return
         const assembled = await connection.request('context.resolve', {
           input: event.prompt,
-          turnId: turn.id,
+          turnId: currentTurn.id,
           tokenBudget: options.tokenBudget ?? 4000,
         }) as { content: string }
         if (assembled.content.length === 0) return
@@ -269,7 +518,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       await publish({
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'turn-started',
-        deliveryId: nextDeliveryId(ctx.sessionManager.getSessionId(), 'turn-started', turn.id),
+        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'turn-started', turn.id),
         sessionId: ctx.sessionManager.getSessionId(),
         turnId: turn.id,
         timestamp: event.timestamp,
@@ -281,7 +530,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       await publish({
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'tool-started',
-        deliveryId: nextDeliveryId(ctx.sessionManager.getSessionId(), 'tool-started', event.toolCallId),
+        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'tool-started', event.toolCallId),
         sessionId: ctx.sessionManager.getSessionId(),
         turnId: turn.id,
         callId: event.toolCallId,
@@ -292,51 +541,52 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
     })
     pi.on('tool_execution_end', async (event, ctx) => {
       if (turn === undefined) return
-      const outcome: CommittedToolOutcome = Object.freeze({
-        callId: event.toolCallId,
-        name: event.toolName,
-        outcome: event.isError ? 'failed' : 'completed',
-        result: serializeLifecycleValue(event.result),
-      })
-      turn.toolOutcomes.set(event.toolCallId, outcome)
+      const outcome = event.isError ? 'failed' : 'completed'
       await publish({
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'tool-completed',
-        deliveryId: nextDeliveryId(ctx.sessionManager.getSessionId(), 'tool-completed', event.toolCallId),
+        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'tool-completed', event.toolCallId),
         sessionId: ctx.sessionManager.getSessionId(),
         turnId: turn.id,
         callId: event.toolCallId,
         name: event.toolName,
         timestamp: Date.now(),
-        outcome: outcome.outcome,
+        outcome,
         result: serializeLifecycleValue(event.result),
+        ...(event.isError
+          ? { error: lifecycleFailure('OMP_TOOL_FAILED', `OMP tool "${event.toolName}" failed`, event.result) }
+          : {}),
       })
     })
-    pi.on('agent_end', async (event, ctx) => {
-      if (turn === undefined || event.willContinue === true) return
-      const assistant = [...event.messages].reverse().find(message => message.role === 'assistant')
+    pi.on('turn_end', async (event, ctx) => {
+      if (turn === undefined) return
+      if (continuesAfterTurn(event.message)) return
       const completedTurn = turn
+      const outcome = turnOutcome(event.message)
       turn = undefined
       await publish({
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'turn-committed',
-        deliveryId: nextDeliveryId(ctx.sessionManager.getSessionId(), 'turn-committed', completedTurn.id),
+        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'turn-committed', completedTurn.id),
         sessionId: ctx.sessionManager.getSessionId(),
         turnId: completedTurn.id,
-        timestamp: Date.now(),
+        timestamp: messageTimestamp(event.message),
         principalInput: serializeLifecycleValue(completedTurn.principalInput),
-        assistantOutput: serializeLifecycleValue(messageText(assistant)),
-        toolOutcomes: Object.freeze([...completedTurn.toolOutcomes.values()]),
-        outcome: turnOutcome(assistant),
+        assistantOutput: serializeLifecycleValue(messageText(event.message) ?? ''),
+        outcome,
+        ...(outcome === 'failed'
+          ? { error: lifecycleFailure('OMP_ASSISTANT_FAILED', 'OMP assistant turn failed', event.message) }
+          : {}),
       })
     })
     pi.on('session_before_compact', async (event, ctx) => {
       await publish({
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'pre-compaction',
-        deliveryId: nextDeliveryId(ctx.sessionManager.getSessionId(), 'pre-compaction'),
+        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'pre-compaction', String(++preCompactionOrdinal)),
         sessionId: ctx.sessionManager.getSessionId(),
         timestamp: Date.now(),
+        ...(turn === undefined ? {} : { turnId: turn.id }),
         material: serializeLifecycleValue({
           preparation: event.preparation,
           branchEntries: event.branchEntries,
@@ -344,26 +594,31 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
         }),
       })
     })
-    pi.on('session_shutdown', async (_event, ctx) => {
+    pi.on('session_shutdown', (_event, ctx) => {
       const closing = adapter
       turn = undefined
       if (closing === undefined) return
       const sessionId = ctx.sessionManager.getSessionId()
-      await withTimeout(publish({
-        protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
-        type: 'session-completed',
-        deliveryId: nextDeliveryId(sessionId, 'session-completed'),
-        sessionId,
-        timestamp: Date.now(),
-        outcome: 'completed',
-      }), options.shutdownTimeoutMs ?? 2000, 'session completion').catch(cause => {
-        report(ctx, `Doppelganger: ${cause instanceof Error ? cause.message : String(cause)}`)
-      })
+      const connection = closing.connection()
       adapter = undefined
-      const disposal = await closing.dispose()
-      if (disposal.outcome !== 'graceful' || !disposal.sessionDisposeAcknowledged) {
-        report(ctx, `Doppelganger: runtime shutdown ${disposal.outcome}; session acknowledgement=${String(disposal.sessionDisposeAcknowledged)}`)
-      }
+      void (async () => {
+        if (connection !== undefined) await withTimeout(connection.request('event.publish', {
+          protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+          type: 'session-disposed',
+          deliveryId: deliveryId(sessionId, 'session-disposed'),
+          sessionId,
+          timestamp: Date.now(),
+          reason: 'OMP session shutdown without completion outcome',
+        }), options.shutdownTimeoutMs ?? 2000, 'session disposal notification').catch(cause => {
+          report(ctx, `Doppelganger: ${cause instanceof Error ? cause.message : String(cause)}`)
+        })
+        const disposal = await closing.dispose()
+        if (disposal.outcome !== 'graceful' || !disposal.sessionDisposeAcknowledged) {
+          report(ctx, `Doppelganger: runtime shutdown ${disposal.outcome}; session acknowledgement=${String(disposal.sessionDisposeAcknowledged)}`)
+        }
+      })().catch(cause => {
+        report(ctx, `Doppelganger: runtime shutdown failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+      })
     })
   }
 }

@@ -34,8 +34,21 @@ export interface RpcFailure {
 export type RpcMessage = RpcRequest | RpcNotification | RpcSuccess | RpcFailure
 export type RpcHandler = (params: unknown) => unknown | Promise<unknown>
 
+export interface RpcNotificationObserverDiagnostic {
+  readonly method: string
+  readonly message: string
+}
+
+export interface FramedJsonRpcPeerOptions {
+  readonly onNotificationObserverError?: (
+    diagnostic: RpcNotificationObserverDiagnostic,
+  ) => void | Promise<void>
+}
+
 const HEADER_SEPARATOR = Buffer.from('\r\n\r\n')
 const MAX_CONTENT_LENGTH = 16 * 1024 * 1024
+const MAX_NOTIFICATION_METHOD_LENGTH = 256
+const MAX_NOTIFICATION_ERROR_LENGTH = 2_048
 
 export class RpcProtocolError extends Error {
   constructor(message: string) {
@@ -108,6 +121,17 @@ interface PendingRequest {
   readonly reject: (error: Error) => void
 }
 
+function bounded(value: string, maximum: number): string {
+  return value.length <= maximum ? value : `${value.slice(0, maximum - 1)}…`
+}
+
+function notificationObserverDiagnostic(method: string, cause: unknown): RpcNotificationObserverDiagnostic {
+  return Object.freeze({
+    method: bounded(method, MAX_NOTIFICATION_METHOD_LENGTH),
+    message: bounded(cause instanceof Error ? cause.message : String(cause), MAX_NOTIFICATION_ERROR_LENGTH),
+  })
+}
+
 export class FramedJsonRpcPeer {
   readonly #reader: Readable
   readonly #writer: Writable
@@ -115,12 +139,14 @@ export class FramedJsonRpcPeer {
   readonly #handlers = new Map<string, RpcHandler>()
   readonly #notificationHandlers = new Map<string, Set<RpcHandler>>()
   readonly #pending = new Map<RpcId, PendingRequest>()
+  readonly #onNotificationObserverError: FramedJsonRpcPeerOptions['onNotificationObserverError']
   #nextId = 1
   #closed = false
 
-  constructor(reader: Readable, writer: Writable) {
+  constructor(reader: Readable, writer: Writable, options: FramedJsonRpcPeerOptions = {}) {
     this.#reader = reader
     this.#writer = writer
+    this.#onNotificationObserverError = options.onNotificationObserverError
     reader.on('data', this.#onData)
     reader.on('end', this.#onEnd)
     reader.on('error', this.#onError)
@@ -188,7 +214,19 @@ export class FramedJsonRpcPeer {
       if ('id' in message) await this.#dispatchRequest(message)
       else {
         const handlers = this.#notificationHandlers.get(message.method)
-        if (handlers !== undefined) await Promise.all([...handlers].map(handler => handler(message.params)))
+        if (handlers !== undefined) {
+          const results = await Promise.allSettled([...handlers].map(handler => Promise.resolve().then(
+            () => handler(message.params),
+          )))
+          for (const result of results) {
+            if (result.status === 'fulfilled' || this.#onNotificationObserverError === undefined) continue
+            try {
+              await this.#onNotificationObserverError(notificationObserverDiagnostic(message.method, result.reason))
+            } catch {
+              // Diagnostics are advisory; a failing sink must not become a transport failure.
+            }
+          }
+        }
       }
       return
     }

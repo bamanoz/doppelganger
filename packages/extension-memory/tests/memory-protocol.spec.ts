@@ -3,14 +3,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createPersonaActivationPlugin } from '@doppelganger/extension-persona'
+import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
 import {
   ContextProtocol,
+  createActorIdentityPlugin,
   ToolRegistry,
   type JsonValue,
-} from '@doppelganger/extension-protocols'
-import { InstanceSqliteService } from '@doppelganger/extension-sqlite'
-import { MemoryProtocolPlugin, MemoryService } from '../src/index.ts'
+} from '@doppelganger/doppelganger-protocols'
+import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
+import { MemoryPlugin, MemoryProtocolPlugin, MemoryService, type MemoryPluginConfig } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
 
@@ -24,19 +25,42 @@ function resultObject(value: JsonValue): Readonly<Record<string, JsonValue>> {
 }
 
 describe('memory protocol', () => {
+  it('rejects obsolete and unsupported memory configuration fields', async () => {
+    const instanceHome = await mkdtemp(join(tmpdir(), 'doppelganger-memory-config-'))
+    temporaryRoots.push(instanceHome)
+    const context = new Context()
+    await context.plugin(createPersonaActivationPlugin({
+      instanceId: 'aiden',
+      sessionId: 'config-session',
+    }))
+    await context.plugin(createActorIdentityPlugin('local-user'))
+    await context.plugin(InstanceSqliteService, { home: instanceHome })
+    await context.plugin(ContextProtocol)
+    await context.plugin(ToolRegistry)
+
+    const legacy = context.plugin(MemoryPlugin, {
+      principalId: 'legacy-user',
+    } as unknown as MemoryPluginConfig)
+    await expect(legacy.await()).rejects.toThrow('memory.principalId is not supported')
+
+    const unsupported = context.plugin(MemoryPlugin, {
+      unsupported: true,
+    } as unknown as MemoryPluginConfig)
+    await expect(unsupported.await()).rejects.toThrow('memory.unsupported is not supported')
+    await context.fiber.dispose()
+  })
+
   it('registers complete schemas and contributes authority-aware whole memory records', async () => {
     const instanceHome = await mkdtemp(join(tmpdir(), 'doppelganger-memory-protocol-'))
     temporaryRoots.push(instanceHome)
     const context = new Context()
     await context.plugin(createPersonaActivationPlugin({
       instanceId: 'aiden',
-      principalId: 'local-user',
       sessionId: 'protocol-session',
       projectId: 'project-one',
       projectRoot: join(instanceHome, 'project'),
-      instanceHome,
-      definitionRoot: instanceHome,
     }))
+    await context.plugin(createActorIdentityPlugin('local-user'))
     await context.plugin(InstanceSqliteService, { home: instanceHome })
     await context.plugin(ContextProtocol)
     await context.plugin(ToolRegistry)
@@ -75,6 +99,17 @@ describe('memory protocol', () => {
         expiresAt: { type: 'string' },
       },
     })
+
+    for (const identityField of ['principalId', 'actorId'] as const) {
+      const rejected = await context.doppelgangerTools.invoke('memory.remember', {
+        operationId: `reject-${identityField}`,
+        subjectKey: 'identity.override',
+        kind: 'fact',
+        content: 'Tool input must not select a memory identity.',
+        [identityField]: 'override',
+      })
+      expect(rejected).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
+    }
 
     const preferenceResult = await context.doppelgangerTools.invoke('memory.remember', {
       operationId: 'remember-preference',

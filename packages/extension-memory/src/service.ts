@@ -1,11 +1,25 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
-import type {} from '@doppelganger/extension-persona'
-import type { InstanceSqliteDatabase } from '@doppelganger/extension-sqlite'
-import type {} from '@doppelganger/extension-sqlite'
+import type {} from '@doppelganger/doppelganger-persona'
+import type {} from '@doppelganger/doppelganger-protocols'
+import type { InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
+import type {} from '@doppelganger/doppelganger-sqlite'
 import { containsMemorySecret } from './content-policy.ts'
 import { memoryEligibility, memoryTemporalState, type MemoryPartition } from './eligibility.ts'
 import { deleteMemoryRecordRows, migrateMemorySchema } from './schema.ts'
+import {
+  activeMemorySemanticGeneration,
+  enqueueActiveMemoryProjection,
+  enqueueKnownMemoryProjectionDeletions,
+  enqueueMemoryRevisionReplacement,
+} from './projection-store.ts'
+import { projectMemorySemanticQuery } from './query-projection.ts'
+import type {
+  MemorySemanticFailureCode,
+  MemorySemanticHit,
+  MemorySemanticRetriever,
+  MemoryVectorFailure,
+} from './semantic.ts'
 
 export type MemoryKind = 'decision' | 'fact' | 'preference' | 'procedure'
 export type MemoryStatus = 'active' | 'candidate' | 'rejected'
@@ -36,7 +50,7 @@ export interface MemoryRevision extends MemoryTemporalInput {
 export interface MemoryRecord extends MemoryTemporalInput {
   readonly id: string
   readonly instanceId: string
-  readonly principalId: string
+  readonly actorId: string
   readonly kind: MemoryKind
   readonly subjectKey: string
   readonly scope: MemoryScope
@@ -143,21 +157,6 @@ export interface ResolveMemoryConflictRequest {
   readonly resolution: 'dismiss' | 'keep-active' | 'promote-candidate'
 }
 
-export interface EmbeddingCandidate {
-  readonly recordId: string
-  readonly revisionId: string
-  readonly content: string
-}
-
-export interface EmbeddingRank {
-  readonly recordId: string
-  readonly revisionId: string
-  readonly rank: number
-}
-
-export interface MemoryEmbeddingProvider {
-  rank(query: string, candidates: readonly EmbeddingCandidate[]): Promise<readonly EmbeddingRank[]>
-}
 
 export interface MemorySearchRequest {
   readonly query: string
@@ -177,15 +176,18 @@ export interface MemoryServiceConfig {
   readonly now?: () => Date
   readonly id?: () => string
   readonly automaticPromotionDistinctSessions?: number
-  readonly semanticCandidateLimit?: number
+  readonly lexicalTopK?: number
+  readonly semanticTopK?: number
+  readonly semanticQueryMaximumCharacters?: number
+  readonly semanticTimeoutMs?: number
 }
 
 export class MemoryError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string,
-  ) {
+  readonly code: string
+
+  constructor(code: string, message: string) {
     super(message)
+    this.code = code
     this.name = 'MemoryError'
   }
 }
@@ -199,7 +201,7 @@ interface OperationReceipt {
 
 const RECORD_SELECT = `
   SELECT
-    r.id, r.instance_id, r.principal_id, r.kind, r.subject_key,
+    r.id, r.instance_id, r.actor_id, r.kind, r.subject_key,
     r.scope_kind, r.project_id, r.status, r.pinned, r.confidence, r.salience,
     r.valid_from, r.valid_until, r.expires_at,
     r.source_session_id, r.created_at, r.updated_at,
@@ -351,7 +353,7 @@ function recordFrom(row: Record<string, unknown>, now: string): MemoryRecord {
   return Object.freeze({
     id: text(row.id, 'id'),
     instanceId: text(row.instance_id, 'instance_id'),
-    principalId: text(row.principal_id, 'principal_id'),
+    actorId: text(row.actor_id, 'actor_id'),
     kind: text(row.kind, 'kind') as MemoryKind,
     subjectKey: text(row.subject_key, 'subject_key'),
     scope: Object.freeze({
@@ -423,19 +425,28 @@ function conflictFrom(row: Record<string, unknown>): MemoryConflict {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     doppelgangerMemory: MemoryService
-    doppelgangerEmbedding: MemoryEmbeddingProvider
   }
 }
 
 export class MemoryService extends Service {
-  static inject = ['doppelgangerInstanceSqlite', 'doppelgangerPersona']
+  static inject = ['doppelgangerInstanceSqlite', 'doppelgangerPersona', 'doppelgangerActor']
 
   private database!: InstanceSqliteDatabase
+
+  /** Coordinator-only access to canonical storage; all writes remain transaction-owned here. */
+  get canonicalDatabase(): InstanceSqliteDatabase {
+    if (this.database === undefined) throw new Error('memory service is not initialized')
+    return this.database
+  }
   private readonly now: () => Date
   private readonly id: () => string
   private readonly namespace: string
   private readonly automaticPromotionDistinctSessions: number
-  private readonly semanticCandidateLimit: number
+  private readonly lexicalTopK: number
+  private readonly semanticTopK: number
+  private readonly semanticQueryMaximumCharacters: number
+  private readonly semanticTimeoutMs: number
+  private lastSemanticFailure: MemoryVectorFailure | undefined
 
   constructor(ctx: Context, config: MemoryServiceConfig = {}) {
     super(ctx, 'doppelgangerMemory')
@@ -443,18 +454,28 @@ export class MemoryService extends Service {
     this.id = config.id ?? randomUUID
     this.namespace = config.namespace ?? 'memory'
     this.automaticPromotionDistinctSessions = config.automaticPromotionDistinctSessions ?? 2
-    this.semanticCandidateLimit = config.semanticCandidateLimit ?? 200
+    this.lexicalTopK = config.lexicalTopK ?? 40
+    this.semanticTopK = config.semanticTopK ?? 40
+    this.semanticQueryMaximumCharacters = config.semanticQueryMaximumCharacters ?? 512
+    this.semanticTimeoutMs = config.semanticTimeoutMs ?? 1_500
     if (!Number.isSafeInteger(this.automaticPromotionDistinctSessions) || this.automaticPromotionDistinctSessions < 2) {
       throw new TypeError('automaticPromotionDistinctSessions must be an integer of at least 2')
     }
-    if (!Number.isSafeInteger(this.semanticCandidateLimit) || this.semanticCandidateLimit <= 0) {
-      throw new TypeError('semanticCandidateLimit must be a positive integer')
+    for (const [name, value] of [
+      ['lexicalTopK', this.lexicalTopK],
+      ['semanticTopK', this.semanticTopK],
+      ['semanticQueryMaximumCharacters', this.semanticQueryMaximumCharacters],
+      ['semanticTimeoutMs', this.semanticTimeoutMs],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${name} must be a positive safe integer`)
     }
   }
 
   async *[Service.init]() {
+    const actor = this.ctx.doppelgangerActor
+    if (actor.state !== 'bound') throw new Error('memory requires a bound host actor')
     this.database = await this.ctx.doppelgangerInstanceSqlite.open(this.namespace)
-    migrateMemorySchema(this.database, { legacyPrincipalId: this.ctx.doppelgangerPersona.principalId })
+    migrateMemorySchema(this.database, { legacyActorId: actor.actorId })
   }
 
   private timestamp(): string {
@@ -463,9 +484,11 @@ export class MemoryService extends Service {
 
   private partition(): MemoryPartition {
     const metadata = this.ctx.doppelgangerPersona
+    const actor = this.ctx.doppelgangerActor
+    if (actor.state !== 'bound') throw new Error('memory requires a bound host actor')
     return Object.freeze({
       instanceId: metadata.instanceId,
-      principalId: metadata.principalId,
+      actorId: actor.actorId,
       ...(metadata.projectId === undefined ? {} : { projectId: metadata.projectId }),
     })
   }
@@ -510,8 +533,8 @@ export class MemoryService extends Service {
     return database.prepare(`
       SELECT command_digest, result_kind, result_record_id, result_revision_id
       FROM memory_operations
-      WHERE instance_id = ? AND principal_id = ? AND operation_id = ?
-    `).get(partition.instanceId, partition.principalId, operationId) as OperationReceipt | undefined
+      WHERE instance_id = ? AND actor_id = ? AND operation_id = ?
+    `).get(partition.instanceId, partition.actorId, operationId) as OperationReceipt | undefined
   }
 
   private replayRecord(receipt: OperationReceipt, commandDigest: string): MemoryRecord {
@@ -538,12 +561,12 @@ export class MemoryService extends Service {
     const partition = this.partition()
     database.prepare(`
       INSERT INTO memory_operations(
-        instance_id, principal_id, operation_id, command_kind, command_digest,
+        instance_id, actor_id, operation_id, command_kind, command_digest,
         result_kind, result_record_id, result_revision_id, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       partition.instanceId,
-      partition.principalId,
+      partition.actorId,
       operationId,
       commandKind,
       commandDigest,
@@ -612,14 +635,14 @@ export class MemoryService extends Service {
     const partition = this.partition()
     const exactScope = this.exactSubjectPredicate(scope)
     const row = database.prepare(`${RECORD_SELECT}
-      WHERE r.instance_id = ? AND r.principal_id = ?
+      WHERE r.instance_id = ? AND r.actor_id = ?
         AND ${exactScope.sql} AND r.kind = ? AND r.subject_key = ? AND r.status = ?
         ${content === undefined ? '' : 'AND v.content = ?'}
       ORDER BY r.created_at, r.id
       LIMIT 1
     `).get(
       partition.instanceId,
-      partition.principalId,
+      partition.actorId,
       ...exactScope.parameters,
       kind,
       key,
@@ -674,16 +697,17 @@ export class MemoryService extends Service {
         const revisionId = this.id()
         const status = active === undefined ? requestedStatus : 'candidate'
         const metadata = this.ctx.doppelgangerPersona
+        const partition = this.partition()
         storage.prepare(`
           INSERT INTO memory_records(
-            id, instance_id, principal_id, kind, subject_key, scope_kind, project_id,
+            id, instance_id, actor_id, kind, subject_key, scope_kind, project_id,
             status, pinned, confidence, salience, valid_from, valid_until, expires_at,
             current_revision_id, source_session_id, created_at, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           recordId,
-          metadata.instanceId,
-          metadata.principalId,
+          partition.instanceId,
+          partition.actorId,
           kind,
           key,
           scope.kind,
@@ -718,6 +742,13 @@ export class MemoryService extends Service {
         if (status === 'active') {
           storage.prepare('INSERT INTO memory_fts(record_id, revision_id, content) VALUES (?, ?, ?)')
             .run(recordId, revisionId, content)
+          enqueueActiveMemoryProjection(
+            storage,
+            metadata.instanceId,
+            recordId,
+            revisionId,
+            timestamp,
+          )
         }
         record = this.requireRecord(storage, recordId)
       }
@@ -837,7 +868,14 @@ export class MemoryService extends Service {
       storage.prepare('DELETE FROM memory_fts WHERE record_id = ?').run(record.id)
       storage.prepare('INSERT INTO memory_fts(record_id, revision_id, content) VALUES (?, ?, ?)')
         .run(record.id, revisionId, content)
-      storage.prepare('DELETE FROM memory_embeddings WHERE record_id = ?').run(record.id)
+      enqueueMemoryRevisionReplacement(
+        storage,
+        record.instanceId,
+        record.id,
+        record.revision.id,
+        revisionId,
+        timestamp,
+      )
       this.insertEvidence(storage, record.id, {
         turnId: request.evidence?.turnId ?? operationId,
         role: request.evidence?.role ?? 'principal',
@@ -865,6 +903,7 @@ export class MemoryService extends Service {
       if (replay !== undefined) return text(replay.result_kind, 'operation.result_kind') === 'deleted'
       const record = this.requireRecord(storage, request.id)
       const timestamp = this.timestamp()
+      enqueueKnownMemoryProjectionDeletions(storage, record.id, timestamp)
       deleteMemoryRecordRows(storage, record.id)
       this.insertReceipt(storage, operationId, 'forget', commandDigest, 'deleted', undefined, undefined, timestamp)
       return true
@@ -955,8 +994,11 @@ export class MemoryService extends Service {
       const candidate = this.requireRecord(storage, request.candidateId, ['candidate'])
       const timestamp = this.timestamp()
       if (decision === 'approve') this.promote(storage, candidate, 'manual-approval', timestamp, true)
-      else storage.prepare(`UPDATE memory_records SET status = 'rejected', updated_at = ? WHERE id = ? AND status = 'candidate'`)
-        .run(timestamp, candidate.id)
+      else {
+        storage.prepare(`UPDATE memory_records SET status = 'rejected', updated_at = ? WHERE id = ? AND status = 'candidate'`)
+          .run(timestamp, candidate.id)
+        enqueueKnownMemoryProjectionDeletions(storage, candidate.id, timestamp)
+      }
       const result = this.requireRecord(storage, candidate.id)
       this.insertReceipt(storage, operationId, decision, commandDigest, 'record', result.id, result.revision.id, timestamp)
       return result
@@ -1048,12 +1090,21 @@ export class MemoryService extends Service {
         storage.prepare('DELETE FROM memory_fts WHERE record_id = ?').run(active.id)
         storage.prepare('INSERT INTO memory_fts(record_id, revision_id, content) VALUES (?, ?, ?)')
           .run(active.id, resolutionRevisionId, candidate.revision.content)
-        storage.prepare('DELETE FROM memory_embeddings WHERE record_id = ?').run(active.id)
+        enqueueMemoryRevisionReplacement(
+          storage,
+          active.instanceId,
+          active.id,
+          active.revision.id,
+          resolutionRevisionId,
+          timestamp,
+        )
+        enqueueKnownMemoryProjectionDeletions(storage, candidate.id, timestamp)
         status = 'resolved-candidate'
       } else {
         status = request.resolution === 'keep-active' ? 'resolved-active' : 'dismissed'
         if (request.resolution === 'keep-active') {
           storage.prepare(`UPDATE memory_records SET status = 'rejected', updated_at = ? WHERE id = ?`).run(timestamp, candidate.id)
+          enqueueKnownMemoryProjectionDeletions(storage, candidate.id, timestamp)
         }
       }
       storage.prepare(`
@@ -1121,8 +1172,48 @@ export class MemoryService extends Service {
     if (result.changes !== 1) throw new MemoryError('INVALID_CANDIDATE', `candidate "${candidate.id}" is not eligible`)
     database.prepare('INSERT INTO memory_fts(record_id, revision_id, content) VALUES (?, ?, ?)')
       .run(candidate.id, candidate.revision.id, candidate.revision.content)
+    enqueueActiveMemoryProjection(
+      database,
+      candidate.instanceId,
+      candidate.id,
+      candidate.revision.id,
+      timestamp,
+    )
     database.prepare('UPDATE memory_revisions SET source_kind = ? WHERE id = ?')
       .run(sourceKind, candidate.revision.id)
+  }
+
+  semanticFailure(): MemoryVectorFailure | undefined {
+    return this.lastSemanticFailure
+  }
+
+  private recordSemanticFailure(error: unknown): void {
+    const candidate = typeof error === 'object' && error !== null
+      ? (error as { code?: unknown }).code
+      : undefined
+    const code: MemorySemanticFailureCode = [
+      'backend', 'dimension', 'embedder', 'health', 'identity', 'malformed-hit', 'timeout',
+    ].includes(String(candidate)) ? candidate as MemorySemanticFailureCode : 'backend'
+    this.lastSemanticFailure = Object.freeze({
+      code,
+      occurredAt: this.timestamp(),
+      message: `semantic retrieval ${code} failure`,
+    })
+  }
+
+  private validSemanticHit(value: unknown, generationId: string): MemorySemanticHit | undefined {
+    if (typeof value !== 'object' || value === null) return undefined
+    const hit = value as Partial<MemorySemanticHit>
+    if (hit.generationId !== generationId
+      || typeof hit.recordId !== 'string' || hit.recordId.length === 0
+      || typeof hit.revisionId !== 'string' || hit.revisionId.length === 0
+      || !Number.isSafeInteger(hit.rank) || Number(hit.rank) <= 0) return undefined
+    return Object.freeze({
+      generationId,
+      recordId: hit.recordId,
+      revisionId: hit.revisionId,
+      rank: Number(hit.rank),
+    })
   }
 
   async search(request: MemorySearchRequest): Promise<readonly MemorySearchResult[]> {
@@ -1136,8 +1227,10 @@ export class MemoryService extends Service {
       throw new MemoryError('INVALID_LIMIT', 'memory search limit must be a positive safe integer')
     }
     const now = this.timestamp()
-    const eligible = memoryEligibility(this.partition(), now, { statuses: ['active'], temporal: true })
-    const lexicalQuery = [...query.matchAll(/[\p{L}\p{N}_-]+/gu)].map(match => `"${match[0].replaceAll('"', '""')}"`).join(' OR ')
+    const partition = this.partition()
+    const eligible = memoryEligibility(partition, now, { statuses: ['active'], temporal: true })
+    const lexicalQuery = [...query.matchAll(/[\p{L}\p{N}_-]+/gu)]
+      .map(match => `"${match[0].replaceAll('"', '""')}"`).join(' OR ')
     const lexicalRows = lexicalQuery.length === 0
       ? []
       : this.database.prepare(`${RECORD_SELECT}
@@ -1145,48 +1238,67 @@ export class MemoryService extends Service {
           WHERE ${eligible.sql} AND memory_fts MATCH ?
           ORDER BY bm25(memory_fts), r.id
           LIMIT ?
-        `).all(...eligible.parameters, lexicalQuery, this.semanticCandidateLimit)
-    const candidateRows = this.database.prepare(`${RECORD_SELECT}
-      WHERE ${eligible.sql}
-      ORDER BY r.salience DESC, r.id
-      LIMIT ?
-    `).all(...eligible.parameters, this.semanticCandidateLimit)
-    const snapshot = new Map(candidateRows.map(row => {
-      const record = recordFrom(row, now)
-      return [record.id, record] as const
-    }))
+        `).all(...eligible.parameters, lexicalQuery, this.lexicalTopK)
     const ranks = new Map<string, { lexicalRank?: number; semanticRank?: number }>()
+    const expectedRevisions = new Map<string, string>()
     lexicalRows.forEach((row, index) => {
       const record = recordFrom(row, now)
       ranks.set(record.id, { lexicalRank: index + 1 })
-      if (!snapshot.has(record.id)) snapshot.set(record.id, record)
+      expectedRevisions.set(record.id, record.revision.id)
     })
-    for (const record of snapshot.values()) {
-      if (record.pinned && record.kind === 'preference' && record.scope.kind === 'relationship') {
-        ranks.set(record.id, ranks.get(record.id) ?? {})
+
+    const semantic = this.ctx.get('doppelgangerMemorySemantic') as MemorySemanticRetriever | undefined
+    const generationId = activeMemorySemanticGeneration(this.database, partition.instanceId)
+    if (semantic !== undefined && generationId !== undefined) {
+      const projection = projectMemorySemanticQuery(query, this.semanticQueryMaximumCharacters)
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      try {
+        const deadline = new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(Object.assign(new Error('semantic retrieval timed out'), { code: 'timeout' })), this.semanticTimeoutMs)
+        })
+        const response = await Promise.race([
+          semantic.search(Object.freeze({
+            query: projection.query,
+            instanceId: partition.instanceId,
+            actorId: partition.actorId,
+            ...(partition.projectId === undefined ? {} : { projectId: partition.projectId }),
+            limit: this.semanticTopK,
+          })),
+          deadline,
+        ])
+        if (!Array.isArray(response)) {
+          throw Object.assign(new Error('semantic retrieval returned a malformed response'), { code: 'malformed-hit' })
+        }
+        const validated: MemorySemanticHit[] = []
+        for (const value of response) {
+          const hit = this.validSemanticHit(value, generationId)
+          if (hit === undefined) {
+            throw Object.assign(new Error('semantic retrieval returned a malformed hit'), { code: 'malformed-hit' })
+          }
+          validated.push(hit)
+        }
+        for (const hit of validated) {
+          const record = this.visibleRecord(this.database, hit.recordId, ['active'], true)
+          if (record === undefined || record.revision.id !== hit.revisionId) continue
+          const components = ranks.get(hit.recordId) ?? {}
+          if (components.semanticRank === undefined || hit.rank < components.semanticRank) {
+            components.semanticRank = hit.rank
+          }
+          ranks.set(hit.recordId, components)
+          expectedRevisions.set(hit.recordId, hit.revisionId)
+        }
+        this.lastSemanticFailure = undefined
+      } catch (error) {
+        this.recordSemanticFailure(error)
+      } finally {
+        clearTimeout(timeout)
       }
     }
-    const embedding = this.ctx.get('doppelgangerEmbedding') as MemoryEmbeddingProvider | undefined
-    if (embedding !== undefined) {
-      const candidates = Object.freeze([...snapshot.values()].map(record => Object.freeze({
-        recordId: record.id,
-        revisionId: record.revision.id,
-        content: record.revision.content,
-      })))
-      const semantic = await embedding.rank(query, candidates)
-      for (const result of semantic) {
-        if (!Number.isSafeInteger(result.rank) || result.rank <= 0) continue
-        const record = snapshot.get(result.recordId)
-        if (record === undefined || record.revision.id !== result.revisionId) continue
-        const rank = ranks.get(result.recordId) ?? {}
-        if (rank.semanticRank === undefined || result.rank < rank.semanticRank) rank.semanticRank = result.rank
-        ranks.set(result.recordId, rank)
-      }
-    }
+
     const revalidated = new Map<string, MemoryRecord>()
-    for (const [id, original] of snapshot) {
+    for (const [id, expectedRevisionId] of expectedRevisions) {
       const current = this.visibleRecord(this.database, id, ['active'], true)
-      if (current !== undefined && current.revision.id === original.revision.id) revalidated.set(id, current)
+      if (current !== undefined && current.revision.id === expectedRevisionId) revalidated.set(id, current)
     }
     const ranked = [...ranks.entries()].flatMap(([id, components]) => {
       const record = revalidated.get(id)

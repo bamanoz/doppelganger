@@ -1,0 +1,105 @@
+- id: doppelganger-context
+  name: "@doppelganger/doppelganger-protocols/context"
+  isolate:
+    doppelgangerContext: session
+- id: doppelganger-tools
+  name: "@doppelganger/doppelganger-protocols/tools"
+  isolate:
+    doppelgangerTools: session
+- id: doppelganger-persona
+  name: "@doppelganger/doppelganger-persona"
+  inject: [doppelgangerRuntimeSession, doppelgangerContext]
+  isolate:
+    doppelgangerRuntimeSession: session
+    doppelgangerContext: session
+    doppelgangerPersona: session
+  config:
+    instanceId: mark
+    identity:
+      path: identity.md
+      priority: 1000
+    traits:
+      - name: engineer
+        path: traits/engineer.md
+        priority: 700
+      - name: concise
+        path: traits/concise.md
+        priority: 600
+      - name: evolving-profile
+        path: traits/evolving-profile.md
+        priority: 500
+- id: doppelganger-persona-authoring
+  name: "@doppelganger/doppelganger-persona-authoring"
+  inject: [doppelgangerPersona, doppelgangerTools]
+  isolate:
+    doppelgangerPersona: session
+    doppelgangerTools: session
+  config:
+    writableTargets: ["trait:evolving-profile"]
+- id: doppelganger-sqlite
+  name: "@doppelganger/doppelganger-sqlite"
+  inject: [doppelgangerRuntimeSession]
+  isolate:
+    doppelgangerRuntimeSession: session
+    doppelgangerInstanceSqlite: session
+  config:
+    home: !!js "doppelgangerRuntimeSession.workspaceRoot + '/dev/doppelganger/instances/mark'"
+- id: doppelganger-memory
+  name: "@doppelganger/doppelganger-memory"
+  inject: [doppelgangerActor, doppelgangerPersona, doppelgangerContext, doppelgangerTools, doppelgangerInstanceSqlite]
+  isolate:
+    doppelgangerActor: session
+    doppelgangerPersona: session
+    doppelgangerContext: session
+    doppelgangerTools: session
+    doppelgangerInstanceSqlite: session
+    doppelgangerMemory: session
+    doppelgangerMemorySemantic: session
+  config:
+    lexicalTopK: 40
+    semanticTopK: 40
+    semanticQueryMaximumCharacters: 512
+    semanticTimeoutMs: 1500
+- id: doppelganger-embedding-local
+  name: "@doppelganger/doppelganger-embedding-local"
+  inject: [doppelgangerRuntimeSession]
+  isolate:
+    doppelgangerRuntimeSession: session
+    doppelgangerMemoryEmbedder: session
+  config:
+    model: embeddinggemma-300m
+    cacheDir: !!js "doppelgangerRuntimeSession.workspaceRoot + '/dev/doppelganger/model-cache'"
+    offline: false
+    device: cpu
+    batchSize: 16
+    maximumCharacters: 16384
+    acquisitionTimeoutMs: 120000
+- id: doppelganger-vectors-sqlite-exact
+  name: "@doppelganger/doppelganger-memory-vectors/sqlite-exact"
+  inject: [doppelgangerRuntimeSession]
+  isolate:
+    doppelgangerRuntimeSession: session
+    doppelgangerMemoryVectorIndex: session
+  config:
+    databasePath: !!js "doppelgangerRuntimeSession.workspaceRoot + '/dev/doppelganger/instances/mark/storage/memory-vectors.sqlite3'"
+    namespace: mark.embeddinggemma-q8-384
+    dimensions: 384
+    sanitizedTarget: local:mark
+    busyTimeoutMs: 5000
+- id: doppelganger-memory-semantic
+  name: "@doppelganger/doppelganger-memory-vectors"
+  inject: [doppelgangerMemory, doppelgangerTools, doppelgangerMemoryEmbedder, doppelgangerMemoryVectorIndex]
+  isolate:
+    doppelgangerPersona: session
+    doppelgangerMemory: session
+    doppelgangerTools: session
+    doppelgangerMemoryEmbedder: session
+    doppelgangerMemoryVectorIndex: session
+    doppelgangerMemorySemantic: session
+  config:
+    instanceId: mark
+    pollIntervalMs: 250
+    batchSize: 8
+    maximumAttempts: 10
+    operationTimeoutMs: 30000
+    retryBaseMs: 500

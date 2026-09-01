@@ -39,6 +39,16 @@ const STATE_NAMES: Readonly<Record<number, CompositionEntryState>> = {
   4: 'disposed',
   5: 'unloading',
 }
+function errorText(cause: unknown): string {
+  if (!(cause instanceof Error)) return String(cause)
+  const parts = [cause.stack ?? cause.message]
+  if (cause instanceof AggregateError) {
+    parts.push(...cause.errors.map(errorText))
+  } else if (cause.cause !== undefined) {
+    parts.push(errorText(cause.cause))
+  }
+  return parts.join('\nCaused by: ')
+}
 
 async function inspectEntry(entry: Entry): Promise<CompositionEntryDiagnostic> {
   if (entry.disabled) return Object.freeze({ id: entry.id, plugin: entry.options.name, state: 'disabled' })
@@ -67,7 +77,7 @@ async function inspectEntry(entry: Entry): Promise<CompositionEntryDiagnostic> {
     try {
       await fiber.await()
     } catch (cause) {
-      error = cause instanceof Error ? cause.stack ?? cause.message : String(cause)
+      error = errorText(cause)
     }
     return Object.freeze({
       id: entry.id,
@@ -102,7 +112,7 @@ export function failedCompositionDiagnostics(
       id: 'doppelganger-composition',
       plugin: composition.loaderPath,
       state: 'failed' as const,
-      error: error instanceof Error ? error.stack ?? error.message : String(error),
+      error: errorText(error),
     })]),
   })
 }
@@ -112,10 +122,9 @@ export function activationFailures(diagnostics: CompositionDiagnostics): Composi
 }
 
 export class CompositionActivationError extends Error {
-  constructor(
-    public readonly diagnostics: CompositionDiagnostics,
-    cause?: unknown,
-  ) {
+  readonly diagnostics: CompositionDiagnostics
+
+  constructor(diagnostics: CompositionDiagnostics, cause?: unknown) {
     const failures = activationFailures(diagnostics)
     const lines = failures.map((entry) => {
       const missing = entry.missingServices === undefined || entry.missingServices.length === 0
@@ -128,6 +137,7 @@ export class CompositionActivationError extends Error {
       `composition activation failed for ${diagnostics.compositionId}@${diagnostics.compositionRevision}:\n${lines.join('\n')}`,
       cause === undefined ? undefined : { cause },
     )
+    this.diagnostics = diagnostics
     this.name = 'CompositionActivationError'
   }
 }

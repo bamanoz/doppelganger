@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "embeddinggemma-profile-bilingual-v1",
+  "documents": [
+    {
+      "key": "durable-write-en",
+      "text": "Use a short database transaction for durable writes."
+    },
+    {
+      "key": "durable-write-ru",
+      "text": "Для надёжной записи используйте короткую транзакцию базы данных."
+    },
+    {
+      "key": "release-approval",
+      "text": "Publishing release artifacts requires human approval."
+    },
+    {
+      "key": "encrypted-backup",
+      "text": "Резервные копии хранятся в зашифрованном хранилище."
+    },
+    {
+      "key": "transport-frame",
+      "text": "RPC_FRAME_V7 separates framed transport messages."
+    },
+    {
+      "key": "atlas-postgresql",
+      "text": "ATLAS_DATABASE uses PostgreSQL for canonical storage."
+    },
+    {
+      "key": "legacy-mysql",
+      "text": "The retired LEGACY_DATABASE used MySQL."
+    },
+    {
+      "key": "maintenance-window",
+      "text": "The supported maintenance slot begins Saturday at 09:00 UTC."
+    },
+    {
+      "key": "deployment-region",
+      "text": "The current deployment region is Helsinki."
+    },
+    {
+      "key": "mountain-weather",
+      "text": "Над горой сегодня ясное небо."
+    }
+  ],
+  "queries": [
+    {
+      "key": "durable-write-en-query",
+      "language": "en",
+      "text": "How should durable writes be stored safely?",
+      "expectedKey": "durable-write-en",
+      "forbiddenKeys": ["mountain-weather"]
+    },
+    {
+      "key": "durable-write-ru-query",
+      "language": "ru",
+      "text": "Как безопасно сохранять данные?",
+      "expectedKey": "durable-write-ru",
+      "forbiddenKeys": ["mountain-weather"]
+    },
+    {
+      "key": "release-approval-query",
+      "language": "en",
+      "text": "Who must sign off before packages ship?",
+      "expectedKey": "release-approval",
+      "forbiddenKeys": []
+    },
+    {
+      "key": "encrypted-backup-query",
+      "language": "ru",
+      "text": "Где находится защищённый дубликат данных?",
+      "expectedKey": "encrypted-backup",
+      "forbiddenKeys": []
+    },
+    {
+      "key": "transport-frame-query",
+      "language": "en",
+      "text": "RPC_FRAME_V7 background background. How are messages separated?",
+      "expectedKey": "transport-frame",
+      "forbiddenKeys": []
+    },
+    {
+      "key": "atlas-database-query",
+      "language": "en",
+      "text": "Which database engine does ATLAS_DATABASE use?",
+      "expectedKey": "atlas-postgresql",
+      "forbiddenKeys": ["legacy-mysql"]
+    },
+    {
+      "key": "maintenance-window-query",
+      "language": "en",
+      "text": "When is the supported maintenance period?",
+      "expectedKey": "maintenance-window",
+      "forbiddenKeys": []
+    },
+    {
+      "key": "deployment-region-query",
+      "language": "en",
+      "text": "Where is the current deployment hosted?",
+      "expectedKey": "deployment-region",
+      "forbiddenKeys": []
+    }
+  ]
+}

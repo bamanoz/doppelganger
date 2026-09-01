@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "packages": {
+    "@doppelganger/doppelganger-composition-runtime": {
+      "directory": "composition-runtime",
+      "dependencies": [
+        "@doppelganger/doppelganger-runtime-presets"
+      ]
+    },
+    "@doppelganger/doppelganger-embedding-local": {
+      "directory": "extension-embedding-local",
+      "dependencies": [
+        "@doppelganger/doppelganger-memory"
+      ]
+    },
+    "@doppelganger/doppelganger-host-omp": {
+      "directory": "host-omp",
+      "dependencies": [
+        "@doppelganger/doppelganger-composition-runtime",
+        "@doppelganger/doppelganger-protocols",
+        "@doppelganger/doppelganger-runtime-presets"
+      ]
+    },
+    "@doppelganger/doppelganger-memory": {
+      "directory": "extension-memory",
+      "dependencies": [
+        "@doppelganger/doppelganger-persona",
+        "@doppelganger/doppelganger-protocols",
+        "@doppelganger/doppelganger-sqlite"
+      ]
+    },
+    "@doppelganger/doppelganger-memory-vectors": {
+      "directory": "extension-memory-vectors",
+      "dependencies": [
+        "@doppelganger/doppelganger-memory",
+        "@doppelganger/doppelganger-protocols",
+        "@doppelganger/doppelganger-sqlite"
+      ]
+    },
+    "@doppelganger/doppelganger-omp": {
+      "directory": "omp",
+      "dependencies": [
+        "@doppelganger/doppelganger-host-omp",
+        "@doppelganger/doppelganger-persona",
+        "@doppelganger/doppelganger-persona-authoring",
+        "@doppelganger/doppelganger-protocols",
+        "@doppelganger/doppelganger-runtime-presets"
+      ]
+    },
+    "@doppelganger/doppelganger-persona": {
+      "directory": "extension-persona",
+      "dependencies": [
+        "@doppelganger/doppelganger-composition-runtime",
+        "@doppelganger/doppelganger-protocols"
+      ]
+    },
+    "@doppelganger/doppelganger-persona-authoring": {
+      "directory": "extension-persona-authoring",
+      "dependencies": [
+        "@doppelganger/doppelganger-persona",
+        "@doppelganger/doppelganger-protocols"
+      ]
+    },
+    "@doppelganger/doppelganger-protocols": {
+      "directory": "extension-protocols",
+      "dependencies": []
+    },
+    "@doppelganger/doppelganger-runtime-presets": {
+      "directory": "runtime-presets",
+      "dependencies": []
+    },
+    "@doppelganger/doppelganger-sqlite": {
+      "directory": "extension-sqlite",
+      "dependencies": []
+    }
+  }
+}

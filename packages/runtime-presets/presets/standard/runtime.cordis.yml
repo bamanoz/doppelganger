@@ -1,0 +1,27 @@
+- id: doppelganger-context
+  name: "@doppelganger/doppelganger-protocols/context"
+  isolate:
+    doppelgangerContext: session
+- id: doppelganger-tools
+  name: "@doppelganger/doppelganger-protocols/tools"
+  isolate:
+    doppelgangerTools: session
+- id: doppelganger-persona
+  name: "@doppelganger/doppelganger-persona"
+  inject: [doppelgangerRuntimeSession, doppelgangerContext]
+  isolate:
+    doppelgangerRuntimeSession: session
+    doppelgangerContext: session
+    doppelgangerPersona: session
+  config:
+    instanceId: standard
+    identity:
+      path: identity.md
+      priority: 1000
+    traits:
+      - name: engineer
+        path: traits/engineer.md
+        priority: 700
+      - name: concise
+        path: traits/concise.md
+        priority: 600

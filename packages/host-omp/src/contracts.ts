@@ -1,30 +1,50 @@
-import type {
-  SerializedCompositionActivation,
-  SerializedCompositionDefinition,
-  SerializedPluginReference,
-} from '@doppelganger/composition-runtime'
-import type {
-  AssembledContext,
-  LifecycleEvent,
-  JsonValue,
-  ToolDescriptor,
-  ToolInvocationResult,
-} from '@doppelganger/extension-protocols'
+import {
+  defineSerializedCompositionActivation,
+  type SerializedCompositionActivation,
+  type SerializedCompositionDefinition,
+} from '@doppelganger/doppelganger-composition-runtime'
+import {
+  createActorIdentity,
+  type AssembledContext,
+  type LifecycleEvent,
+  type JsonValue,
+  type ToolDescriptor,
+  type ToolInvocationResult,
+} from '@doppelganger/doppelganger-protocols'
 
-export const OMP_RPC_PROTOCOL_VERSION = 1 as const
+export const OMP_RPC_PROTOCOL_VERSION = 3 as const
 
 export type {
   SerializedCompositionActivation,
   SerializedCompositionDefinition,
-  SerializedPluginReference,
 }
 
-export interface SessionActivateParams extends SerializedCompositionActivation {
+export interface SerializedOmpActivation extends SerializedCompositionActivation {
+  readonly actorId?: string
+}
+
+export function defineSerializedOmpActivation(input: SerializedOmpActivation): SerializedOmpActivation {
+  const activation = defineSerializedCompositionActivation(input)
+  const actor = createActorIdentity(input.actorId)
+  return Object.freeze({
+    ...activation,
+    ...(actor.state === 'bound' ? { actorId: actor.actorId } : {}),
+  })
+}
+
+export interface SessionActivateParams extends SerializedOmpActivation {
   readonly protocolVersion: typeof OMP_RPC_PROTOCOL_VERSION
 }
 
 export interface SessionActivateResult {
   readonly protocolVersion: typeof OMP_RPC_PROTOCOL_VERSION
+  readonly diagnostics: unknown
+  readonly runtimeRevision: string
+  readonly tools: readonly ToolDescriptor[]
+}
+
+export interface RuntimeChangedParams {
+  readonly runtimeRevision: string
   readonly diagnostics: unknown
   readonly tools: readonly ToolDescriptor[]
 }

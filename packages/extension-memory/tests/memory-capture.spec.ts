@@ -1,21 +1,22 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, type Plugin } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createPersonaActivationPlugin } from '@doppelganger/extension-persona'
+import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
 import {
   LIFECYCLE_PROTOCOL_VERSION,
+  createActorIdentityPlugin,
   publishLifecycleEvent,
   serializeLifecycleValue,
   type TurnCommittedEvent,
-} from '@doppelganger/extension-protocols'
-import { InstanceSqliteService } from '@doppelganger/extension-sqlite'
+} from '@doppelganger/doppelganger-protocols'
+import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
 import {
-  MemoryService,
   createMemoryCapturePlugin,
   type MemoryCandidateExtractor,
-} from '../src/index.ts'
+} from '@doppelganger/doppelganger-memory/capture'
+import { MemoryService, type MemorySemanticRetriever } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
 
@@ -23,21 +24,29 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function setup(options: Parameters<typeof createMemoryCapturePlugin>[0] | undefined) {
+async function setup(
+  options: Parameters<typeof createMemoryCapturePlugin>[0] | undefined,
+  semantic?: MemorySemanticRetriever,
+) {
   const instanceHome = await mkdtemp(join(tmpdir(), 'doppelganger-memory-capture-'))
   temporaryRoots.push(instanceHome)
   const context = new Context()
   await context.plugin(createPersonaActivationPlugin({
     instanceId: 'aiden',
-    principalId: 'local-user',
     sessionId: 'capture-session',
     projectId: 'project-one',
     projectRoot: join(instanceHome, 'project'),
-    instanceHome,
-    definitionRoot: instanceHome,
   }))
+  await context.plugin(createActorIdentityPlugin('local-user'))
   await context.plugin(InstanceSqliteService, { home: instanceHome })
   await context.plugin(MemoryService)
+  if (semantic !== undefined) {
+    const provider: Plugin = {
+      name: 'capture-semantic-retriever',
+      apply(ctx) { ctx.provide('doppelgangerMemorySemantic', semantic) },
+    }
+    await context.plugin(provider)
+  }
   if (options !== undefined) await context.plugin(createMemoryCapturePlugin(options))
   return context
 }
@@ -56,7 +65,6 @@ function committed(
     timestamp: 1,
     principalInput: serializeLifecycleValue(principalInput),
     assistantOutput: serializeLifecycleValue(assistantOutput),
-    toolOutcomes: [],
     outcome: 'completed',
   }
 }
@@ -106,6 +114,128 @@ describe('optional memory capture', () => {
     await context.fiber.dispose()
   })
 
+
+  it('extracts Russian tagged and keyed durable statements with explicit remember requests', async () => {
+    const context = await setup({ enabled: true })
+    await publishLifecycleEvent(context, committed('russian-durable', [
+      'Запомни: [предпочтение:preference.response.language] Отвечай по-русски.',
+      'решение:project.database.engine = Используем SQLite.',
+      'факт:project.runtime.protocol — Runtime использует committed turns.',
+      'процедура:project.release.steps - Сначала запускаем узкие проверки.',
+    ].join('\n')))
+    expect(context.doppelgangerMemory.listCandidates()
+      .map(candidate => `${candidate.kind}:${candidate.subjectKey}`)
+      .sort()).toEqual([
+      'decision:project.database.engine',
+      'fact:project.runtime.protocol',
+      'preference:preference.response.language',
+      'procedure:project.release.steps',
+    ])
+    await context.fiber.dispose()
+  })
+
+  it('rejects invalid custom candidates without blocking later valid candidates', async () => {
+    const diagnostics: string[] = []
+    const extractor: MemoryCandidateExtractor = {
+      extract: () => [
+        { subjectKey: 'unstable', kind: 'fact', content: 'No stable namespace.' },
+        { subjectKey: 'persona.identity.name', kind: 'fact', content: 'You are somebody else.' },
+        { subjectKey: 'secret.api_token', kind: 'fact', content: 'api_key = abcdefghijklmnop' },
+        { subjectKey: 'project.valid.fact', kind: 'fact', content: 'The valid fact remains.' },
+      ],
+    }
+    const context = await setup({ enabled: true, extractor, onDiagnostic: item => diagnostics.push(item.code) })
+    await expect(publishLifecycleEvent(context, committed('invalid-custom', 'Extract candidates.'))).resolves.toBeUndefined()
+    expect(context.doppelgangerMemory.listCandidates().map(candidate => candidate.subjectKey)).toEqual(['project.valid.fact'])
+    expect(diagnostics).toEqual(['validation', 'validation', 'validation'])
+    await context.fiber.dispose()
+  })
+
+  it('emits only canonically valid same-partition and same-kind neighbor suggestions without mutation', async () => {
+    const suggestions: unknown[] = []
+    const requests: unknown[] = []
+    let activeId = ''
+    let activeRevisionId = ''
+    let foreignId = ''
+    let foreignRevisionId = ''
+    const semantic: MemorySemanticRetriever = {
+      async search() { return [] },
+      async neighbors(request) {
+        requests.push(request)
+        return [
+          { recordId: activeId, revisionId: activeRevisionId, subjectKey: 'project.runtime.transport', score: 0.98, relation: 'paraphrase' },
+          { recordId: foreignId, revisionId: foreignRevisionId, subjectKey: 'project.foreign.transport', score: 0.99, relation: 'equivalent' },
+          { recordId: activeId, revisionId: activeRevisionId, subjectKey: 'wrong.subject', score: 0.97, relation: 'possible-contradiction' },
+        ]
+      },
+      status: () => ({ active: true, supportedMaintenance: [] }),
+      async maintenance() { throw new Error('unused') },
+    }
+    const context = await setup({ enabled: true, onSuggestion: item => suggestions.push(item) }, semantic)
+    const active = context.doppelgangerMemory.remember({
+      operationId: 'neighbor-active',
+      subjectKey: 'project.runtime.transport',
+      kind: 'fact',
+      content: 'The runtime uses framed JSON-RPC.',
+    })
+    activeId = active.id
+    activeRevisionId = active.revision.id
+    const foreign = context.doppelgangerMemory.remember({
+      operationId: 'neighbor-foreign',
+      subjectKey: 'project.foreign.transport',
+      kind: 'fact',
+      content: 'Foreign actor transport.',
+    })
+    foreignId = foreign.id
+    foreignRevisionId = foreign.revision.id
+    context.doppelgangerMemory.canonicalDatabase.prepare('UPDATE memory_records SET actor_id = ? WHERE id = ?')
+      .run('other-actor', foreign.id)
+    await publishLifecycleEvent(context, committed('neighbor-candidate', '[fact:project.runtime.protocol] Runtime communication uses JSON frames.'))
+    expect(requests).toEqual([expect.objectContaining({
+      instanceId: 'aiden', actorId: 'local-user', scopeKind: 'project', projectId: 'project-one', kind: 'fact', limit: 4,
+    })])
+    expect(suggestions).toEqual([expect.objectContaining({
+      recordId: active.id, revisionId: active.revision.id, relation: 'paraphrase', candidateSubjectKey: 'project.runtime.protocol',
+    })])
+    expect(context.doppelgangerMemory.inspect(active.id)).toMatchObject({
+      status: 'active', subjectKey: 'project.runtime.transport', revision: { id: active.revision.id, content: active.revision.content },
+    })
+    expect(context.doppelgangerMemory.listCandidates()).toHaveLength(1)
+    expect(context.doppelgangerMemory.conflicts()).toEqual([])
+    await context.fiber.dispose()
+  })
+
+  it('contains neighbor and suggestion observer failures while preserving committed candidate writes', async () => {
+    const diagnostics: string[] = []
+    const throwingNeighbor: MemorySemanticRetriever = {
+      async search() { return [] },
+      async neighbors() { throw new Error('neighbor unavailable') },
+      status: () => ({ active: true, supportedMaintenance: [] }),
+      async maintenance() { throw new Error('unused') },
+    }
+    const failed = await setup({ enabled: true, onDiagnostic: item => diagnostics.push(item.code) }, throwingNeighbor)
+    await expect(publishLifecycleEvent(failed, committed('neighbor-failure', '[fact:project.failure.boundary] Capture remains fail-open.'))).resolves.toBeUndefined()
+    expect(diagnostics).toEqual(['neighbor'])
+    expect(failed.doppelgangerMemory.listCandidates()).toHaveLength(1)
+    await failed.fiber.dispose()
+
+    let activeId = ''
+    let revisionId = ''
+    const observerNeighbor: MemorySemanticRetriever = {
+      async search() { return [] },
+      async neighbors() { return [{ recordId: activeId, revisionId, subjectKey: 'project.observer.active', score: 1, relation: 'equivalent' }] },
+      status: () => ({ active: true, supportedMaintenance: [] }),
+      async maintenance() { throw new Error('unused') },
+    }
+    const observed = await setup({ enabled: true, onSuggestion: () => { throw new Error('observer failed') } }, observerNeighbor)
+    const active = observed.doppelgangerMemory.remember({ operationId: 'observer-active', subjectKey: 'project.observer.active', kind: 'fact', content: 'Observer source.' })
+    activeId = active.id
+    revisionId = active.revision.id
+    await expect(publishLifecycleEvent(observed, committed('observer-failure', '[fact:project.observer.candidate] Observer candidate.'))).resolves.toBeUndefined()
+    expect(observed.doppelgangerMemory.listCandidates()).toHaveLength(1)
+    expect(observed.doppelgangerMemory.inspect(active.id).status).toBe('active')
+    await observed.fiber.dispose()
+  })
   it('filters recursive context, trivial, generated, secret, non-string, and oversized material before extraction', async () => {
     let calls = 0
     const extractor: MemoryCandidateExtractor = {

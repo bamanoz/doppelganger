@@ -1,9 +1,9 @@
-import type { InstanceSqliteDatabase } from '@doppelganger/extension-sqlite'
+import type { InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
 
-export const MEMORY_SCHEMA_VERSION = 2
+export const MEMORY_SCHEMA_VERSION = 4
 
 export interface MemoryMigrationOptions {
-  readonly legacyPrincipalId: string
+  readonly legacyActorId: string
 }
 
 function requiredId(field: string, value: string): string {
@@ -118,6 +118,91 @@ function createVersionTwo(storage: InstanceSqliteDatabase): void {
   `)
 }
 
+function migrateVersionTwo(storage: InstanceSqliteDatabase): void {
+  storage.exec(`
+    DROP TABLE memory_embeddings;
+    CREATE TABLE memory_semantic_generations (
+      id TEXT PRIMARY KEY,
+      instance_id TEXT NOT NULL,
+      embedder_identity_json TEXT NOT NULL,
+      vector_index_identity_json TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('building', 'active', 'retained', 'failed', 'deleting')),
+      created_at TEXT NOT NULL,
+      activated_at TEXT,
+      completed_at TEXT,
+      failure_code TEXT
+    );
+    CREATE TABLE memory_semantic_active_generation (
+      instance_id TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL REFERENCES memory_semantic_generations(id) ON DELETE RESTRICT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE memory_semantic_indexed_revisions (
+      generation_id TEXT NOT NULL REFERENCES memory_semantic_generations(id) ON DELETE CASCADE,
+      record_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+      revision_id TEXT NOT NULL REFERENCES memory_revisions(id) ON DELETE CASCADE,
+      indexed_at TEXT NOT NULL,
+      PRIMARY KEY(generation_id, record_id)
+    );
+    CREATE TABLE memory_vector_projection_work (
+      id TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL REFERENCES memory_semantic_generations(id) ON DELETE CASCADE,
+      record_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+      revision_id TEXT NOT NULL REFERENCES memory_revisions(id) ON DELETE CASCADE,
+      operation TEXT NOT NULL CHECK(operation = 'upsert'),
+      state TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'failed')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+      available_at TEXT NOT NULL,
+      lease_until TEXT,
+      last_failure_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE memory_vector_deletions (
+      id TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL REFERENCES memory_semantic_generations(id) ON DELETE CASCADE,
+      record_id TEXT NOT NULL,
+      revision_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'failed')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+      available_at TEXT NOT NULL,
+      lease_until TEXT,
+      last_failure_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE memory_embedding_cache (
+      embedder_fingerprint TEXT NOT NULL,
+      record_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+      revision_id TEXT NOT NULL REFERENCES memory_revisions(id) ON DELETE CASCADE,
+      content_digest TEXT NOT NULL,
+      dimensions INTEGER NOT NULL CHECK(dimensions > 0),
+      vector BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(embedder_fingerprint, record_id, revision_id)
+    );
+    CREATE UNIQUE INDEX memory_semantic_generation_active
+      ON memory_semantic_generations(instance_id) WHERE state = 'active';
+    CREATE INDEX memory_semantic_generation_state
+      ON memory_semantic_generations(instance_id, state, created_at);
+    CREATE INDEX memory_semantic_indexed_revision
+      ON memory_semantic_indexed_revisions(record_id, revision_id, generation_id);
+    CREATE INDEX memory_vector_projection_ready
+      ON memory_vector_projection_work(generation_id, state, available_at, created_at, id);
+    CREATE INDEX memory_vector_deletion_ready
+      ON memory_vector_deletions(generation_id, state, available_at, created_at, id);
+    CREATE INDEX memory_embedding_cache_record
+      ON memory_embedding_cache(record_id, revision_id, embedder_fingerprint);
+  `)
+}
+
+function migrateVersionThree(storage: InstanceSqliteDatabase): void {
+  storage.exec(`
+    ALTER TABLE memory_records RENAME COLUMN principal_id TO actor_id;
+    ALTER TABLE memory_operations RENAME COLUMN principal_id TO actor_id;
+  `)
+}
+
 function count(storage: InstanceSqliteDatabase, table: string): number {
   return Number(storage.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count)
 }
@@ -127,7 +212,7 @@ function outputText(value: unknown, field: string): string {
 }
 
 
-function migrateVersionOne(storage: InstanceSqliteDatabase, legacyPrincipalId: string): void {
+function migrateVersionOne(storage: InstanceSqliteDatabase, legacyActorId: string): void {
   const recordCount = count(storage, 'memory_records')
   const revisionCount = count(storage, 'memory_revisions')
   const candidateEvidenceCount = count(storage, 'memory_candidate_evidence')
@@ -151,7 +236,7 @@ function migrateVersionOne(storage: InstanceSqliteDatabase, legacyPrincipalId: s
       project_id, status, pinned, 1.0, 0.5, NULL, NULL, NULL,
       current_revision_id, source_session_id, created_at, updated_at
     FROM memory_records_v1
-  `).run(legacyPrincipalId)
+  `).run(legacyActorId)
   storage.exec(`
     INSERT INTO memory_revisions(
       id, record_id, ordinal, content, source_session_id, source_kind,
@@ -221,7 +306,7 @@ export function migrateMemorySchema(
   database: InstanceSqliteDatabase,
   options: MemoryMigrationOptions,
 ): void {
-  const legacyPrincipalId = requiredId('memory legacy principal ID', options.legacyPrincipalId)
+  const legacyActorId = requiredId('memory legacy actor ID', options.legacyActorId)
   database.transaction((storage) => {
     storage.exec(`
       CREATE TABLE IF NOT EXISTS memory_schema (
@@ -231,12 +316,23 @@ export function migrateMemorySchema(
       SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM memory_schema);
     `)
     const current = Number(storage.prepare('SELECT version FROM memory_schema').get()?.version)
-    if (![0, 1, MEMORY_SCHEMA_VERSION].includes(current)) {
+    if (![0, 1, 2, 3, MEMORY_SCHEMA_VERSION].includes(current)) {
       throw new Error(`unsupported memory schema version: ${String(current)}`)
     }
     if (current === MEMORY_SCHEMA_VERSION) return
-    if (current === 0) createVersionTwo(storage)
-    else migrateVersionOne(storage, legacyPrincipalId)
+    let version = current
+    if (version === 0) {
+      createVersionTwo(storage)
+      version = 2
+    } else if (version === 1) {
+      migrateVersionOne(storage, legacyActorId)
+      version = 2
+    }
+    if (version === 2) {
+      migrateVersionTwo(storage)
+      version = 3
+    }
+    if (version === 3) migrateVersionThree(storage)
     storage.prepare('UPDATE memory_schema SET version = ?').run(MEMORY_SCHEMA_VERSION)
   })
 }
@@ -253,7 +349,9 @@ export function deleteMemoryRecordRows(database: InstanceSqliteDatabase, recordI
     .run(recordId, recordId)
   database.prepare('DELETE FROM memory_candidate_evidence WHERE candidate_id = ?').run(recordId)
   database.prepare('DELETE FROM memory_evidence WHERE record_id = ?').run(recordId)
-  database.prepare('DELETE FROM memory_embeddings WHERE record_id = ?').run(recordId)
+  database.prepare('DELETE FROM memory_vector_projection_work WHERE record_id = ?').run(recordId)
+  database.prepare('DELETE FROM memory_semantic_indexed_revisions WHERE record_id = ?').run(recordId)
+  database.prepare('DELETE FROM memory_embedding_cache WHERE record_id = ?').run(recordId)
   database.prepare('DELETE FROM memory_fts WHERE record_id = ?').run(recordId)
   database.prepare('DELETE FROM memory_revisions WHERE record_id = ?').run(recordId)
   return database.prepare('DELETE FROM memory_records WHERE id = ?').run(recordId).changes === 1

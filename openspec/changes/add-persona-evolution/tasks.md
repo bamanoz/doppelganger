@@ -71,7 +71,7 @@
 - [x] 9.3 Verify the skill contains no executable authority, path-based fallback, fake chat approval, retry-after-rejection, or claim-before-HMR-success
 - [x] 9.4 Verify the current project-scoped `npx skills add` command copies the skill to `.agents/skills`, which both OMP and DSH scan, and document that shared global installation is unsupported
 - [x] 9.5 Exercise host-native invocation in OMP and DSH skill discovery fixtures using the same canonical skill ID
-- [ ] 9.6 Publish the owning Doppelganger revision and verify installation from the public repository before documenting it as available
+- [x] 9.6 Publish the owning Doppelganger revision and verify installation from the public repository before documenting it as available
 
 ## 10. Documentation and final verification
 

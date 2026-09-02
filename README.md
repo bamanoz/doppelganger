@@ -59,6 +59,7 @@ packages/
 ├── extension-persona   Persona activation metadata, identity, traits, and Loader root
 ├── extension-persona-authoring  Logical inspection and approved exact trait revision
 ├── extension-dynamic-runtime-plugins  Opt-in inspected temporary Cordis plugin workflow
+├── extension-codegraph  Optional workspace-bound CodeGraph status and graph exploration
 ├── extension-sqlite    Directly loadable SQLite infrastructure
 ├── extension-memory    Canonical memory, lexical/hybrid retrieval, tools, capture, and semantic contracts
 ├── extension-embedding-local  Lazy EmbeddingGemma/MiniLM Loader plugin and validated model cache
@@ -229,9 +230,35 @@ The same roster is available to in-process Cordis hosts through `@doppelganger/d
 
 ### Optional full-stack user presets
 
-An editable user Runtime Preset may extend `standard` with Persona Authoring, Evolution, Dynamic Runtime Plugins, SQLite, lexical memory, a local embedder, one vector backend, and the semantic coordinator. Such a composition remains user-owned configuration rather than a shipped or repository-specific preset. Each feature stays an independently addressable Loader row, and tests construct equivalent full-stack presets under temporary roots.
+An editable user Runtime Preset may extend `standard` with Persona Authoring, Evolution, Dynamic Runtime Plugins, CodeGraph, SQLite, lexical memory, a local embedder, one vector backend, and the semantic coordinator. Such a composition remains user-owned configuration rather than a shipped or repository-specific preset. Each feature stays an independently addressable Loader row, and tests construct equivalent full-stack presets under temporary roots.
 
-Persona Authoring writes only explicitly configured logical trait targets. Evolution exists only when its Loader row is present and stores non-executing proposals in actor-partitioned SQLite or project YAML. Dynamic Runtime Plugins exist only when their Loader row is present and keep every definition in Runtime Session process memory. Omitting the authoring row leaves every Persona asset read-only. Omitting Evolution exposes no proposal controls or reminders. Omitting the dynamic row exposes no runtime-plugin controls. Omitting the semantic rows leaves memory valid and lexical-only. `all-MiniLM-L6-v2` remains an explicit 384-dimensional compatibility selection through the embedder row's `model` field; it is not an alias for EmbeddingGemma and produces a distinct semantic generation.
+Persona Authoring writes only explicitly configured logical trait targets. Evolution exists only when its Loader row is present and stores non-executing proposals in actor-partitioned SQLite or project YAML. Dynamic Runtime Plugins exist only when their Loader row is present and keep every definition in Runtime Session process memory. CodeGraph exists only when its Loader row is present and uses the Runtime Session workspace plus a separately installed, user-initialized local index. Omitting the authoring row leaves every Persona asset read-only. Omitting Evolution exposes no proposal controls or reminders. Omitting the dynamic row exposes no runtime-plugin controls. Omitting CodeGraph exposes no graph tools or process prerequisite. Omitting the semantic rows leaves memory valid and lexical-only. `all-MiniLM-L6-v2` remains an explicit 384-dimensional compatibility selection through the embedder row's `model` field; it is not an alias for EmbeddingGemma and produces a distinct embedding space.
+
+### CodeGraph code intelligence
+
+Install a compatible standalone CodeGraph CLI yourself, then initialize only the repositories you intend to expose. Doppelganger currently supports `>=1.6.0 <1.7.0` and never installs, upgrades, initializes, rebuilds, deletes, watches, serves, or globally configures CodeGraph:
+
+```bash
+npm install --global @colbymchenry/codegraph@1.6.0
+cd /absolute/path/to/project
+codegraph init
+```
+
+Add the optional row to an editable Runtime Preset that already composes session-isolated `doppelgangerTools`:
+
+```yaml
+- id: doppelganger-codegraph
+  name: "@doppelganger/doppelganger-codegraph/loader"
+  inject: [doppelgangerRuntimeSession, doppelgangerTools]
+  isolate:
+    doppelgangerRuntimeSession: session
+    doppelgangerTools: session
+  config:
+    defaultMaxFiles: 8
+    maximumConcurrentExplorations: 2
+```
+
+The plugin exposes `codegraph.status` and `codegraph.explore`. Both are bound to the host-owned Runtime Session workspace; tool input cannot choose another path or executable. Exploration validates the existing index and may run only incremental `codegraph sync --quiet` maintenance when that derived index is otherwise safe. The private OMP package contains the optional Loader package in its installed closure; other hosts must make it resolvable themselves. CodeGraph runs as trusted local process code, and returned source context follows the host's ordinary model-disclosure path. See [`docs/features/codegraph.md`](docs/features/codegraph.md) for exact status, safety, bounds, lifecycle, and trust contracts.
 
 ### Dynamic Runtime Plugin development
 

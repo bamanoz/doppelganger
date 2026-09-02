@@ -1,6 +1,6 @@
 # Oh My Pi host
 
-Oh My Pi (OMP) is the implemented host integration. `host-omp` is Runtime-Preset-neutral and has no dependency on Persona, Evolution, memory, SQLite, embedding, vector packages, or a named preset.
+Oh My Pi (OMP) is the implemented host integration. `host-omp` is Runtime-Preset-neutral and has no dependency on Persona, Evolution, CodeGraph, memory, SQLite, embedding, vector packages, or a named preset.
 
 ## Activation
 
@@ -37,6 +37,7 @@ OMP lifecycle observations are normalized and forwarded to the runtime-side plug
 An opt-in Dynamic Runtime Plugins Loader row registers seven ordinary portable `runtime-plugin.*` controls through the same child transport. OMP projects define, inspect, stop, and undefine through its discoverable dynamic path, while `runtime-plugin.run` is an essential top-level tool so its required one-shot prompt cannot be bypassed by permissive or `yolo` mode. The prompt includes the portable shell-equivalent warning and a bounded deterministic rendering of the exact immutable Package metadata. Generated tools and context use normal exact replacement; update, stop, undefine, owner replacement, and shutdown remove their effects, and stale OMP closures fail unavailable. A generated exception is returned as a domain tool error; a child crash follows the existing fatal child failure boundary and leaves OMP usable.
 
 An opt-in Evolution Loader row follows the same generic path. OMP projects all seven portable `evolution.*` controls with its normal `doppelganger_` name transformation, contributes policy and reminder context before turns, exactly removes proxies after row removal, and requires no Evolution-specific adapter code. Proposal controls are non-executing and declare no native approval; any later Persona revision or generated-code execution retains the owning tool's separate approval contract.
+An opt-in CodeGraph Loader row also follows the generic path. OMP projects `codegraph.status` and `codegraph.explore` as discoverable `doppelganger_codegraph_status` and `doppelganger_codegraph_explore` devices, refreshes them after committed reload, and removes them after row removal without CodeGraph-specific routing, process, or index logic. The Runtime Session workspace supplied by OMP remains the only allowed graph boundary.
 
 ## Failure and shutdown
 
@@ -44,9 +45,9 @@ Invalid selection/configuration, activation failure, fatal transport failure, ru
 
 ## Package boundaries
 
-`@doppelganger/doppelganger-omp` is the private, version `0.0.0` local install unit understood by OMP's plugin manager. Its manifest declares exactly one extension entrypoint. That neutral entrypoint supplies no home, child path, actor default, Persona instance, Evolution behavior, or named Runtime Preset; a non-empty `DOPPELGANGER_ACTOR_ID` is the only package-level host binding input. The package owns the product dependency closure required to resolve the shipped `standard` Runtime Preset and optional Dynamic Runtime Plugins and Evolution from an isolated linked plugin tree.
+`@doppelganger/doppelganger-omp` is the private, version `0.0.0` local install unit understood by OMP's plugin manager. Its manifest declares exactly one extension entrypoint. That neutral entrypoint supplies no home, child path, actor default, Persona instance, Evolution behavior, CodeGraph behavior, or named Runtime Preset; a non-empty `DOPPELGANGER_ACTOR_ID` is the only package-level host binding input. The package owns the product dependency closure required to resolve the shipped `standard` Runtime Preset and optional Dynamic Runtime Plugins, Evolution, and CodeGraph from an isolated linked plugin tree.
 
-`@doppelganger/doppelganger-host-omp` remains the generic Runtime-Preset-neutral adapter library. Its only declared package entrypoint exports `createDoppelgangerOmpExtension`, `DoppelgangerOmpExtensionOptions` including pure-roster configuration, and the adapter-facing `OmpChildConnection`, `OmpChildDisposal`, and `OmpChildFactory` types. It has no dependency on Persona, SQLite, memory, embedding, vector, Dynamic Runtime Plugin, or named-preset packages. Child runtime, process owner, framed protocol, wire contracts, and runtime-host implementation modules are package-private.
+`@doppelganger/doppelganger-host-omp` remains the generic Runtime-Preset-neutral adapter library. Its only declared package entrypoint exports `createDoppelgangerOmpExtension`, `DoppelgangerOmpExtensionOptions` including pure-roster configuration, and the adapter-facing `OmpChildConnection`, `OmpChildDisposal`, and `OmpChildFactory` types. It has no dependency on Persona, SQLite, memory, embedding, vector, Dynamic Runtime Plugin, Evolution, CodeGraph, or named-preset packages. Child runtime, process owner, framed protocol, wire contracts, and runtime-host implementation modules are package-private.
 
 The local plugin package remains private and source-first. Local linking and package inspection are supported; npm publication, marketplace distribution, independent versioning, provenance, and public compatibility policy are separate future work.
 
@@ -63,4 +64,5 @@ The local plugin package remains private and source-first. Local linking and pac
 - `packages/host-omp/src/child.ts` — private package-relative child runtime endpoint.
 - `packages/host-omp/tests/exports.spec.ts` — adapter root import contract.
 - `packages/host-omp/tests/` — transport, failure, patch, persistence, capture, dynamic-tool, Dynamic Runtime Plugin, reload, and shutdown scenarios.
+- `packages/extension-codegraph/` — optional portable CodeGraph adapter projected without host-specific code.
 

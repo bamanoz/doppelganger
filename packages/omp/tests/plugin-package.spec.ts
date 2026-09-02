@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { createServer, type Server, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
 import { access, chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, join } from 'node:path'
@@ -20,6 +21,7 @@ const packageRoot = fileURLToPath(new URL('..', import.meta.url))
 const ompPath = join(repositoryRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'omp.cmd' : 'omp')
 const temporaryRoots: string[] = []
 const activeOmpProcesses = new Set<ChildProcessWithoutNullStreams>()
+const codeGraphFixtureSource = join(repositoryRoot, 'packages', 'extension-codegraph', 'tests', 'fixtures', 'codegraph-fixture.mjs')
 
 interface PackageManifest {
   readonly name: string
@@ -321,6 +323,172 @@ async function writeToolBearingPreset(fixture: LinkedOmpFixture): Promise<void> 
   ])
 }
 
+interface CodeGraphOmpFixture {
+  readonly activePath: string
+  readonly executable: string
+  readonly logPath: string
+  readonly presetPath: string
+  readonly statusPath: string
+}
+
+async function writeCodeGraphPreset(fixture: LinkedOmpFixture, workspace: string): Promise<CodeGraphOmpFixture> {
+  const preset = join(fixture.doppelgangerHome, '.runtime-presets', 'codegraph-test')
+  const executable = join(fixture.root, 'codegraph-fixture')
+  const logPath = join(fixture.root, 'codegraph-commands.jsonl')
+  const statusPath = join(fixture.root, 'codegraph-status.json')
+  const activePath = join(fixture.root, 'codegraph-active')
+  const presetPath = join(preset, 'runtime.cordis.yml')
+  await mkdir(preset, { recursive: true })
+  await mkdir(activePath, { recursive: true })
+  await cp(codeGraphFixtureSource, executable)
+  await chmod(executable, 0o755)
+  await Promise.all([
+    writeFile(join(fixture.doppelgangerHome, 'config.yaml'), 'version: 1\ndefaultRuntimePreset: codegraph-test\n'),
+    writeFile(statusPath, JSON.stringify({
+      initialized: true,
+      version: '1.6.0',
+      projectPath: workspace,
+      indexPath: join(workspace, '.codegraph'),
+      lastIndexed: '2026-09-02T12:00:00.000Z',
+      fileCount: 1,
+      nodeCount: 2,
+      edgeCount: 1,
+      pendingChanges: { added: 0, modified: 0, removed: 0 },
+      worktreeMismatch: null,
+      index: {
+        builtWithVersion: '1.6.0',
+        builtWithExtractionVersion: 7,
+        currentExtractionVersion: 7,
+        reindexRecommended: false,
+        state: 'complete',
+        pendingRefs: 0,
+      },
+    })),
+    writeFile(presetPath, [
+      '- id: tools',
+      '  name: "@doppelganger/doppelganger-protocols/tools"',
+      '  isolate:',
+      '    doppelgangerTools: session',
+      '- id: codegraph',
+      '  name: "@doppelganger/doppelganger-codegraph/loader"',
+      '  inject: [doppelgangerRuntimeSession, doppelgangerTools]',
+      '  isolate:',
+      '    doppelgangerRuntimeSession: session',
+      '    doppelgangerTools: session',
+      '  config:',
+      `    executable: ${JSON.stringify(executable)}`,
+      '',
+    ].join('\n')),
+  ])
+  fixture.environment.CODEGRAPH_FIXTURE_STATUS_PATH = statusPath
+  fixture.environment.CODEGRAPH_FIXTURE_LOG = logPath
+  fixture.environment.CODEGRAPH_FIXTURE_ACTIVE_PATH = activePath
+  fixture.environment.CODEGRAPH_FIXTURE_EXPLORE = 'OMP graph context\n'
+  return { activePath, executable, logPath, presetPath, statusPath }
+}
+
+async function codeGraphCommandLog(path: string): Promise<readonly Record<string, unknown>[]> {
+  const source = await readFile(path, 'utf8').catch(cause => {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return ''
+    throw cause
+  })
+  return source.trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
+}
+
+function openAiChunk(res: ServerResponse, value: unknown): void {
+  res.write(`data: ${JSON.stringify(value)}\n\n`)
+}
+
+function openAiToolResponse(res: ServerResponse, id: string, device: string, content: string): void {
+  openAiChunk(res, {
+    id: `chatcmpl-${id}`,
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'gpt-4o',
+    choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{
+      index: 0,
+      id,
+      type: 'function',
+      function: { name: 'write', arguments: JSON.stringify({ i: 'Invoking CodeGraph', path: `xd://${device}`, content }) },
+    }] }, finish_reason: null }],
+  })
+  openAiChunk(res, {
+    id: `chatcmpl-${id}`,
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'gpt-4o',
+    choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+  })
+  res.end('data: [DONE]\n\n')
+}
+
+function openAiTextResponse(res: ServerResponse, text: string): void {
+  openAiChunk(res, {
+    id: 'chatcmpl-final',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'gpt-4o',
+    choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }],
+  })
+  openAiChunk(res, {
+    id: 'chatcmpl-final',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'gpt-4o',
+    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+  })
+  res.end('data: [DONE]\n\n')
+}
+
+interface OpenAiRequestBody {
+  readonly messages?: Array<{ readonly role?: string; readonly content?: unknown }>
+}
+
+interface CodeGraphModel {
+  readonly server: Server
+  readonly baseUrl: string
+  readonly requests: OpenAiRequestBody[]
+}
+
+async function startCodeGraphModel(): Promise<CodeGraphModel> {
+  const requests: OpenAiRequestBody[] = []
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = []
+    for await (const chunk of req) chunks.push(Buffer.from(chunk))
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as OpenAiRequestBody
+    requests.push(body)
+    const messages = body.messages ?? []
+    const lastUser = [...messages].reverse().find(message => message.role === 'user')
+    const toolResults = messages.filter(message => message.role === 'tool')
+    res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+    if (JSON.stringify(lastUser?.content).includes('removed CodeGraph')) {
+      if (toolResults.length < 4) openAiToolResponse(res, 'call-stale', 'doppelganger_codegraph_status', '{}')
+      else openAiTextResponse(res, 'stale checked')
+      return
+    }
+    if (toolResults.length === 0) {
+      openAiToolResponse(res, 'call-status', 'doppelganger_codegraph_status', '{}')
+    } else if (toolResults.length === 1) {
+      openAiToolResponse(res, 'call-explore', 'doppelganger_codegraph_explore', JSON.stringify({ query: 'runtime graph', maxFiles: 2 }))
+    } else if (toolResults.length === 2) {
+      openAiToolResponse(res, 'call-invalid', 'doppelganger_codegraph_explore', JSON.stringify({ query: 'invalid', maxFiles: 99 }))
+    } else {
+      openAiTextResponse(res, 'CodeGraph checked')
+    }
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('fake OpenAI server did not bind')
+  return { server, baseUrl: `http://127.0.0.1:${address.port}/v1`, requests }
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+}
+
 async function writeEvolutionPreset(fixture: LinkedOmpFixture): Promise<void> {
   const preset = join(fixture.doppelgangerHome, '.runtime-presets', 'evolution-test')
   await mkdir(preset, { recursive: true })
@@ -422,8 +590,9 @@ async function runLinkedOmp(
   actorId?: string,
   workspace = fixture.workspace,
   doppelgangerHome = fixture.doppelgangerHome,
-  afterContext?: () => Promise<void>,
+  afterContext?: (control: { readonly child: ChildProcessWithoutNullStreams; readonly stdout: () => string }) => Promise<void>,
   awaitXdevMount = false,
+  modelName = 'openai/gpt-4o',
 ): Promise<LinkedOmpRun> {
   const environment = {
     ...fixture.environment,
@@ -434,7 +603,7 @@ async function runLinkedOmp(
     '--mode', 'rpc',
     '--cwd', workspace,
     '--session-dir', fixture.sessionRoot,
-    '--model', 'openai/gpt-4o',
+    '--model', modelName,
     '--no-skills',
     '--no-rules',
     '--no-lsp',
@@ -489,7 +658,7 @@ async function runLinkedOmp(
         return 'customType' in message.message && message.message.customType === 'xdev-mount-notice'
       }))
     }
-    await afterContext?.()
+    await afterContext?.({ child, stdout: () => Buffer.concat(stdout).toString('utf8') })
     child.stdin.write(`${JSON.stringify({ id: 'abort-probe', type: 'abort' })}\n`)
     child.stdin.end()
     await Promise.race([
@@ -597,6 +766,7 @@ describe('local OMP plugin package', () => {
       await expect(readdir(join(fixture.doppelgangerHome, '.runtime-presets'))).resolves.toEqual([])
       expect(projectedContext(run)).toContain('durable personal and technical assistant')
       expect(activatedToolNames(run).filter(name => name.startsWith('evolution.'))).toEqual([])
+      expect(activatedToolNames(run).filter(name => name.startsWith('codegraph.'))).toEqual([])
       await expect(access(join(fixture.doppelgangerHome, '.runtime-presets', 'standard'))).rejects.toMatchObject({ code: 'ENOENT' })
       await expect(access(join(fixture.doppelgangerHome, 'config.yml'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
@@ -679,6 +849,96 @@ describe('local OMP plugin package', () => {
       await destroyLinkedOmpFixture(fixture)
     }
   }, 30_000)
+
+  it('projects CodeGraph generically through the real OMP extension', async () => {
+    const fixture = await createLinkedOmpFixture()
+    let model: CodeGraphModel | undefined
+    try {
+      await disableLinkedPluginForProjectDogfood(fixture)
+      const delegatedWorkspace = join(fixture.root, 'codegraph-delegated-workspace')
+      const extensionDirectory = join(delegatedWorkspace, '.omp', 'extensions')
+      const projectDirectory = join(delegatedWorkspace, '.doppelganger')
+      await Promise.all([mkdir(extensionDirectory, { recursive: true }), mkdir(projectDirectory, { recursive: true })])
+      await Promise.all([
+        symlink(join(repositoryRoot, '.omp', 'extensions', 'doppelganger.ts'), join(extensionDirectory, 'doppelganger.ts')),
+        writeFile(join(projectDirectory, 'manifest.yaml'), 'version: 1\nruntimePreset: codegraph-test\n'),
+      ])
+      const codegraph = await writeCodeGraphPreset(fixture, delegatedWorkspace)
+      model = await startCodeGraphModel()
+      await mkdir(join(fixture.profileRoot, 'agent'), { recursive: true })
+      await writeFile(join(fixture.profileRoot, 'agent', 'models.yml'), [
+        'providers:',
+        '  codegraph-test:',
+        `    baseUrl: ${JSON.stringify(model.baseUrl)}`,
+        '    api: openai-completions',
+        '    auth: none',
+        '    models:',
+        '      - id: gpt-4o',
+        '        supportsTools: true',
+        '',
+      ].join('\n'))
+      const run = await runLinkedOmp(fixture, 'test-actor', delegatedWorkspace, fixture.doppelgangerHome, async control => {
+        const { child } = control
+        await eventually('OMP CodeGraph exploration', async () => {
+          const commands = await codeGraphCommandLog(codegraph.logPath)
+          return commands.some(entry => (entry.args as string[] | undefined)?.[0] === 'explore') ? commands : undefined
+        })
+        await eventually('OMP CodeGraph structured failure propagation', () => {
+          const transcript = JSON.stringify(model?.requests ?? [])
+          return transcript.includes('CODEGRAPH_INVALID_INPUT') ? true : undefined
+        })
+        await eventually('OMP CodeGraph first turn completion', () => control.stdout().includes('"type":"agent_end"') ? true : undefined)
+        const beforeRemoval = (await codeGraphCommandLog(codegraph.logPath)).length
+        const beforeReload = (await capturedMessages(fixture.captureRoot, '.out.bin'))
+          .filter(message => message.method === 'runtime.changed').length
+        await writeFile(codegraph.presetPath, [
+          '- id: tools',
+          '  name: "@doppelganger/doppelganger-protocols/tools"',
+          '  isolate:',
+          '    doppelgangerTools: session',
+          '',
+        ].join('\n'))
+        await eventually('OMP CodeGraph removal reload', async () => {
+          const count = (await capturedMessages(fixture.captureRoot, '.out.bin'))
+            .filter(message => message.method === 'runtime.changed').length
+          return count > beforeReload ? true : undefined
+        })
+        child.stdin.write(`${JSON.stringify({ id: 'stale-codegraph', type: 'prompt', message: 'Use the removed CodeGraph status tool.' })}\n`)
+        await eventually('OMP CodeGraph stale device rejection', () => {
+          const transcript = JSON.stringify(model?.requests ?? [])
+          return transcript.includes('call-stale') && /not (?:mounted|found|registered)|unknown xd|unavailable/iu.test(transcript)
+            ? true
+            : undefined
+        })
+        expect(await codeGraphCommandLog(codegraph.logPath)).toHaveLength(beforeRemoval)
+      }, false, 'codegraph-test/gpt-4o')
+      expect(activationRequest(run).params).toMatchObject({
+        composition: { id: 'codegraph-test' },
+        actorId: 'test-actor',
+        workspaceRoot: delegatedWorkspace,
+      })
+      expect(activatedToolNames(run).filter(name => name.startsWith('codegraph.'))).toEqual([
+        'codegraph.explore',
+        'codegraph.status',
+      ])
+      expect(mountedXdevToolNames(run).filter(name => name.includes('codegraph'))).toEqual([
+        'doppelganger_codegraph_explore',
+        'doppelganger_codegraph_status',
+      ])
+      const commands = await codeGraphCommandLog(codegraph.logPath)
+      expect(commands.map(entry => entry.args)).toEqual([
+        ['--version'],
+        ['status', delegatedWorkspace, '--json'],
+        ['status', delegatedWorkspace, '--json'],
+        ['explore', '--path', delegatedWorkspace, '--max-files', '2', '--', 'runtime graph'],
+      ])
+      expect(await readdir(codegraph.activePath)).toEqual([])
+      expect(run.stderr).toBe('')
+    } finally {
+      if (model !== undefined) await closeServer(model.server)
+      await destroyLinkedOmpFixture(fixture)
+    }
+  }, 45_000)
 
   it('uses the real project-local extension with Evolution persistence, reminder data, reload, and shutdown', async () => {
     const fixture = await createLinkedOmpFixture()
@@ -773,6 +1033,7 @@ describe('local OMP plugin package', () => {
       '@doppelganger/doppelganger-omp',
       '@doppelganger/doppelganger-dynamic-runtime-plugins',
       '@doppelganger/doppelganger-evolution',
+      '@doppelganger/doppelganger-codegraph',
       ...standardModules,
     ]
     const probePath = join(root, 'probe.mjs')

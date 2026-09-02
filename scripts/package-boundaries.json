@@ -1,6 +1,13 @@
 {
   "version": 1,
   "packages": {
+    "@doppelganger/doppelganger-codegraph": {
+      "directory": "extension-codegraph",
+      "dependencies": [
+        "@doppelganger/doppelganger-composition-runtime",
+        "@doppelganger/doppelganger-protocols"
+      ]
+    },
     "@doppelganger/doppelganger-composition-runtime": {
       "directory": "composition-runtime",
       "dependencies": [
@@ -55,6 +62,7 @@
     "@doppelganger/doppelganger-omp": {
       "directory": "omp",
       "dependencies": [
+        "@doppelganger/doppelganger-codegraph",
         "@doppelganger/doppelganger-dynamic-runtime-plugins",
         "@doppelganger/doppelganger-evolution",
         "@doppelganger/doppelganger-host-omp",

@@ -11,6 +11,7 @@ This tree is the navigation root and authoritative description of the currently 
 | Architecture | [Extension protocols](architecture/protocols.md) | Context, tools, required approval, lifecycle events, and the host seam |
 | Features | [Persona](features/persona.md) | Persona Activation, identity, traits, scoped authoring, evolution workflow, and generic composition boundaries |
 | Features | [Dynamic Runtime Plugins](features/dynamic-runtime-plugins.md) | Opt-in generated Cordis plugins, inspection, immutable Packages, approval, lifecycle, limits, and host projection |
+| Features | [CodeGraph](features/codegraph.md) | Optional workspace-bound CodeGraph tools, freshness, subprocess bounds, lifecycle, compatibility, and trust boundary |
 | Features | [Evolution](features/evolution.md) | Optional proposal ledger, state machines, storage, controls, reminders, consent, and executor boundaries |
 | Features | [Memory](features/memory.md) | Canonical memory, candidates, retrieval, mutations, and semantic contracts |
 | Hosts | [Oh My Pi](hosts/oh-my-pi.md) | OMP pure-roster activation, child process, RPC, context/tool/approval projection, and failure behavior |

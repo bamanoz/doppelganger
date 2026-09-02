@@ -43,6 +43,7 @@ Feature metadata belongs to feature extensions.
 Dynamic Runtime Plugin metadata is feature-owned and session-ephemeral: immutable Package source, current/next version pointers, active child Fibers, waiting services, and diagnostics never enter Runtime Session metadata or authored Loader files.
 
 Evolution metadata is also feature-owned: proposal kinds, scopes, revisions, immutable history, operation receipts, evidence, and reminder deliveries never enter Runtime Session metadata. Global state belongs to its instance SQLite namespace; project state belongs to canonical workspace YAML.
+CodeGraph state is feature-owned and generation-local: the validated executable, workspace snapshot, discovery cache, in-flight sync, bounded exploration queue, and active children never enter Runtime Session metadata or authored Loader files. The existing `.codegraph/` directory remains user-owned derived project state.
 
 ## Transactional reload
 
@@ -57,6 +58,7 @@ Optional feature plugins may coordinate an authored asset mutation with this sam
 An explicitly composed Dynamic Runtime Plugins row owns one in-memory registry under its Loader Fiber. Generated activations are child Fibers in that registry, not independent watchers or Runtime Sessions. A successful owner reload disposes every generated effect and starts an empty registry; an invalid owner reload retains the previous audited generation and its active generated state. Package update is an explicit approved feature transition: it disposes the active child Fiber before applying the target Package. A failed target leaves the Plugin stopped while retaining the prior known-good pointer and the failed target diagnostic for inspection and explicit restart.
 
 An explicitly composed Evolution row owns one actor-aware service, instruction/reminder context provider, and seven ledger controls. Valid owner replacement disposes and recreates those session effects while global SQLite and project YAML remain durable. Invalid owner reload retains the previous audited generation. Removing the row cleanly removes the service, context, and tools without deleting stored proposals.
+An explicitly composed CodeGraph row owns two portable registrations and its bounded process adapter under one Loader Fiber. Valid replacement starts an independent candidate generation and commits through ordinary Composition Runtime semantics; invalid replacement retains the previous generation. Removal rejects queued work, terminates active children, removes both tools, and leaves the existing index intact.
 
 ## Disposal
 
@@ -75,4 +77,5 @@ Runtime disposal snapshots every active session and attempts all of them before 
 - `packages/composition-runtime/src/patches.ts` — patch validation and layering.
 - `packages/composition-runtime/src/runtime.ts` — activation, audit, reload, exhaustive disposal, and ownership.
 - `packages/extension-dynamic-runtime-plugins/src/registry.ts` — feature-owned Package transitions and child-Fiber cleanup.
+- `packages/extension-codegraph/src/adapter.ts` — feature-owned discovery, freshness, synchronization, exploration queue, and subprocess cleanup.
 - `packages/composition-runtime/src/activation-audit.ts` — structured Loader diagnostics.

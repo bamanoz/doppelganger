@@ -10,9 +10,9 @@ Generic compositions may run unbound. Persistent actor-aware extensions must exp
 
 ## Context
 
-Feature plugins register scoped context providers as Cordis effects. A host resolves providers for the current turn; the assembler orders contributions deterministically and applies the supplied token budget.
+Feature plugins register scoped context providers as Cordis effects. A host resolves providers at every model-request boundary using the current turn input and identity; repeated model requests within one host turn or agent run resolve again rather than reusing a prior assembly. The assembler orders contributions deterministically and applies the supplied token budget.
 
-Each contribution declares `instruction` or `data` authority. Priority orders contributions but never promotes data into instructions. Provider disposal or reload removes its contribution from subsequent resolution.
+Each contribution declares `instruction` or `data` authority. Priority orders contributions but never promotes data into instructions. Provider disposal, mutation, or reload affects subsequent resolution. Host projection is ephemeral: the resolved assembly may augment one outbound request but does not become retained host transcript or a stale fallback after empty or failed resolution.
 
 ## Tools
 

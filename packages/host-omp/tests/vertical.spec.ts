@@ -384,10 +384,15 @@ describe('full-stack test Runtime Preset vertical', () => {
       expect(revised.isError).not.toBe(true)
       expect(revised.details).toMatchObject({ status: 'applied', target: 'trait:evolving-profile' })
 
-      const next = await fixture.handlers.get('before_agent_start')!({
+      await fixture.handlers.get('before_agent_start')!({
         type: 'before_agent_start', prompt: 'Use the revised trait.', systemPrompt: [],
-      }, fixture.context) as { systemPrompt: string[] }
-      expect(next.systemPrompt.join('\n')).toContain('Prefer explicit verification before durable behavioral change.')
+      }, fixture.context)
+      const next = await fixture.handlers.get('context')!({
+        type: 'context',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'Use the revised trait.' }], timestamp: 1 }],
+      }, fixture.context) as { messages: Array<{ content?: Array<{ text?: string }> }> }
+      expect(next.messages.at(-1)?.content?.map(part => part.text).join('\n'))
+        .toContain('Prefer explicit verification before durable behavioral change.')
     } finally {
       await fixture.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, fixture.context)
       vi.unstubAllEnvs()

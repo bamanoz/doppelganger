@@ -302,12 +302,23 @@ async function shutdown(fixture: MountedExtension): Promise<void> {
 }
 
 async function projectedContext(fixture: MountedExtension, prompt = 'Inspect generated behavior.'): Promise<string> {
-  const result = await fixture.handlers.get('before_agent_start')?.({
+  await fixture.handlers.get('before_agent_start')?.({
     type: 'before_agent_start',
     prompt,
     systemPrompt: [],
-  }, fixture.context) as { readonly systemPrompt?: readonly string[] } | undefined
-  return result?.systemPrompt?.join('\n') ?? ''
+  }, fixture.context)
+  const result = await fixture.handlers.get('context')?.({
+    type: 'context',
+    messages: [{ role: 'user', content: [{ type: 'text', text: prompt }], timestamp: 1 }],
+  }, fixture.context) as { readonly messages?: readonly unknown[] } | undefined
+  const projected = result?.messages?.at(-1)
+  if (projected === null || typeof projected !== 'object' || !('content' in projected) || !Array.isArray(projected.content)) return ''
+  return projected.content.flatMap(part => (
+    part !== null && typeof part === 'object' && 'type' in part && part.type === 'text'
+      && 'text' in part && typeof part.text === 'string'
+      ? [part.text]
+      : []
+  )).join('\n')
 }
 
 function runInvocationCount(factory: RecordingFactory): number {

@@ -28,6 +28,16 @@ function runtimeTool(
   return { name, description, inputSchema, available: true }
 }
 
+function deferred() {
+  let resolve!: () => void
+  let reject!: (cause: unknown) => void
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 
 class ExtensionConnection implements OmpChildConnection {
   readonly requests: Array<{ method: string; params: unknown }> = []
@@ -36,7 +46,19 @@ class ExtensionConnection implements OmpChildConnection {
   disposed = false
   hangSessionDisposal = false
   hangDisposal = false
+  activationError: Error | undefined
+  contextError: Error | undefined
+  activationGate: Promise<void> | undefined
+  contextGate: Promise<void> | undefined
+  lifecycleGate: Promise<void> | undefined
   disposal: OmpChildDisposal = { outcome: 'graceful', sessionDisposeAcknowledged: true }
+  private readonly events: string[]
+  private readonly index: number
+
+  constructor(events: string[] = [], index = 0) {
+    this.events = events
+    this.index = index
+  }
   activationTools: unknown[] = [{
     name: 'memory.search',
     description: 'Search memory',
@@ -51,14 +73,24 @@ class ExtensionConnection implements OmpChildConnection {
 
   async request(method: string, params?: unknown): Promise<unknown> {
     this.requests.push({ method, params })
-    if (method === 'session.activate') return {
-      protocolVersion: OMP_RPC_PROTOCOL_VERSION,
-      diagnostics: { compositionRevision: 'effective-one' },
-      runtimeRevision: 'effective-one',
-      tools: this.activationTools,
+    this.events.push(`${method}:${this.index}`)
+    if (method === 'session.activate') {
+      await this.activationGate
+      if (this.activationError !== undefined) throw this.activationError
+      return {
+        protocolVersion: OMP_RPC_PROTOCOL_VERSION,
+        diagnostics: { compositionRevision: 'effective-one' },
+        runtimeRevision: 'effective-one',
+        tools: this.activationTools,
+      }
     }
-    if (method === 'context.resolve') return { content: this.contextContent, contributions: [], omittedSources: [], tokenCount: 4 }
+    if (method === 'context.resolve') {
+      await this.contextGate
+      if (this.contextError !== undefined) throw this.contextError
+      return { content: this.contextContent, contributions: [], omittedSources: [], tokenCount: 4 }
+    }
     if (method === 'tools.invoke') return { ok: true, value: { found: 1 } }
+    if (method === 'event.publish') await this.lifecycleGate
     if (method === 'event.publish' && this.hangSessionDisposal) {
       const event = params as { type?: string }
       if (event.type === 'session-disposed') return new Promise(() => undefined)
@@ -73,14 +105,32 @@ class ExtensionConnection implements OmpChildConnection {
 
   async dispose(): Promise<OmpChildDisposal> {
     this.disposed = true
+    this.events.push(`dispose:${this.index}`)
     if (this.hangDisposal) return new Promise(() => undefined)
     return this.disposal
   }
 }
 
 class ExtensionFactory implements OmpChildFactory {
-  readonly connection = new ExtensionConnection()
-  async start(): Promise<OmpChildConnection> { return this.connection }
+  readonly connections: ExtensionConnection[] = []
+  readonly events: string[] = []
+  private startCount = 0
+
+  get connection(): ExtensionConnection { return this.connectionAt(0) }
+  get latestConnection(): ExtensionConnection { return this.connectionAt(Math.max(0, this.startCount - 1)) }
+
+  connectionAt(index: number): ExtensionConnection {
+    while (this.connections.length <= index) {
+      this.connections.push(new ExtensionConnection(this.events, this.connections.length))
+    }
+    return this.connections[index]!
+  }
+
+  async start(): Promise<OmpChildConnection> {
+    const connection = this.connectionAt(this.startCount)
+    this.startCount += 1
+    return connection
+  }
 }
 
 interface RegisteredTool {
@@ -128,13 +178,29 @@ async function projectFixture(selected = true) {
   return { root, home }
 }
 
-function extensionContext(cwd: string, sessionId = 'omp-session'): ExtensionContext {
+interface MutableExtensionContext {
+  readonly ctx: ExtensionContext
+  setCwd(cwd: string): void
+  setSessionId(sessionId: string): void
+}
+
+function mutableExtensionContext(cwd: string, sessionId = 'omp-session'): MutableExtensionContext {
+  let currentCwd = cwd
+  let currentSessionId = sessionId
   return {
-    cwd,
-    hasUI: false,
-    ui: { notify: vi.fn() },
-    sessionManager: { getSessionId: () => sessionId },
-  } as unknown as ExtensionContext
+    ctx: {
+      get cwd() { return currentCwd },
+      hasUI: false,
+      ui: { notify: vi.fn() },
+      sessionManager: { getSessionId: () => currentSessionId },
+    } as unknown as ExtensionContext,
+    setCwd(nextCwd: string) { currentCwd = nextCwd },
+    setSessionId(nextSessionId: string) { currentSessionId = nextSessionId },
+  }
+}
+
+function extensionContext(cwd: string, sessionId = 'omp-session'): ExtensionContext {
+  return mutableExtensionContext(cwd, sessionId).ctx
 }
 
 async function invokeWithNativeApproval(
@@ -218,12 +284,27 @@ describe('Doppelganger OMP extension', () => {
       params: { actorId: 'actor-one' },
     })
     expect(pi.activeTools()).toEqual(['read', 'bash', 'doppelganger_memory_search'])
-    const projected = await pi.handlers.get('before_agent_start')!({
+    await expect(pi.handlers.get('before_agent_start')!({
       type: 'before_agent_start',
       prompt: 'Current user turn',
       systemPrompt: ['Existing OMP instructions.'],
-    }, ctx) as { systemPrompt: string[] }
-    expect(projected.systemPrompt).toEqual(['Existing OMP instructions.', 'Persona context.'])
+    }, ctx)).resolves.toBeUndefined()
+    const outboundMessages = [{
+      role: 'user', content: [{ type: 'text', text: 'Current user turn' }], timestamp: 1,
+    }]
+    const projected = await pi.handlers.get('context')!({
+      type: 'context', messages: outboundMessages,
+    }, ctx) as { messages: unknown[] }
+    expect(projected.messages).toEqual([
+      ...outboundMessages,
+      {
+        role: 'developer',
+        content: [{ type: 'text', text: 'Persona context.' }],
+        attribution: 'agent',
+        timestamp: expect.any(Number),
+      },
+    ])
+    expect(outboundMessages).toHaveLength(1)
     expect(factory.connection.requests).toContainEqual({
       method: 'context.resolve',
       params: expect.objectContaining({ input: 'Current user turn', tokenBudget: 321 }),
@@ -281,12 +362,17 @@ describe('Doppelganger OMP extension', () => {
         available: true,
       }],
     })
-    const afterReload = await pi.handlers.get('before_agent_start')!({
+    await expect(pi.handlers.get('before_agent_start')!({
       type: 'before_agent_start',
       prompt: 'Next turn',
       systemPrompt: ['Existing OMP instructions.'],
-    }, ctx) as { systemPrompt: string[] }
-    expect(afterReload.systemPrompt).toEqual(['Existing OMP instructions.', 'Reloaded runtime context.'])
+    }, ctx)).resolves.toBeUndefined()
+    const afterReload = await pi.handlers.get('context')!({
+      type: 'context', messages: outboundMessages,
+    }, ctx) as { messages: Array<{ role?: string; content?: Array<{ text?: string }> }> }
+    expect(afterReload.messages.at(-1)).toMatchObject({
+      role: 'developer', content: [{ type: 'text', text: 'Reloaded runtime context.' }],
+    })
 
     await pi.handlers.get('turn_start')!({ type: 'turn_start', turnIndex: 0, timestamp: 10 }, ctx)
     await pi.handlers.get('tool_execution_start')!({
@@ -359,6 +445,211 @@ describe('Doppelganger OMP extension', () => {
     await vi.waitFor(() => expect(published(factory.connection).at(-1)?.type).toBe('session-disposed'))
     await vi.waitFor(() => expect(factory.connection.disposed).toBe(true))
     expect(pi.api.logger.error).not.toHaveBeenCalled()
+  })
+  it('resolves fresh runtime context before every model request in one agent run', async () => {
+    const { root, home } = await projectFixture()
+    const factory = new ExtensionFactory()
+    const pi = fakePi()
+    createDoppelgangerOmpExtension({ home, childFactory: factory, tokenBudget: 222 })(pi.api)
+    const ctx = extensionContext(root)
+    const messages = [{ role: 'user', content: [{ type: 'text', text: 'Remember this' }], timestamp: 1 }]
+
+    await pi.handlers.get('session_start')!({ type: 'session_start' }, ctx)
+    await pi.handlers.get('before_agent_start')!({
+      type: 'before_agent_start', prompt: 'Remember this', systemPrompt: ['Host prompt'],
+    }, ctx)
+
+    factory.connection.contextContent = 'First context.'
+    const first = await pi.handlers.get('context')!({ type: 'context', messages }, ctx) as { messages: unknown[] }
+    factory.connection.contextContent = 'Second context.'
+    const second = await pi.handlers.get('context')!({ type: 'context', messages }, ctx) as { messages: unknown[] }
+
+    expect(messages).toHaveLength(1)
+    expect(first.messages).toHaveLength(2)
+    expect(second.messages).toHaveLength(2)
+    expect(first.messages.at(-1)).toMatchObject({
+      role: 'developer', content: [{ type: 'text', text: 'First context.' }], attribution: 'agent',
+    })
+    expect(second.messages.at(-1)).toMatchObject({
+      role: 'developer', content: [{ type: 'text', text: 'Second context.' }], attribution: 'agent',
+    })
+    expect(factory.connection.requests.filter(request => request.method === 'context.resolve')).toEqual([
+      { method: 'context.resolve', params: { input: 'Remember this', turnId: 'omp-session:turn:1', tokenBudget: 222 } },
+      { method: 'context.resolve', params: { input: 'Remember this', turnId: 'omp-session:turn:1', tokenBudget: 222 } },
+    ])
+
+    factory.connection.contextError = new Error('context failed')
+    const failed = await pi.handlers.get('context')!({ type: 'context', messages }, ctx)
+    expect(failed).toBeUndefined()
+    expect(messages).toHaveLength(1)
+    await vi.waitFor(() => expect(pi.activeTools()).toEqual(['read', 'bash']))
+  })
+  it('rebinds new resumed forked and branched sessions while retaining same-session tree navigation', async () => {
+    const { root, home } = await projectFixture()
+    const secondRoot = await mkdtemp(join(tmpdir(), 'doppelganger-extension-second-'))
+    temporaryRoots.push(secondRoot)
+    await mkdir(join(secondRoot, '.git'), { recursive: true })
+    const factory = new ExtensionFactory()
+    const pi = fakePi()
+    createDoppelgangerOmpExtension({ home, childFactory: factory })(pi.api)
+    const session = mutableExtensionContext(root, 'session-one')
+
+    await pi.handlers.get('session_start')!({ type: 'session_start' }, session.ctx)
+    await pi.handlers.get('before_agent_start')!({
+      type: 'before_agent_start', prompt: 'Old turn', systemPrompt: [],
+    }, session.ctx)
+    session.setSessionId('session-two')
+    session.setCwd(secondRoot)
+    await pi.handlers.get('turn_start')!({ type: 'turn_start', turnIndex: 0, timestamp: 10 }, session.ctx)
+    expect(published(factory.connection).at(-1)).toMatchObject({
+      type: 'turn-started', sessionId: 'session-one', turnId: 'session-one:turn:1',
+    })
+
+    await pi.handlers.get('session_switch')!({
+      type: 'session_switch', reason: 'resume', previousSessionFile: 'one.jsonl',
+    }, session.ctx)
+    expect(factory.connections).toHaveLength(2)
+    expect(factory.connection.disposed).toBe(true)
+    expect(published(factory.connection).at(-1)).toMatchObject({ type: 'session-disposed', sessionId: 'session-one' })
+    expect(factory.connectionAt(1).requests[0]).toMatchObject({
+      method: 'session.activate', params: { sessionId: 'session-two', workspaceRoot: secondRoot },
+    })
+    expect(published(factory.connectionAt(1)).at(0)).toMatchObject({ type: 'session-started', sessionId: 'session-two' })
+    await pi.handlers.get('session_switch')!({
+      type: 'session_switch', reason: 'resume', previousSessionFile: 'one.jsonl',
+    }, session.ctx)
+    await pi.handlers.get('session_branch')!({ type: 'session_branch', previousSessionFile: 'one.jsonl' }, session.ctx)
+    expect(factory.connections).toHaveLength(2)
+
+
+    await pi.handlers.get('session_tree')!({ type: 'session_tree', newLeafId: 'leaf', oldLeafId: null }, session.ctx)
+    expect(factory.connections).toHaveLength(2)
+
+    session.setSessionId('session-three')
+    await pi.handlers.get('session_branch')!({ type: 'session_branch', previousSessionFile: 'two.jsonl' }, session.ctx)
+    expect(factory.connections).toHaveLength(3)
+    expect(factory.connectionAt(1).disposed).toBe(true)
+    expect(factory.connectionAt(2).requests[0]).toMatchObject({
+      method: 'session.activate', params: { sessionId: 'session-three', workspaceRoot: secondRoot },
+    })
+
+    factory.connectionAt(3).activationError = new Error('replacement failed')
+    session.setSessionId('session-four')
+    await pi.handlers.get('session_switch')!({
+      type: 'session_switch', reason: 'fork', previousSessionFile: 'three.jsonl',
+    }, session.ctx)
+    expect(factory.connections).toHaveLength(4)
+    expect(factory.connectionAt(2).disposed).toBe(true)
+    expect(pi.activeTools()).toEqual(['read', 'bash'])
+    expect(pi.api.logger.error).toHaveBeenCalledWith(expect.stringContaining('replacement failed'))
+  })
+
+  it('publishes no session completion for resumable OMP settle hooks', async () => {
+    const { root, home } = await projectFixture()
+    const factory = new ExtensionFactory()
+    const pi = fakePi()
+    createDoppelgangerOmpExtension({ home, childFactory: factory })(pi.api)
+    const ctx = extensionContext(root)
+
+    await pi.handlers.get('session_start')!({ type: 'session_start' }, ctx)
+    expect(pi.handlers.has('agent_end')).toBe(false)
+    expect(pi.handlers.has('session_stop')).toBe(false)
+    expect(published(factory.connection).map(event => event.type)).not.toContain('session-completed')
+  })
+  it('commits only the latest requested binding when activation overlaps a session switch', async () => {
+    const { root, home } = await projectFixture()
+    const factory = new ExtensionFactory()
+    const firstActivation = deferred()
+    factory.connection.activationGate = firstActivation.promise
+    const pi = fakePi()
+    createDoppelgangerOmpExtension({ home, childFactory: factory })(pi.api)
+    const session = mutableExtensionContext(root, 'session-one')
+
+    const starting = pi.handlers.get('session_start')!({ type: 'session_start' }, session.ctx)
+    await vi.waitFor(() => expect(factory.connection.requests).toContainEqual({
+      method: 'session.activate', params: expect.objectContaining({ sessionId: 'session-one' }),
+    }))
+    session.setSessionId('session-two')
+    const switching = pi.handlers.get('session_switch')!({
+      type: 'session_switch', reason: 'resume', previousSessionFile: 'one.jsonl',
+    }, session.ctx)
+    firstActivation.resolve()
+    await Promise.all([starting, switching])
+
+    expect(factory.connection.disposed).toBe(true)
+    expect(published(factory.connection).map(event => event.type)).not.toContain('session-started')
+    expect(factory.connectionAt(1).requests[0]).toMatchObject({
+      method: 'session.activate', params: { sessionId: 'session-two' },
+    })
+    expect(published(factory.connectionAt(1)).at(0)).toMatchObject({
+      type: 'session-started', sessionId: 'session-two',
+    })
+    expect(factory.events.indexOf('dispose:0')).toBeLessThan(factory.events.indexOf('session.activate:1'))
+  })
+
+  it('discards stale context notifications lifecycle callbacks and proxy closures after replacement', async () => {
+    const { root, home } = await projectFixture()
+    const factory = new ExtensionFactory()
+    factory.connection.activationTools = [runtimeTool('memory.old')]
+    const pi = fakePi()
+    createDoppelgangerOmpExtension({ home, childFactory: factory })(pi.api)
+    const session = mutableExtensionContext(root, 'session-one')
+
+    await pi.handlers.get('session_start')!({ type: 'session_start' }, session.ctx)
+    await pi.handlers.get('before_agent_start')!({
+      type: 'before_agent_start', prompt: 'Old prompt', systemPrompt: [],
+    }, session.ctx)
+    const oldTool = pi.tools.get('doppelganger_memory_old')!
+    const oldToolsChanged = factory.connection.notifications.get('tools.changed')!
+    const oldRuntimeFailed = factory.connection.notifications.get('runtime.failed')!
+    const contextGate = deferred()
+    factory.connection.contextGate = contextGate.promise
+    const lateContext = pi.handlers.get('context')!({
+      type: 'context', messages: [{ role: 'user', content: 'Old prompt', timestamp: 1 }],
+    }, session.ctx)
+    await vi.waitFor(() => expect(factory.connection.requests.some(request => request.method === 'context.resolve')).toBe(true))
+
+    factory.connectionAt(1).activationTools = [runtimeTool('memory.new')]
+    session.setSessionId('session-two')
+    await pi.handlers.get('session_switch')!({
+      type: 'session_switch', reason: 'resume', previousSessionFile: 'one.jsonl',
+    }, session.ctx)
+    contextGate.resolve()
+
+    expect(await lateContext).toBeUndefined()
+    oldToolsChanged([runtimeTool('memory.stale')])
+    oldRuntimeFailed({ message: 'stale runtime failure' })
+    await Promise.resolve()
+    expect(pi.activeTools()).toEqual(['read', 'bash', 'doppelganger_memory_new'])
+    expect((await oldTool.execute('stale', {}, undefined, undefined, session.ctx)).details).toEqual({
+      code: 'RUNTIME_UNAVAILABLE', message: 'runtime tool is inactive',
+    })
+    await pi.handlers.get('turn_end')!({
+      type: 'turn_end', turnIndex: 0,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Late old answer' }], stopReason: 'stop' },
+      toolResults: [],
+    }, session.ctx)
+    expect(published(factory.connectionAt(1)).map(event => event.type)).toEqual(['session-started'])
+  })
+
+  it('invalidates an activation that settles after shutdown begins', async () => {
+    const { root, home } = await projectFixture()
+    const factory = new ExtensionFactory()
+    const activation = deferred()
+    factory.connection.activationGate = activation.promise
+    const pi = fakePi()
+    createDoppelgangerOmpExtension({ home, childFactory: factory })(pi.api)
+    const ctx = extensionContext(root)
+
+    const starting = pi.handlers.get('session_start')!({ type: 'session_start' }, ctx)
+    await vi.waitFor(() => expect(factory.connection.requests.some(request => request.method === 'session.activate')).toBe(true))
+    pi.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, ctx)
+    activation.resolve()
+    await starting
+
+    await vi.waitFor(() => expect(factory.connection.disposed).toBe(true))
+    expect(published(factory.connection).map(event => event.type)).not.toContain('session-started')
+    expect(pi.activeTools()).toEqual(['read', 'bash'])
   })
   it('projects readable proxy names, dispatches canonical names, and rejects stale closures after replacement', async () => {
     const { root, home } = await projectFixture()

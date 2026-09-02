@@ -227,6 +227,19 @@ interface ActiveTurn {
   started: boolean
 }
 
+interface OmpRuntimeBinding {
+  readonly generation: number
+  readonly sessionId: string
+  readonly cwd: string
+  readonly adapter: OmpAdapterSession
+  readonly activeDescriptors: Map<string, ToolDescriptor>
+  readonly registeredProxyNames: Map<string, string>
+  committed: boolean
+  turn: ActiveTurn | undefined
+  turnOrdinal: number
+  preCompactionOrdinal: number
+}
+
 function proxyName(runtimeName: string): string {
   const name = `${PROXY_PREFIX}${runtimeName.replaceAll('.', '_')}`
   if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
@@ -327,12 +340,11 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 
 export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtensionOptions) {
   return function doppelgangerExtension(pi: ExtensionAPI): void {
-    let adapter: OmpAdapterSession | undefined
-    let turn: ActiveTurn | undefined
-    let turnOrdinal = 0
-    let preCompactionOrdinal = 0
-    const activeDescriptors = new Map<string, ToolDescriptor>()
-    const registeredProxyNames = new Map<string, string>()
+    let current: OmpRuntimeBinding | undefined
+    let desiredGeneration = 0
+    let desired: { readonly generation: number; readonly sessionId: string; readonly cwd: string; readonly force: boolean } | undefined
+    let ownershipQueue = Promise.resolve()
+    let closed = false
 
     const report = (ctx: ExtensionContext, message: string) => {
       pi.logger.error(message)
@@ -343,7 +355,30 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       `${sessionId}:${type}:${identity}`
     )
 
-    const setProjectedTools = async (tools: readonly ToolDescriptor[], ctx: ExtensionContext) => {
+    const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
+      const result = ownershipQueue.then(operation, operation)
+      ownershipQueue = result.then(() => undefined, () => undefined)
+      return result
+    }
+
+    const isCurrent = (binding: OmpRuntimeBinding): boolean => (
+      !closed && binding.committed && current === binding
+    )
+
+    const nativeActiveTools = () => pi.getActiveTools().filter(name => (
+      !name.startsWith(PROXY_PREFIX) && name !== INITIALIZE_TOOL
+    ))
+
+    const withdrawProjection = async () => {
+      await pi.setActiveTools(nativeActiveTools())
+    }
+
+    const setProjectedTools = async (
+      binding: OmpRuntimeBinding,
+      tools: readonly ToolDescriptor[],
+      ctx: ExtensionContext,
+    ) => {
+      if (!isCurrent(binding)) return
       const available = tools.filter(tool => tool.available)
       const candidates: Array<{ readonly descriptor: ToolDescriptor; readonly name: string }> = []
       const candidateNames = new Map<string, Set<string>>()
@@ -383,7 +418,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       const projectedNames = new Set<string>()
       for (const { descriptor, name } of candidates) {
         if (collidedNames.has(name)) continue
-        const registeredPortableName = registeredProxyNames.get(name)
+        const registeredPortableName = binding.registeredProxyNames.get(name)
         if (registeredPortableName !== undefined && registeredPortableName !== descriptor.name) {
           report(
             ctx,
@@ -400,13 +435,15 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
             parameters: ompToolParametersFromJsonSchema(descriptor.inputSchema),
             loadMode: descriptor.approval === undefined ? 'discoverable' as const : 'essential' as const,
             approval: () => {
-              const approval = activeDescriptors.get(descriptor.name)?.approval
+              const approval = isCurrent(binding)
+                ? binding.activeDescriptors.get(descriptor.name)?.approval
+                : undefined
               return approval === undefined
                 ? 'exec' as const
                 : { tier: 'write', policy: 'prompt', reason: approval.reason } as const
             },
             formatApprovalDetails: (params: unknown) => {
-              const active = activeDescriptors.get(descriptor.name)
+              const active = isCurrent(binding) ? binding.activeDescriptors.get(descriptor.name) : undefined
               if (active?.approval === undefined) return
               return [
                 `Portable tool: ${active.name}`,
@@ -414,10 +451,10 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
               ]
             },
             async execute(_callId: string, params: unknown) {
-              const active = activeDescriptors.get(descriptor.name)
-              const connection = adapter?.connection()
+              const active = isCurrent(binding) ? binding.activeDescriptors.get(descriptor.name) : undefined
+              const connection = binding.adapter.connection()
               if (active === undefined || connection === undefined
-                || registeredProxyNames.get(name) !== descriptor.name) {
+                || binding.registeredProxyNames.get(name) !== descriptor.name) {
                 return textResult({ code: 'RUNTIME_UNAVAILABLE', message: 'runtime tool is inactive' }, true)
               }
               try {
@@ -425,15 +462,23 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
                   name: active.name,
                   input: jsonValue(params),
                 }) as { ok: boolean; value?: unknown; error?: unknown }
+                if (!isCurrent(binding)) {
+                  return textResult({ code: 'RUNTIME_UNAVAILABLE', message: 'runtime tool is inactive' }, true)
+                }
                 return result.ok ? textResult(result.value) : textResult(result.error, true)
               } catch (cause) {
-                await adapter?.fail({ code: 'TOOL_PROXY_FAILED', message: cause instanceof Error ? cause.message : String(cause) })
+                if (isCurrent(binding)) {
+                  await binding.adapter.fail({
+                    code: 'TOOL_PROXY_FAILED',
+                    message: cause instanceof Error ? cause.message : String(cause),
+                  })
+                }
                 return textResult({ code: 'TOOL_PROXY_FAILED', message: cause instanceof Error ? cause.message : String(cause) }, true)
               }
             },
           }
           pi.registerTool(projected)
-          registeredProxyNames.set(name, descriptor.name)
+          binding.registeredProxyNames.set(name, descriptor.name)
           projectedNames.add(name)
           next.set(descriptor.name, descriptor)
         } catch (cause) {
@@ -443,63 +488,164 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
           )
         }
       }
-      activeDescriptors.clear()
-      for (const [name, descriptor] of next) activeDescriptors.set(name, descriptor)
-      const existing = pi.getActiveTools().filter(name => !name.startsWith(PROXY_PREFIX) && name !== INITIALIZE_TOOL)
-      const initialize = adapter?.snapshot().initializationAvailable === true ? [INITIALIZE_TOOL] : []
-      await pi.setActiveTools([...existing, ...projectedNames, ...initialize])
+      if (!isCurrent(binding)) return
+      binding.activeDescriptors.clear()
+      for (const [name, descriptor] of next) binding.activeDescriptors.set(name, descriptor)
+      const initialize = binding.adapter.snapshot().initializationAvailable ? [INITIALIZE_TOOL] : []
+      await pi.setActiveTools([...nativeActiveTools(), ...projectedNames, ...initialize])
     }
 
-    const publish = async (event: LifecycleEvent) => {
-      const connection = adapter?.connection()
+    const publish = async (binding: OmpRuntimeBinding, event: LifecycleEvent) => {
+      if (!isCurrent(binding)) return
+      const connection = binding.adapter.connection()
       if (connection === undefined) return
       try {
         await connection.request('event.publish', event)
       } catch (cause) {
-        await adapter?.fail({ code: 'EVENT_FORWARD_FAILED', message: cause instanceof Error ? cause.message : String(cause) })
+        if (isCurrent(binding)) {
+          await binding.adapter.fail({
+            code: 'EVENT_FORWARD_FAILED',
+            message: cause instanceof Error ? cause.message : String(cause),
+          })
+        }
       }
     }
 
-    const start = async (ctx: ExtensionContext) => {
-      if (adapter !== undefined) return adapter.snapshot()
+    const disposeBinding = async (binding: OmpRuntimeBinding, ctx: ExtensionContext, reason: string) => {
+      const state = binding.adapter.snapshot().state
+      binding.committed = false
+      binding.turn = undefined
+      if (current === binding) current = undefined
+      await withdrawProjection()
+      const connection = binding.adapter.connection()
+      if (state === 'active' && connection !== undefined) {
+        await withTimeout(connection.request('event.publish', {
+          protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+          type: 'session-disposed',
+          deliveryId: deliveryId(binding.sessionId, 'session-disposed'),
+          sessionId: binding.sessionId,
+          timestamp: Date.now(),
+          reason,
+        }), options.shutdownTimeoutMs ?? 2000, 'session disposal notification').catch(cause => {
+          report(ctx, `Doppelganger: ${cause instanceof Error ? cause.message : String(cause)}`)
+        })
+      }
+      const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 2000
+      const disposal = await withTimeout(
+        binding.adapter.dispose(),
+        shutdownTimeoutMs * 5 + 100,
+        'runtime disposal',
+      ).catch(cause => {
+        report(ctx, `Doppelganger: ${cause instanceof Error ? cause.message : String(cause)}`)
+        return undefined
+      })
+      if (disposal !== undefined && (disposal.outcome !== 'graceful' || !disposal.sessionDisposeAcknowledged)) {
+        report(ctx, `Doppelganger: runtime shutdown ${disposal.outcome}; session acknowledgement=${String(disposal.sessionDisposeAcknowledged)}`)
+      }
+      if (disposal?.diagnostic !== undefined) {
+        report(ctx, `Doppelganger: runtime shutdown diagnostic: ${disposal.diagnostic}`)
+      }
+    }
+
+    const reconcile = async (
+      target: { readonly generation: number; readonly sessionId: string; readonly cwd: string; readonly force: boolean },
+      ctx: ExtensionContext,
+    ): Promise<OmpRuntimeBinding | undefined> => {
+      if (closed || desired?.generation !== target.generation) return current
+      if (!target.force && current !== undefined && current.sessionId === target.sessionId && current.cwd === target.cwd) {
+        return current
+      }
+      const previous = current
+      if (previous !== undefined) {
+        await disposeBinding(previous, ctx, `OMP session replaced by ${target.sessionId}`)
+      } else {
+        await withdrawProjection()
+      }
+      if (closed || desired?.generation !== target.generation) return current
+
+      let activation: SerializedOmpActivation | undefined
+      try {
+        activation = await resolveOmpActivation(options, { cwd: target.cwd, sessionId: target.sessionId })
+      } catch (cause) {
+        report(ctx, `Doppelganger: ${cause instanceof Error ? cause.message : String(cause)}`)
+        return
+      }
+
+      let candidate!: OmpRuntimeBinding
       const childFactory = options.childFactory ?? new NodeOmpChildFactory({
         childPath: resolveOmpChildPath(options),
         ...(options.shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs: options.shutdownTimeoutMs }),
         onNotificationObserverError: diagnostic => {
-          report(ctx, `Doppelganger RPC notification observer ${diagnostic.method}: ${diagnostic.message}`)
+          if (isCurrent(candidate)) {
+            report(ctx, `Doppelganger RPC notification observer ${diagnostic.method}: ${diagnostic.message}`)
+          }
         },
       })
-      const sessionId = ctx.sessionManager.getSessionId()
-      let activation: SerializedOmpActivation | undefined
-      try {
-        activation = await resolveOmpActivation(options, { cwd: ctx.cwd, sessionId })
-      } catch (cause) {
-        const code = cause !== null && typeof cause === 'object' && 'code' in cause && typeof cause.code === 'string'
-          ? cause.code
-          : 'ACTIVATION_RESOLUTION_FAILED'
-        adapter = new OmpAdapterSession({ childFactory })
-        await adapter.fail({ code, message: cause instanceof Error ? cause.message : String(cause) })
-        report(ctx, `Doppelganger: ${adapter.snapshot().diagnostic!.message}`)
-        return adapter.snapshot()
-      }
-      adapter = new OmpAdapterSession({
+      const adapter = new OmpAdapterSession({
         ...(activation === undefined ? {} : { activation }),
         childFactory,
-        onToolsChanged: tools => setProjectedTools(tools, ctx),
-        notifyDiagnostic: problem => report(ctx, `Doppelganger: ${problem.message}`),
+        onToolsChanged: tools => {
+          if (!candidate.committed) return
+          void serialize(async () => {
+            if (isCurrent(candidate)) await setProjectedTools(candidate, tools, ctx)
+          })
+        },
+        notifyDiagnostic: problem => {
+          if (isCurrent(candidate)) report(ctx, `Doppelganger: ${problem.message}`)
+        },
       })
-      const snapshot = await adapter.start()
-      await setProjectedTools(snapshot.tools, ctx)
-      if (snapshot.state === 'active') {
-        await publish({
-          protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
-          type: 'session-started',
-          deliveryId: deliveryId(sessionId, 'session-started'),
-          sessionId,
-          timestamp: Date.now(),
-        })
+      candidate = {
+        generation: target.generation,
+        sessionId: target.sessionId,
+        cwd: target.cwd,
+        adapter,
+        activeDescriptors: new Map(),
+        registeredProxyNames: new Map(),
+        committed: false,
+        turnOrdinal: 0,
+        preCompactionOrdinal: 0,
+        turn: undefined,
       }
-      return snapshot
+      const snapshot = await adapter.start()
+      if (closed || desired?.generation !== target.generation) {
+        await adapter.dispose()
+        return current
+      }
+      if (snapshot.state !== 'active') {
+        if (snapshot.initializationAvailable) {
+          candidate.committed = true
+          current = candidate
+          await pi.setActiveTools([...nativeActiveTools(), INITIALIZE_TOOL])
+          return candidate
+        }
+        if (snapshot.diagnostic !== undefined) report(ctx, `Doppelganger: ${snapshot.diagnostic.message}`)
+        await adapter.dispose()
+        return
+      }
+
+      candidate.committed = true
+      current = candidate
+      await setProjectedTools(candidate, snapshot.tools, ctx)
+      await publish(candidate, {
+        protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+        type: 'session-started',
+        deliveryId: deliveryId(candidate.sessionId, 'session-started'),
+        sessionId: candidate.sessionId,
+        timestamp: Date.now(),
+      })
+      return candidate
+    }
+
+    const requestBinding = (ctx: ExtensionContext, force = false): Promise<OmpRuntimeBinding | undefined> => {
+      if (closed) return Promise.resolve(undefined)
+      const target = {
+        generation: ++desiredGeneration,
+        sessionId: ctx.sessionManager.getSessionId(),
+        cwd: resolve(ctx.cwd),
+        force,
+      }
+      desired = target
+      return serialize(() => reconcile(target, ctx))
     }
 
     pi.registerTool({
@@ -516,7 +662,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
           return textResult({ code: 'INVALID_RUNTIME_PRESET', message: 'runtimePreset must be a string' }, true)
         }
         const runtimePreset = params.runtimePreset
-        if (adapter?.snapshot().state === 'active') return textResult({ active: true })
+        if (current?.adapter.snapshot().state === 'active') return textResult({ active: true })
         try {
           await runtimePresetRoster(options).select({ explicitRuntimePreset: runtimePreset })
           const project = await discoverOmpProject(ctx.cwd)
@@ -528,12 +674,11 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
             `runtimePreset: ${JSON.stringify(runtimePreset)}`,
             '',
           ].join('\n'))
-          await adapter?.dispose()
-          adapter = undefined
-          const snapshot = await start(ctx)
-          return snapshot.state === 'active'
+          const binding = await requestBinding(ctx, true)
+          const snapshot = binding?.adapter.snapshot()
+          return snapshot?.state === 'active'
             ? textResult({ active: true, runtimePreset })
-            : textResult(snapshot.diagnostic ?? { code: 'ACTIVATION_FAILED' }, true)
+            : textResult(snapshot?.diagnostic ?? { code: 'ACTIVATION_FAILED' }, true)
         } catch (cause) {
           return textResult({
             code: cause !== null && typeof cause === 'object' && 'code' in cause ? String(cause.code) : 'INITIALIZATION_FAILED',
@@ -543,68 +688,92 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       },
     })
 
-    pi.on('session_start', async (_event, ctx) => { await start(ctx) })
+    pi.on('session_start', async (_event, ctx) => { await requestBinding(ctx) })
+    pi.on('session_switch', async (_event, ctx) => { await requestBinding(ctx) })
+    pi.on('session_branch', async (_event, ctx) => { await requestBinding(ctx) })
+    pi.on('session_tree', async (_event, ctx) => { await requestBinding(ctx) })
     pi.on('before_agent_start', async (event, ctx) => {
-      const snapshot = await start(ctx)
-      if (snapshot.state !== 'active') return
-      const sessionId = ctx.sessionManager.getSessionId()
-      const currentTurn: ActiveTurn = {
-        id: `${sessionId}:turn:${++turnOrdinal}`,
+      const binding = await requestBinding(ctx)
+      if (binding === undefined || !isCurrent(binding)) return
+      binding.turn = {
+        id: `${binding.sessionId}:turn:${++binding.turnOrdinal}`,
         principalInput: event.prompt,
         started: false,
       }
-      turn = currentTurn
+    })
+    pi.on('context', async (event) => {
+      const binding = current
+      const activeTurn = binding?.turn
+      if (binding === undefined || activeTurn === undefined || !isCurrent(binding)) return
       try {
-        const connection = adapter?.connection()
+        const connection = binding.adapter.connection()
         if (connection === undefined) return
         const assembled = await connection.request('context.resolve', {
-          input: event.prompt,
-          turnId: currentTurn.id,
+          input: activeTurn.principalInput,
+          turnId: activeTurn.id,
           tokenBudget: options.tokenBudget ?? 4000,
         }) as { content: string }
-        if (assembled.content.length === 0) return
-        return { systemPrompt: [...event.systemPrompt, assembled.content] }
+        if (!isCurrent(binding) || binding.turn !== activeTurn || assembled.content.length === 0) return
+        return {
+          messages: [...event.messages, {
+            role: 'developer' as const,
+            content: [{ type: 'text' as const, text: assembled.content }],
+            attribution: 'agent' as const,
+            timestamp: Date.now(),
+          }],
+        }
       } catch (cause) {
-        await adapter?.fail({ code: 'CONTEXT_PROJECTION_FAILED', message: cause instanceof Error ? cause.message : String(cause) })
+        if (isCurrent(binding)) {
+          await binding.adapter.fail({
+            code: 'CONTEXT_PROJECTION_FAILED',
+            message: cause instanceof Error ? cause.message : String(cause),
+          })
+        }
         return
       }
     })
-    pi.on('turn_start', async (event, ctx) => {
-      if (turn === undefined || turn.started) return
-      turn.started = true
-      await publish({
+    pi.on('turn_start', async (event) => {
+      const binding = current
+      const activeTurn = binding?.turn
+      if (binding === undefined || activeTurn === undefined || activeTurn.started || !isCurrent(binding)) return
+      activeTurn.started = true
+      await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'turn-started',
-        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'turn-started', turn.id),
-        sessionId: ctx.sessionManager.getSessionId(),
-        turnId: turn.id,
+        deliveryId: deliveryId(binding.sessionId, 'turn-started', activeTurn.id),
+        sessionId: binding.sessionId,
+        turnId: activeTurn.id,
         timestamp: event.timestamp,
-        principalInput: serializeLifecycleValue(turn.principalInput),
+        principalInput: serializeLifecycleValue(activeTurn.principalInput),
       })
     })
-    pi.on('tool_execution_start', async (event, ctx) => {
-      if (turn === undefined) return
-      await publish({
+    pi.on('tool_execution_start', async (event) => {
+      const binding = current
+      const activeTurn = binding?.turn
+      if (binding === undefined || activeTurn === undefined || !isCurrent(binding)) return
+      await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'tool-started',
-        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'tool-started', event.toolCallId),
-        sessionId: ctx.sessionManager.getSessionId(),
-        turnId: turn.id,
+        deliveryId: deliveryId(binding.sessionId, 'tool-started', event.toolCallId),
+        sessionId: binding.sessionId,
+        turnId: activeTurn.id,
         callId: event.toolCallId,
         name: event.toolName,
         timestamp: Date.now(),
         input: serializeLifecycleValue(event.args),
       })
     })
-    pi.on('tool_execution_end', async (event, ctx) => {
-      if (turn === undefined) return
+    pi.on('tool_execution_end', async (event) => {
+      const binding = current
+      const activeTurn = binding?.turn
+      if (binding === undefined || activeTurn === undefined || !isCurrent(binding)) return
       const outcome = event.isError ? 'failed' : 'completed'
-      await publish({
+      await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'tool-completed',
-        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'tool-completed', event.toolCallId),
-        sessionId: ctx.sessionManager.getSessionId(),
-        turnId: turn.id,
+        deliveryId: deliveryId(binding.sessionId, 'tool-completed', event.toolCallId),
+        sessionId: binding.sessionId,
+        turnId: activeTurn.id,
         callId: event.toolCallId,
         name: event.toolName,
         timestamp: Date.now(),
@@ -615,20 +784,21 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
           : {}),
       })
     })
-    pi.on('turn_end', async (event, ctx) => {
-      if (turn === undefined) return
+    pi.on('turn_end', async (event) => {
+      const binding = current
+      const activeTurn = binding?.turn
+      if (binding === undefined || activeTurn === undefined || !isCurrent(binding)) return
       if (continuesAfterTurn(event.message)) return
-      const completedTurn = turn
       const outcome = turnOutcome(event.message)
-      turn = undefined
-      await publish({
+      binding.turn = undefined
+      await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'turn-committed',
-        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'turn-committed', completedTurn.id),
-        sessionId: ctx.sessionManager.getSessionId(),
-        turnId: completedTurn.id,
+        deliveryId: deliveryId(binding.sessionId, 'turn-committed', activeTurn.id),
+        sessionId: binding.sessionId,
+        turnId: activeTurn.id,
         timestamp: messageTimestamp(event.message),
-        principalInput: serializeLifecycleValue(completedTurn.principalInput),
+        principalInput: serializeLifecycleValue(activeTurn.principalInput),
         assistantOutput: serializeLifecycleValue(messageText(event.message) ?? ''),
         outcome,
         ...(outcome === 'failed'
@@ -636,14 +806,16 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
           : {}),
       })
     })
-    pi.on('session_before_compact', async (event, ctx) => {
-      await publish({
+    pi.on('session_before_compact', async (event) => {
+      const binding = current
+      if (binding === undefined || !isCurrent(binding)) return
+      await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'pre-compaction',
-        deliveryId: deliveryId(ctx.sessionManager.getSessionId(), 'pre-compaction', String(++preCompactionOrdinal)),
-        sessionId: ctx.sessionManager.getSessionId(),
+        deliveryId: deliveryId(binding.sessionId, 'pre-compaction', String(++binding.preCompactionOrdinal)),
+        sessionId: binding.sessionId,
         timestamp: Date.now(),
-        ...(turn === undefined ? {} : { turnId: turn.id }),
+        ...(binding.turn === undefined ? {} : { turnId: binding.turn.id }),
         material: serializeLifecycleValue({
           preparation: event.preparation,
           branchEntries: event.branchEntries,
@@ -652,31 +824,17 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       })
     })
     pi.on('session_shutdown', (_event, ctx) => {
-      const closing = adapter
-      turn = undefined
-      if (closing === undefined) return
-      const sessionId = ctx.sessionManager.getSessionId()
-      const connection = closing.connection()
-      adapter = undefined
-      void (async () => {
-        if (connection !== undefined) await withTimeout(connection.request('event.publish', {
-          protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
-          type: 'session-disposed',
-          deliveryId: deliveryId(sessionId, 'session-disposed'),
-          sessionId,
-          timestamp: Date.now(),
-          reason: 'OMP session shutdown without completion outcome',
-        }), options.shutdownTimeoutMs ?? 2000, 'session disposal notification').catch(cause => {
-          report(ctx, `Doppelganger: ${cause instanceof Error ? cause.message : String(cause)}`)
-        })
-        const disposal = await closing.dispose()
-        if (disposal.outcome !== 'graceful' || !disposal.sessionDisposeAcknowledged) {
-          report(ctx, `Doppelganger: runtime shutdown ${disposal.outcome}; session acknowledgement=${String(disposal.sessionDisposeAcknowledged)}`)
+      closed = true
+      desired = undefined
+      desiredGeneration += 1
+      void serialize(async () => {
+        const binding = current
+        if (binding !== undefined) {
+          await disposeBinding(binding, ctx, 'OMP session shutdown without completion outcome')
+        } else {
+          await withdrawProjection()
         }
-        if (disposal.diagnostic !== undefined) {
-          report(ctx, `Doppelganger: runtime shutdown diagnostic: ${disposal.diagnostic}`)
-        }
-      })().catch(cause => {
+      }).catch(cause => {
         report(ctx, `Doppelganger: runtime shutdown failed: ${cause instanceof Error ? cause.message : String(cause)}`)
       })
     })

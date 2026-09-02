@@ -100,7 +100,7 @@ describe('doppelganger-capability-evolution skill', () => {
     }
     expect(content).toContain('Prefer primary sources.')
     expect(content).toContain('Link sources for material and time-sensitive claims.')
-    expect(content).toContain('offer supported alternatives or an explicit adaptation plan; never invent compatibility')
+    expect(content).toContain('offer supported alternatives or an explicit adaptation option; never invent compatibility')
   })
 
   it('routes existing, temporary, permanent, and host-specific mechanisms in order', async () => {
@@ -118,22 +118,28 @@ describe('doppelganger-capability-evolution skill', () => {
     }
   })
 
-  it('records exact research, selection, planning, implementation, and completion transitions', async () => {
+  it('records exact research and selection transitions then stops', async () => {
     const content = await skill()
     const researching = content.indexOf('to `researching`')
     const options = content.indexOf('transition to `options-ready`')
     const selected = content.indexOf('transition to `selected`')
-    const planned = content.indexOf('transition to `planned`')
-    const implementing = content.indexOf('Transition to `implementing`')
-    const done = content.indexOf('to `done` only after observable verification')
+    const stop = content.indexOf('then stop')
     expect(researching).toBeGreaterThan(-1)
     expect(options).toBeGreaterThan(researching)
     expect(selected).toBeGreaterThan(options)
-    expect(planned).toBeGreaterThan(selected)
-    expect(implementing).toBeGreaterThan(planned)
-    expect(done).toBeGreaterThan(implementing)
+    expect(stop).toBeGreaterThan(selected)
     expect(content).toContain('Reuse a stable operation ID only for an exact retry.')
-    expect(content).toContain('Do not begin planning or implementation from research consent.')
+    expect(content).toContain('The skill ends at `selected`')
+  })
+
+  it('hands the selected mechanism off without planning implementation', async () => {
+    const content = await skill()
+    expect(content).toContain('does not choose or create a repository, package, planning system, OpenSpec change, or implementation artifact')
+    expect(content).toContain('write implementation instructions')
+    expect(content).toContain('transition to `planned`, `implementing`, or `done`')
+    expect(content).toContain('Hand all later planning and implementation to a separately invoked owning workflow')
+    expect(content).not.toContain('establish its implementation home')
+    expect(content).not.toContain('create the complete reviewable implementation artifact')
   })
 
   it('finishes primary work first and rejects weak one-off opportunities', async () => {

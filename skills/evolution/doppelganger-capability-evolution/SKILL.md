@@ -1,6 +1,6 @@
 ---
 name: doppelganger-capability-evolution
-description: Research a user-approved reusable capability opportunity, compare current implementations, select a Doppelganger-first mechanism, and produce a reviewable implementation plan. Use when the user explicitly chooses to research or plan a recorded capability evolution proposal.
+description: Research a user-approved reusable capability opportunity, compare current implementations, and record the user's selected Doppelganger-first mechanism. Use when the user explicitly chooses to research a recorded capability evolution proposal.
 ---
 
 # Doppelganger Capability Evolution
@@ -27,11 +27,9 @@ A recorded proposal or reminder is inert. Before current explicit research conse
 1. Inspect the selected proposal. Require `kind: capability`, an open status, and its exact current revision.
 2. After explicit current research consent, call `evolution.transition` once to `researching` with a stable operation ID and the exact revision. A successful transition grants no execution authority.
 3. Research current maintained implementations before recommending custom development. Prefer primary sources. Compare architecture, feature fit, maintenance activity, license, dependencies, runtime requirements, security boundary, host integration surface, and portability of the reusable core. Link sources for material and time-sensitive claims.
-4. If several options fit, present their relevant trade-offs and recommend one. If no direct fit exists, offer supported alternatives or an explicit adaptation plan; never invent compatibility.
+4. If several options fit, present their relevant trade-offs and recommend one. If no direct fit exists, offer supported alternatives or an explicit adaptation option; never invent compatibility.
 5. Only after presenting the sourced comparison, transition to `options-ready` with a bounded summary and source identifiers. Do not copy articles or raw dialogue into the proposal.
-6. Ask the user to select an option. Only after an explicit choice, transition to `selected` with the chosen option. Do not begin planning or implementation from research consent.
-7. Create a complete reviewable implementation artifact in the owning planning system. Only after it exists, transition to `planned` with its stable reference.
-8. Begin implementation only on a later explicit user direction and through the selected mechanism's own authority and approval gates. Transition to `implementing` when that work actually starts and to `done` only after observable verification.
+6. Ask the user to select an option. Only after an explicit choice, transition to `selected` with the chosen option, then stop. The skill ends at `selected`: it does not choose or create a repository, package, planning system, OpenSpec change, or implementation artifact; write implementation instructions; transition to `planned`, `implementing`, or `done`; or execute the selected mechanism. Hand all later planning and implementation to a separately invoked owning workflow with its own user decisions and authority gates.
 
 Before every mutation, re-inspect when the retained revision may be stale. Reuse a stable operation ID only for an exact retry. On revision conflict, changed-command replay, rejection, unavailable approval, or missing capability, stop; do not route around the decision or mutate through another mechanism.
 
@@ -41,7 +39,7 @@ Choose by fit, in this order:
 
 1. Reuse an existing capability when it already satisfies the need.
 2. For reversible current-session host behavior supported by the inspected catalog, route through `doppelganger-runtime-plugin-development` and preserve its inspection, trust, lifecycle, and native approval gates.
-3. For portable persistent behavior, plan a permanent installable Doppelganger package and Loader plugin using exposed services, lifecycle, storage, context, and tool contracts.
+3. For portable persistent behavior, recommend a permanent installable Doppelganger package and Loader plugin using exposed services, lifecycle, storage, context, and tool contracts.
 4. Use an existing host-agent plugin only when the required surface is genuinely host-specific or absent from Doppelganger, such as browser DOM, native host Client UI, or another unexposed host API; record why Doppelganger is insufficient.
 5. Otherwise offer another supported solution or a deliberate host adaptation.
 

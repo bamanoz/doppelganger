@@ -72,26 +72,27 @@ The skill SHALL route a selected solution in this order: reuse an existing capab
 - **WHEN** the selected solution requires browser DOM, native host Client UI, or another surface not exposed by Doppelganger
 - **THEN** the skill recommends a supported host plugin or explicit host adaptation and records why a Doppelganger implementation is insufficient
 
-### Requirement: Research and planning update the durable proposal
-The skill SHALL keep the selected Evolution proposal aligned with observable workflow state using exact revisions and stable operation identifiers. It SHALL store bounded research summaries and source references rather than copied articles or raw dialogue, transition to `options-ready` only after presenting viable options, transition to `selected` only after the user chooses one, and transition to `planned` only after the corresponding implementation plan is complete and reviewable.
+### Requirement: Research and selection update the durable proposal
+The skill SHALL keep the selected Evolution proposal aligned with its research and selection state using exact revisions and stable operation identifiers. It SHALL store bounded research summaries and source references rather than copied articles or raw dialogue, transition to `options-ready` only after presenting viable options, transition to `selected` only after the user chooses one, and stop there. It SHALL NOT choose or create a repository, package, planning system, OpenSpec change, or implementation artifact; write implementation instructions; transition the proposal to `planned`, `implementing`, or `done`; or execute the selected mechanism. Later planning and implementation belong to separately invoked owning workflows.
 
 #### Scenario: Research produces reviewable options
 - **ID**: `capability-evolution-skill.state.options-ready`
-- **EVIDENCE**: `scripts/tests/capability-evolution-skill.spec.ts::records exact research, selection, planning, implementation, and completion transitions`
+- **EVIDENCE**: `scripts/tests/capability-evolution-skill.spec.ts::records exact research and selection transitions then stops`
 - **WHEN** current research has produced a sourced comparison and recommendation
 - **THEN** the proposal records the bounded result and becomes `options-ready`
 
 #### Scenario: User selects an option
 - **ID**: `capability-evolution-skill.state.selected`
-- **EVIDENCE**: `scripts/tests/capability-evolution-skill.spec.ts::records exact research, selection, planning, implementation, and completion transitions`
+- **EVIDENCE**: `scripts/tests/capability-evolution-skill.spec.ts::records exact research and selection transitions then stops`
 - **WHEN** the user explicitly chooses one researched option
-- **THEN** the proposal records that decision and becomes `selected` without beginning implementation
+- **THEN** the proposal records that decision, becomes `selected`, and the skill stops without planning or implementation
 
-#### Scenario: Planning completes
-- **ID**: `capability-evolution-skill.state.planned`
-- **EVIDENCE**: `scripts/tests/capability-evolution-skill.spec.ts::records exact research, selection, planning, implementation, and completion transitions`
-- **WHEN** the selected solution has a complete implementation plan in the owning planning system
-- **THEN** the proposal references that plan and becomes `planned`
+#### Scenario: Selected mechanism needs later implementation
+- **ID**: `capability-evolution-skill.state.selected-handoff`
+- **EVIDENCE**: `scripts/tests/capability-evolution-skill.spec.ts::hands the selected mechanism off without planning implementation`
+- **WHEN** a selected mechanism requires a repository, package, planning artifact, or executable change
+- **THEN** the skill leaves those decisions and actions to a separately invoked owning workflow
+
 
 ### Requirement: Capability evolution never interrupts the primary task
 The skill and Evolution policy SHALL require the current task to be completed and verified before a newly detected or existing capability opportunity is presented. A response SHALL include at most one Evolution suggestion, after the primary result, and SHALL omit the suggestion when no substantial relevant opportunity is due.

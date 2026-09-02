@@ -1,5 +1,5 @@
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -130,6 +130,71 @@ async function writeProtocolPreset(root: string): Promise<void> {
   ])
 }
 
+async function writeEvolutionPreset(root: string): Promise<void> {
+  const modules = {
+    context: JSON.stringify(new URL('../../extension-protocols/src/context-plugin.ts', import.meta.url).href),
+    tools: JSON.stringify(new URL('../../extension-protocols/src/tools-plugin.ts', import.meta.url).href),
+    persona: JSON.stringify(new URL('../../extension-persona/src/index.ts', import.meta.url).href),
+    sqlite: JSON.stringify(new URL('../../extension-sqlite/src/index.ts', import.meta.url).href),
+    evolution: JSON.stringify(new URL('../../extension-evolution/src/index.ts', import.meta.url).href),
+  }
+  await Promise.all([
+    ...Object.entries(modules).map(([name, specifier]) => writeFile(
+      join(root, `${name}.mjs`), `export { default } from ${specifier}\n`,
+    )),
+    writeFile(join(root, 'runtime.cordis.yml'), [
+      '- id: context',
+      '  name: ./context.mjs',
+      '  isolate:',
+      '    doppelgangerContext: session',
+      '- id: tools',
+      '  name: ./tools.mjs',
+      '  isolate:',
+      '    doppelgangerTools: session',
+      '- id: persona',
+      '  name: ./persona.mjs',
+      '  inject: [doppelgangerRuntimeSession, doppelgangerContext]',
+      '  isolate:',
+      '    doppelgangerRuntimeSession: session',
+      '    doppelgangerContext: session',
+      '    doppelgangerPersona: session',
+      '  config:',
+      '    instanceId: evolution-child-test',
+      '- id: sqlite',
+      '  name: ./sqlite.mjs',
+      '  isolate:',
+      '    doppelgangerInstanceSqlite: session',
+      '  config:',
+      `    home: ${JSON.stringify(join(root, 'home'))}`,
+      '- id: evolution',
+      '  name: ./evolution.mjs',
+      '  inject: [doppelgangerRuntimeSession, doppelgangerActor, doppelgangerPersona, doppelgangerInstanceSqlite, doppelgangerContext, doppelgangerTools]',
+      '  isolate:',
+      '    doppelgangerRuntimeSession: session',
+      '    doppelgangerActor: session',
+      '    doppelgangerPersona: session',
+      '    doppelgangerInstanceSqlite: session',
+      '    doppelgangerContext: session',
+      '    doppelgangerTools: session',
+      '    doppelgangerEvolution: session',
+      '',
+    ].join('\n')),
+  ])
+}
+
+async function invokeEvolution(
+  peer: FramedJsonRpcPeer,
+  name: string,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const result = await peer.request('tools.invoke', { name, input })
+  if (result === null || typeof result !== 'object' || !('ok' in result) || result.ok !== true
+    || !('value' in result) || result.value === null || typeof result.value !== 'object') {
+    throw new Error(`${name} failed: ${JSON.stringify(result)}`)
+  }
+  return result.value as Record<string, unknown>
+}
+
 function actorPresetDefinition(authoredActorId: string): string {
   return [
     '- id: tools',
@@ -173,7 +238,7 @@ async function writeActorPreset(root: string, authoredActorId = 'authored'): Pro
 async function writePersonaAuthoringPreset(root: string): Promise<void> {
   await mkdir(join(root, 'traits'), { recursive: true })
   await Promise.all([
-    writeFile(join(root, 'identity.md'), 'You are Mark.\n'),
+    writeFile(join(root, 'identity.md'), 'You are Test Persona.\n'),
     writeFile(join(root, 'traits', 'evolving-profile.md'), 'Prefer careful iteration.\n'),
     writeFile(join(root, 'runtime.cordis.yml'), [
       '- id: context',
@@ -192,7 +257,7 @@ async function writePersonaAuthoringPreset(root: string): Promise<void> {
       '    doppelgangerContext: session',
       '    doppelgangerPersona: session',
       '  config:',
-      '    instanceId: mark',
+      '    instanceId: test-persona',
       '    identity: { path: identity.md, priority: 1000 }',
       '    traits:',
       '      - { name: evolving-profile, path: traits/evolving-profile.md, priority: 500 }',
@@ -208,6 +273,31 @@ async function writePersonaAuthoringPreset(root: string): Promise<void> {
       '',
     ].join('\n')),
   ])
+}
+
+async function writePersonaEvolutionPreset(root: string): Promise<void> {
+  await writePersonaAuthoringPreset(root)
+  const source = await readFile(join(root, 'runtime.cordis.yml'), 'utf8')
+  await writeFile(join(root, 'runtime.cordis.yml'), `${source}${[
+    '- id: sqlite',
+    '  name: "@doppelganger/doppelganger-sqlite"',
+    '  isolate:',
+    '    doppelgangerInstanceSqlite: session',
+    '  config:',
+    `    home: ${JSON.stringify(join(root, 'home'))}`,
+    '- id: evolution',
+    '  name: "@doppelganger/doppelganger-evolution"',
+    '  inject: [doppelgangerRuntimeSession, doppelgangerActor, doppelgangerPersona, doppelgangerInstanceSqlite, doppelgangerContext, doppelgangerTools]',
+    '  isolate:',
+    '    doppelgangerRuntimeSession: session',
+    '    doppelgangerActor: session',
+    '    doppelgangerPersona: session',
+    '    doppelgangerInstanceSqlite: session',
+    '    doppelgangerContext: session',
+    '    doppelgangerTools: session',
+    '    doppelgangerEvolution: session',
+    '',
+  ].join('\n')}`)
 }
 
 function featurePatch(
@@ -519,6 +609,140 @@ describe('Node OMP runtime child', () => {
       await expect(harness.peer.request('context.resolve', {
         input: 'Still active', tokenBudget: 1000,
       })).resolves.toMatchObject({ content: 'Reloaded project context.' })
+    } catch (cause) {
+      throw childError(harness, cause)
+    } finally {
+      await dispose(harness)
+    }
+  }, 15_000)
+
+  it('projects Evolution generically, persists global and project lifecycles, removes stale tools, and disposes cleanly', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-child-'))
+    temporaryRoots.push(root)
+    await writeEvolutionPreset(root)
+    const harness = await childHarness()
+    try {
+      const activated = await timeout(harness.peer.request('session.activate', activation(root, [], 'actor-one')), 'Evolution activation') as {
+        tools: Array<{ name: string }>
+      }
+      expect(activated.tools.map(tool => tool.name)).toEqual([
+        'evolution.inspect', 'evolution.list', 'evolution.propose', 'evolution.reject',
+        'evolution.reminder.record', 'evolution.snooze', 'evolution.transition',
+      ])
+      await expect(harness.peer.request('context.resolve', {
+        input: 'Improve reusable capability planning.', tokenBudget: 1000,
+      })).resolves.toMatchObject({ content: expect.stringContaining('[Doppelganger Evolution Policy]') })
+
+      const persona = await invokeEvolution(harness.peer, 'evolution.propose', {
+        operationId: 'global-persona-propose', kind: 'persona', scope: 'global',
+        dedupeKey: 'persona.verified-progress', title: 'Verified progress reporting',
+        rationale: 'Repeated collaboration evidence supports a stable Persona review.',
+      })
+      const reviewing = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'global-persona-review', id: persona.id, expectedRevision: persona.revision,
+        target: 'reviewing', reviewSummary: 'The user explicitly selected review.',
+      })
+      const completed = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'global-persona-done', id: persona.id, expectedRevision: reviewing.revision,
+        target: 'done', outcome: 'Persona activation was separately confirmed.',
+      })
+      expect(completed).toMatchObject({ kind: 'persona', scope: 'global', status: 'done' })
+
+      const capability = await invokeEvolution(harness.peer, 'evolution.propose', {
+        operationId: 'project-capability-propose', kind: 'capability', scope: 'project',
+        dedupeKey: 'project.release-checks', title: 'Project release checks',
+        rationale: 'This repository repeatedly needs a reviewable release check workflow.',
+      })
+      const researching = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'project-capability-research', id: capability.id, expectedRevision: capability.revision,
+        target: 'researching', researchQuestion: 'Which maintained approach fits this repository?',
+      })
+      const optionsReady = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'project-capability-options', id: capability.id, expectedRevision: researching.revision,
+        target: 'options-ready', optionsSummary: 'Compared existing, portable, and host-only mechanisms.',
+        sourceIds: ['source:primary-one'],
+      })
+      const selected = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'project-capability-selected', id: capability.id, expectedRevision: optionsReady.revision,
+        target: 'selected', selectedOption: 'Permanent Doppelganger Loader plugin.',
+      })
+      const planned = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'project-capability-planned', id: capability.id, expectedRevision: selected.revision,
+        target: 'planned', planReference: 'openspec:release-checks',
+      })
+      const implementing = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'project-capability-implementing', id: capability.id, expectedRevision: planned.revision,
+        target: 'implementing', implementationReference: 'change:release-checks',
+      })
+      const done = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'project-capability-done', id: capability.id, expectedRevision: implementing.revision,
+        target: 'done', outcome: 'The selected capability passed its verification scenario.',
+      })
+      expect(done).toMatchObject({ kind: 'capability', scope: 'project', status: 'done' })
+      const projectDirectory = join(root, '.doppelganger', 'evolution', 'opportunities')
+      const proposalFiles = (await readdir(projectDirectory)).filter(name => name.endsWith('.yaml'))
+      expect(proposalFiles).toHaveLength(1)
+      expect(await readFile(join(projectDirectory, proposalFiles[0]!), 'utf8')).toContain('status: done')
+
+      const changed = notification(harness.peer, 'runtime.changed')
+      const source = await readFile(join(root, 'runtime.cordis.yml'), 'utf8')
+      await writeFile(join(root, 'runtime.cordis.yml'), source.slice(0, source.indexOf('- id: evolution')))
+      await expect(timeout(changed, 'Evolution removal')).resolves.toMatchObject({ tools: [] })
+      await expect(harness.peer.request('tools.invoke', { name: 'evolution.list', input: {} }))
+        .resolves.toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
+    } catch (cause) {
+      throw childError(harness, cause)
+    } finally {
+      await dispose(harness)
+    }
+    expect(harness.child.exitCode).toBe(0)
+  }, 15_000)
+
+  it('keeps a Persona proposal inert until review and completes it only after separately confirmed activation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-persona-evolution-vertical-'))
+    temporaryRoots.push(root)
+    await writePersonaEvolutionPreset(root)
+    const traitPath = join(root, 'traits', 'evolving-profile.md')
+    const original = await readFile(traitPath, 'utf8')
+    const harness = await childHarness()
+    try {
+      await harness.peer.request('session.activate', activation(root, [], 'actor-one'))
+      const proposed = await invokeEvolution(harness.peer, 'evolution.propose', {
+        operationId: 'persona-vertical-propose', kind: 'persona', scope: 'global',
+        dedupeKey: 'persona.reversible-verification', title: 'Prefer reversible verified changes',
+        rationale: 'Durable collaboration evidence supports a review of this stable assistant quality.',
+      })
+      expect(await readFile(traitPath, 'utf8')).toBe(original)
+      const reviewing = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'persona-vertical-review', id: proposed.id, expectedRevision: proposed.revision,
+        target: 'reviewing', reviewSummary: 'The user explicitly chose to review this proposal.',
+      })
+      expect(await readFile(traitPath, 'utf8')).toBe(original)
+      const inspected = await harness.peer.request('tools.invoke', {
+        name: 'persona.inspect', input: { target: 'trait:evolving-profile' },
+      })
+      if (inspected === null || typeof inspected !== 'object' || !('ok' in inspected) || inspected.ok !== true
+        || !('value' in inspected) || inspected.value === null || typeof inspected.value !== 'object'
+        || !('revision' in inspected.value) || typeof inspected.value.revision !== 'string') {
+        throw new Error('persona.inspect returned an invalid result')
+      }
+      const replacement = 'Prefer reversible changes with observed verification.\n'
+      await expect(harness.peer.request('tools.invoke', {
+        name: 'persona.revise',
+        input: {
+          target: 'trait:evolving-profile',
+          expectedRevision: inspected.value.revision,
+          replacement,
+          rationale: 'Apply the explicitly reviewed stable Persona quality.',
+          evidenceIds: ['evolution:persona-vertical'],
+        },
+      })).resolves.toMatchObject({ ok: true, value: { status: 'applied' } })
+      expect(await readFile(traitPath, 'utf8')).toBe(replacement)
+      const completed = await invokeEvolution(harness.peer, 'evolution.transition', {
+        operationId: 'persona-vertical-done', id: proposed.id, expectedRevision: reviewing.revision,
+        target: 'done', outcome: 'Persona Authoring confirmed exact-revision HMR activation.',
+      })
+      expect(completed).toMatchObject({ status: 'done', kind: 'persona', scope: 'global' })
     } catch (cause) {
       throw childError(harness, cause)
     } finally {

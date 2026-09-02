@@ -41,7 +41,7 @@ function captureRow(): string[] {
   ]
 }
 
-function declarativeMark(storage: string, capture = false, semantic = false): string {
+function declarativeTestPreset(storage: string, capture = false, semantic = false): string {
   return [
     '- id: doppelganger-context',
     '  name: "@doppelganger/doppelganger-protocols/context"',
@@ -59,7 +59,7 @@ function declarativeMark(storage: string, capture = false, semantic = false): st
     '    doppelgangerContext: session',
     '    doppelgangerPersona: session',
     '  config:',
-    '    instanceId: mark',
+    '    instanceId: integration-persona',
     '    identity: { path: identity.md, priority: 1000 }',
     '    traits:',
     '      - { name: engineer, path: traits/engineer.md, priority: 700 }',
@@ -121,7 +121,7 @@ function semanticRows(storage: string): string[] {
     '    doppelgangerMemoryVectorIndex: session',
     '    doppelgangerMemorySemantic: session',
     '  config:',
-    '    instanceId: mark',
+    '    instanceId: integration-persona',
     '    pollIntervalMs: 10',
     '    batchSize: 4',
     '    retryBaseMs: 10',
@@ -134,23 +134,23 @@ beforeEach(async () => {
   temporaryRoots.push(root)
   homePath = join(root, 'home')
   workspacePath = join(root, 'workspace')
-  storagePath = join(root, 'state', 'mark')
+  storagePath = join(root, 'state', 'integration-persona')
   const storage = storagePath
-  const presetDirectory = join(homePath, '.runtime-presets', 'mark')
+  const presetDirectory = join(homePath, '.runtime-presets', 'full-stack-test')
   presetPath = join(presetDirectory, 'runtime.cordis.yml')
   await Promise.all([
     mkdir(join(presetDirectory, 'traits'), { recursive: true }),
     mkdir(join(workspacePath, '.doppelganger'), { recursive: true }),
   ])
-  presetSource = declarativeMark(storage)
+  presetSource = declarativeTestPreset(storage)
   await Promise.all([
     writeFile(presetPath, presetSource),
-    writeFile(join(homePath, 'config.yaml'), 'version: 1\ndefaultRuntimePreset: mark\n'),
-    writeFile(join(presetDirectory, 'identity.md'), 'You are Mark, a durable technical collaborator.'),
+    writeFile(join(homePath, 'config.yaml'), 'version: 1\ndefaultRuntimePreset: full-stack-test\n'),
+    writeFile(join(presetDirectory, 'identity.md'), 'You are an integration test assistant.'),
     writeFile(join(presetDirectory, 'traits', 'engineer.md'), 'Approach software work as a production engineer.'),
     writeFile(join(presetDirectory, 'traits', 'concise.md'), 'Communicate conclusions first.'),
     writeFile(join(presetDirectory, 'traits', 'evolving-profile.md'), 'Preserve deliberate collaboration evolution.'),
-    writeFile(join(workspacePath, '.doppelganger', 'manifest.yaml'), 'version: 1\nruntimePreset: mark\n'),
+    writeFile(join(workspacePath, '.doppelganger', 'manifest.yaml'), 'version: 1\nruntimePreset: full-stack-test\n'),
   ])
 })
 
@@ -162,7 +162,7 @@ afterEach(async () => {
 async function realSession(
   sessionId: string,
   cwd = workspacePath,
-  actorId: string | null = 'valera',
+  actorId: string | null = 'test-actor',
 ): Promise<{ adapter: OmpAdapterSession; connection: OmpChildConnection }> {
   const activation = await resolveOmpActivation({ home: homePath, watch: true, ...(actorId === null ? {} : { actorId }) }, { cwd, sessionId })
   const adapter = new OmpAdapterSession({
@@ -260,6 +260,7 @@ async function waitUntil(check: () => boolean | Promise<boolean>, label: string)
 
 interface ProjectedTool {
   readonly name?: string
+  readonly loadMode?: 'essential' | 'discoverable'
   readonly approval?: unknown
   readonly formatApprovalDetails?: (args: unknown) => string | string[] | undefined
   readonly execute: (
@@ -299,7 +300,7 @@ function mountedOmpExtension(sessionId: string, install: (api: ExtensionAPI) => 
 function realOmpExtension(sessionId: string) {
   return mountedOmpExtension(
     sessionId,
-    createDoppelgangerOmpExtension({ home: homePath, actorId: 'valera', childPath, shutdownTimeoutMs: 1000 }),
+    createDoppelgangerOmpExtension({ home: homePath, actorId: 'test-actor', childPath, shutdownTimeoutMs: 1000 }),
   )
 }
 
@@ -320,11 +321,11 @@ async function commitOmpTurn(
   }, fixture.context)
 }
 
-describe('real Mark persona vertical', () => {
+describe('full-stack test Runtime Preset vertical', () => {
   it('activates the host-neutral definition and projects identity plus selected traits', async () => {
     const { connection } = await realSession('persona-context')
     const content = await resolveContext(connection)
-    expect(content).toContain('You are Mark, a durable technical collaborator.')
+    expect(content).toContain('You are an integration test assistant.')
     expect(content).toContain('Approach software work as a production engineer.')
     expect(content).toContain('Communicate conclusions first.')
     expect(content).toContain('Preserve deliberate collaboration evolution.')
@@ -341,15 +342,15 @@ describe('real Mark persona vertical', () => {
     await expect(invoke(connection, 'persona.inspect', { target: 'trait:evolving-profile' })).resolves.toMatchObject({ writable: true })
 
     await writeFile(
-      join(homePath, '.runtime-presets', 'mark', 'identity.md'),
-      'You are Mark, a verified technical collaborator.',
+      join(homePath, '.runtime-presets', 'full-stack-test', 'identity.md'),
+      'You are a verified integration test assistant.',
     )
-    await expect.poll(() => resolveContext(connection)).toContain('You are Mark, a verified technical collaborator.')
+    await expect.poll(() => resolveContext(connection)).toContain('You are a verified integration test assistant.')
   })
 
   it('revises the active trait through the approved project-local OMP extension', async () => {
     vi.stubEnv('DOPPELGANGER_HOME', homePath)
-    vi.stubEnv('DOPPELGANGER_ACTOR_ID', 'valera')
+    vi.stubEnv('DOPPELGANGER_ACTOR_ID', 'test-actor')
     vi.resetModules()
     const extensionUrl = new URL('../../../.omp/extensions/doppelganger.ts', import.meta.url)
     extensionUrl.searchParams.set('project-local-smoke', String(Date.now()))
@@ -357,7 +358,9 @@ describe('real Mark persona vertical', () => {
     const fixture = mountedOmpExtension('approved-persona-revision', projectExtension)
     try {
       await fixture.handlers.get('session_start')!({ type: 'session_start' }, fixture.context)
-      const inspect = fixture.tools.get('doppelganger_persona_x2e_inspect')!
+      expect(fixture.tools.get('doppelganger_persona_inspect')?.loadMode).toBe('discoverable')
+      expect(fixture.tools.get('doppelganger_persona_revise')?.loadMode).toBe('essential')
+      const inspect = fixture.tools.get('doppelganger_persona_inspect')!
       const inspected = await inspect.execute(
         'inspect-evolving',
         { target: 'trait:evolving-profile' },
@@ -366,7 +369,7 @@ describe('real Mark persona vertical', () => {
         fixture.context,
       )
       const value = inspected.details as { readonly revision: string }
-      const revise = fixture.tools.get('doppelganger_persona_x2e_revise')!
+      const revise = fixture.tools.get('doppelganger_persona_revise')!
       const replacement = 'Prefer explicit verification before durable behavioral change.\n'
       const args = {
         target: 'trait:evolving-profile',
@@ -435,7 +438,7 @@ describe('real Mark persona vertical', () => {
     await mkdir(join(otherProject, '.doppelganger'))
     await writeFile(join(otherProject, '.doppelganger', 'manifest.yaml'), [
       'version: 1',
-      'runtimePreset: mark',
+      'runtimePreset: full-stack-test',
     ].join('\n'))
     const second = await realSession('continuity-second', otherProject)
     expect(searchContents(await invoke(second.connection, 'memory.search', { query: 'restart safe adapters' })))
@@ -531,7 +534,7 @@ describe('real Mark persona vertical', () => {
     }))).toEqual([])
   })
   it('runs semantic recall, restart, reindex, fallback, recovery, deletion, and shutdown through a child runtime', async () => {
-    const semanticPreset = declarativeMark(storagePath, false, true)
+    const semanticPreset = declarativeTestPreset(storagePath, false, true)
     await writeFile(presetPath, `${semanticPreset.trimEnd()}\n${semanticRows(storagePath).join('\n')}\n`)
     const first = await realSession('semantic-first')
     const transport = recordCoordinates(await invoke(first.connection, 'memory.remember', {
@@ -626,7 +629,7 @@ describe('real Mark persona vertical', () => {
       '[fact:project.capture.disabled] Disabled capture must not persist this observation.',
       'The disabled turn completed.',
     )
-    const disabledList = disabled.tools.get('doppelganger_memory_x2e_candidates_x2e_list')!
+    const disabledList = disabled.tools.get('doppelganger_memory_candidates_list')!
     expect((await disabledList.execute('disabled-list', {}, undefined, undefined, disabled.context)).details).toEqual([])
     await disabled.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, disabled.context)
 
@@ -643,7 +646,7 @@ describe('real Mark persona vertical', () => {
       ].join('\n'),
       'The enabled turn completed with actual assistant output.',
     )
-    const enabledList = enabled.tools.get('doppelganger_memory_x2e_candidates_x2e_list')!
+    const enabledList = enabled.tools.get('doppelganger_memory_candidates_list')!
     const result = await enabledList.execute('enabled-list', {}, undefined, undefined, enabled.context)
     expect(result.isError).not.toBe(true)
     expect(result.details).toEqual([

@@ -24,7 +24,7 @@ async function fixture() {
   const writable = join(root, 'evolving-profile.md')
   const protectedTrait = join(root, 'engineer.md')
   await Promise.all([
-    writeFile(identity, 'Mark identity.\n'),
+    writeFile(identity, 'Test identity.\n'),
     writeFile(writable, 'Evolving profile.\n'),
     writeFile(protectedTrait, 'Engineering quality.\n'),
   ])
@@ -36,7 +36,7 @@ async function setup(config: PersonaAuthoringConfig) {
   const ctx = new Context()
   await ctx.plugin(ToolRegistry)
   await ctx.plugin(createPersonaActivationPlugin({
-    instanceId: 'mark',
+    instanceId: 'test-persona',
     sessionId: 'session-one',
     identity: { path: files.identity },
     traits: [
@@ -104,7 +104,7 @@ describe('Persona Authoring foundation', () => {
 
     await expect(ctx.doppelgangerTools.invoke('persona.inspect', { target: 'identity' })).resolves.toMatchObject({
       ok: true,
-      value: { target: 'identity', writable: false, content: 'Mark identity.\n' },
+      value: { target: 'identity', writable: false, content: 'Test identity.\n' },
     })
     await expect(ctx.doppelgangerTools.invoke('persona.inspect', { target: 'trait:engineer' })).resolves.toMatchObject({
       ok: true,
@@ -179,7 +179,7 @@ describe('Persona Authoring foundation', () => {
       const ctx = new Context()
       await ctx.plugin(ToolRegistry)
       await ctx.plugin(createPersonaActivationPlugin({
-        instanceId: 'mark',
+        instanceId: 'test-persona',
         sessionId: `session-${candidate.label}`,
         traits: candidate.traits,
       }))
@@ -195,7 +195,7 @@ describe('Persona Authoring foundation', () => {
     const ctx = new Context()
     await ctx.plugin(ToolRegistry)
     await ctx.plugin(createPersonaActivationPlugin({
-      instanceId: 'mark',
+      instanceId: 'test-persona',
       sessionId: 'read-only-session',
       identity: { path: files.identity },
       traits: [{ name: 'evolving-profile', path: files.writable }],

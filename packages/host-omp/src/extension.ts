@@ -23,6 +23,7 @@ import { NodeOmpChildFactory } from './process.ts'
 
 const INITIALIZE_TOOL = 'doppelganger_initialize'
 const PROXY_PREFIX = 'doppelganger_'
+const OMP_TOOL_NAME_LIMIT = 64
 
 const SUPPORTED_SCHEMA_KEYWORDS = new Set([
   '$comment', '$defs', '$id', '$ref', '$schema',
@@ -227,7 +228,16 @@ interface ActiveTurn {
 }
 
 function proxyName(runtimeName: string): string {
-  return `${PROXY_PREFIX}${runtimeName.replace(/[^a-zA-Z0-9_-]/g, character => `_x${character.codePointAt(0)!.toString(16)}_`)}`
+  const name = `${PROXY_PREFIX}${runtimeName.replaceAll('.', '_')}`
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    throw new TypeError(`portable tool "${runtimeName}" maps to an OMP proxy with unsupported characters`)
+  }
+  if (name.length > OMP_TOOL_NAME_LIMIT) {
+    throw new TypeError(
+      `portable tool "${runtimeName}" maps to a ${name.length}-character OMP proxy; limit is ${OMP_TOOL_NAME_LIMIT}`,
+    )
+  }
+  return name
 }
 
 const APPROVAL_ARGUMENT_LIMIT = 2_000
@@ -333,58 +343,105 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       `${sessionId}:${type}:${identity}`
     )
 
-    const setProjectedTools = async (tools: readonly ToolDescriptor[]) => {
+    const setProjectedTools = async (tools: readonly ToolDescriptor[], ctx: ExtensionContext) => {
       const available = tools.filter(tool => tool.available)
+      const candidates: Array<{ readonly descriptor: ToolDescriptor; readonly name: string }> = []
+      const candidateNames = new Map<string, Set<string>>()
+      const seenPortableNames = new Set<string>()
+
+      for (const descriptor of available) {
+        if (seenPortableNames.has(descriptor.name)) {
+          report(ctx, `Doppelganger: runtime returned duplicate tool "${descriptor.name}"`)
+          continue
+        }
+        seenPortableNames.add(descriptor.name)
+
+        let name: string
+        try {
+          name = proxyName(descriptor.name)
+        } catch (cause) {
+          report(ctx, `Doppelganger: ${cause instanceof Error ? cause.message : String(cause)}`)
+          continue
+        }
+        candidates.push({ descriptor, name })
+        const portableNames = candidateNames.get(name) ?? new Set<string>()
+        portableNames.add(descriptor.name)
+        candidateNames.set(name, portableNames)
+      }
+
+      const collidedNames = new Set<string>()
+      for (const [name, portableNames] of candidateNames) {
+        if (portableNames.size < 2) continue
+        collidedNames.add(name)
+        report(
+          ctx,
+          `Doppelganger: runtime tools ${[...portableNames].map(portableName => `"${portableName}"`).join(' and ')} map to the same OMP proxy "${name}"`,
+        )
+      }
+
       const next = new Map<string, ToolDescriptor>()
       const projectedNames = new Set<string>()
-      for (const descriptor of available) {
-        if (next.has(descriptor.name)) throw new TypeError(`runtime returned duplicate tool "${descriptor.name}"`)
-        const name = proxyName(descriptor.name)
-        const collision = registeredProxyNames.get(name)
-        if (collision !== undefined && collision !== descriptor.name) {
-          throw new TypeError(`runtime tools "${collision}" and "${descriptor.name}" map to the same OMP proxy`)
+      for (const { descriptor, name } of candidates) {
+        if (collidedNames.has(name)) continue
+        const registeredPortableName = registeredProxyNames.get(name)
+        if (registeredPortableName !== undefined && registeredPortableName !== descriptor.name) {
+          report(
+            ctx,
+            `Doppelganger: runtime tools "${registeredPortableName}" and "${descriptor.name}" map to the same OMP proxy "${name}"`,
+          )
+          continue
         }
-        registeredProxyNames.set(name, descriptor.name)
-        projectedNames.add(name)
-        next.set(descriptor.name, descriptor)
-        const projected = {
-          name,
-          label: `Doppelganger: ${descriptor.name}`,
-          description: descriptor.description,
-          parameters: ompToolParametersFromJsonSchema(descriptor.inputSchema),
-          approval: () => {
-            const approval = activeDescriptors.get(descriptor.name)?.approval
-            return approval === undefined
-              ? 'exec' as const
-              : { tier: 'write', policy: 'prompt', reason: approval.reason } as const
-          },
-          formatApprovalDetails: (params: unknown) => {
-            const active = activeDescriptors.get(descriptor.name)
-            if (active?.approval === undefined) return
-            return [
-              `Portable tool: ${active.name}`,
-              `Arguments: ${boundedApprovalArguments(params)}`,
-            ]
-          },
-          async execute(_callId: string, params: unknown) {
-            const active = activeDescriptors.get(descriptor.name)
-            const connection = adapter?.connection()
-            if (active === undefined || connection === undefined || proxyName(active.name) !== name) {
-              return textResult({ code: 'RUNTIME_UNAVAILABLE', message: 'runtime tool is inactive' }, true)
-            }
-            try {
-              const result = await connection.request('tools.invoke', {
-                name: active.name,
-                input: jsonValue(params),
-              }) as { ok: boolean; value?: unknown; error?: unknown }
-              return result.ok ? textResult(result.value) : textResult(result.error, true)
-            } catch (cause) {
-              await adapter?.fail({ code: 'TOOL_PROXY_FAILED', message: cause instanceof Error ? cause.message : String(cause) })
-              return textResult({ code: 'TOOL_PROXY_FAILED', message: cause instanceof Error ? cause.message : String(cause) }, true)
-            }
-          },
+
+        try {
+          const projected = {
+            name,
+            label: `Doppelganger: ${descriptor.name}`,
+            description: descriptor.description,
+            parameters: ompToolParametersFromJsonSchema(descriptor.inputSchema),
+            loadMode: descriptor.approval === undefined ? 'discoverable' as const : 'essential' as const,
+            approval: () => {
+              const approval = activeDescriptors.get(descriptor.name)?.approval
+              return approval === undefined
+                ? 'exec' as const
+                : { tier: 'write', policy: 'prompt', reason: approval.reason } as const
+            },
+            formatApprovalDetails: (params: unknown) => {
+              const active = activeDescriptors.get(descriptor.name)
+              if (active?.approval === undefined) return
+              return [
+                `Portable tool: ${active.name}`,
+                `Arguments: ${boundedApprovalArguments(params)}`,
+              ]
+            },
+            async execute(_callId: string, params: unknown) {
+              const active = activeDescriptors.get(descriptor.name)
+              const connection = adapter?.connection()
+              if (active === undefined || connection === undefined
+                || registeredProxyNames.get(name) !== descriptor.name) {
+                return textResult({ code: 'RUNTIME_UNAVAILABLE', message: 'runtime tool is inactive' }, true)
+              }
+              try {
+                const result = await connection.request('tools.invoke', {
+                  name: active.name,
+                  input: jsonValue(params),
+                }) as { ok: boolean; value?: unknown; error?: unknown }
+                return result.ok ? textResult(result.value) : textResult(result.error, true)
+              } catch (cause) {
+                await adapter?.fail({ code: 'TOOL_PROXY_FAILED', message: cause instanceof Error ? cause.message : String(cause) })
+                return textResult({ code: 'TOOL_PROXY_FAILED', message: cause instanceof Error ? cause.message : String(cause) }, true)
+              }
+            },
+          }
+          pi.registerTool(projected)
+          registeredProxyNames.set(name, descriptor.name)
+          projectedNames.add(name)
+          next.set(descriptor.name, descriptor)
+        } catch (cause) {
+          report(
+            ctx,
+            `Doppelganger: cannot project portable tool "${descriptor.name}": ${cause instanceof Error ? cause.message : String(cause)}`,
+          )
         }
-        pi.registerTool(projected)
       }
       activeDescriptors.clear()
       for (const [name, descriptor] of next) activeDescriptors.set(name, descriptor)
@@ -428,11 +485,11 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       adapter = new OmpAdapterSession({
         ...(activation === undefined ? {} : { activation }),
         childFactory,
-        onToolsChanged: tools => setProjectedTools(tools),
+        onToolsChanged: tools => setProjectedTools(tools, ctx),
         notifyDiagnostic: problem => report(ctx, `Doppelganger: ${problem.message}`),
       })
       const snapshot = await adapter.start()
-      await setProjectedTools(snapshot.tools)
+      await setProjectedTools(snapshot.tools, ctx)
       if (snapshot.state === 'active') {
         await publish({
           protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
@@ -615,6 +672,9 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
         const disposal = await closing.dispose()
         if (disposal.outcome !== 'graceful' || !disposal.sessionDisposeAcknowledged) {
           report(ctx, `Doppelganger: runtime shutdown ${disposal.outcome}; session acknowledgement=${String(disposal.sessionDisposeAcknowledged)}`)
+        }
+        if (disposal.diagnostic !== undefined) {
+          report(ctx, `Doppelganger: runtime shutdown diagnostic: ${disposal.diagnostic}`)
         }
       })().catch(cause => {
         report(ctx, `Doppelganger: runtime shutdown failed: ${cause instanceof Error ? cause.message : String(cause)}`)

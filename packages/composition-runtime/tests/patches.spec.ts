@@ -1,9 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { Context, Plugin } from '@deepseek-ai/cordis'
 import { RuntimePresetRoster } from '@doppelganger/doppelganger-runtime-presets'
 import {
   CompositionLayerError,
@@ -21,6 +20,32 @@ afterEach(async () => {
 
 function layer(source: string, patches: Parameters<typeof defineCompositionPatchLayer>[0]['patches']) {
   return defineCompositionPatchLayer({ source, baseUrl: '/tmp', patches })
+}
+
+async function fullStackTestPreset() {
+  const root = await mkdtemp(join(tmpdir(), 'doppelganger-full-stack-preset-'))
+  temporaryRoots.push(root)
+  const home = join(root, 'home')
+  const directory = join(home, '.runtime-presets', 'full-stack-test')
+  await mkdir(directory, { recursive: true })
+  await Promise.all([
+    writeFile(join(directory, 'feature.mjs'), "export default { name: 'fixture-feature', apply() {} }\n"),
+    writeFile(join(directory, 'runtime.cordis.yml'), [
+      '- id: test-context',
+      '  name: ./feature.mjs',
+      '- id: test-persona',
+      '  name: ./feature.mjs',
+      '- id: test-storage',
+      '  name: ./feature.mjs',
+      '- id: test-memory',
+      '  name: ./feature.mjs',
+      '',
+    ].join('\n')),
+  ])
+  return {
+    root,
+    preset: await new RuntimePresetRoster({ home, includeShippedRoot: false }).resolve('full-stack-test'),
+  }
 }
 
 describe('native Cordis patch layers', () => {
@@ -44,51 +69,31 @@ describe('native Cordis patch layers', () => {
       { id: 'added', name: 'pkg-added', config: { value: 2 } },
     ])
   })
-  it('exposes every Mark feature as an independently patchable Loader row', async () => {
-    const home = fileURLToPath(new URL('../../../dev/doppelganger', import.meta.url))
-    const preset = await new RuntimePresetRoster({ home, includeShippedRoot: false }).resolve('mark')
+  it('exposes every test preset feature as an independently patchable Loader row', async () => {
+    const { preset } = await fullStackTestPreset()
 
     expect(preset.entries.map(entry => entry.id)).toEqual([
-      'doppelganger-context',
-      'doppelganger-tools',
-      'doppelganger-persona',
-      'doppelganger-persona-authoring',
-      'doppelganger-sqlite',
-      'doppelganger-memory',
-      'doppelganger-embedding-local',
-      'doppelganger-vectors-sqlite-exact',
-      'doppelganger-memory-semantic',
+      'test-context',
+      'test-persona',
+      'test-storage',
+      'test-memory',
     ])
 
     const effective = composeCompositionEntries(preset.entries, [layer('project', [
-      { id: 'doppelganger-persona', config: { instanceId: 'patched', identity: { path: 'patched-identity.md' } } },
-      { id: 'doppelganger-memory', disabled: true },
-      { insert: [{ id: 'doppelganger-memory-capture', name: '@doppelganger/doppelganger-memory/capture' }] },
+      { id: 'test-persona', config: { instanceId: 'patched' } },
+      { id: 'test-memory', disabled: true },
+      { insert: [{ id: 'test-capture', name: './feature.mjs' }] },
     ])])
-    expect(effective.find(entry => entry.id === 'doppelganger-persona')?.config).toEqual({
-      instanceId: 'patched',
-      identity: { path: 'patched-identity.md' },
-    })
-    expect(effective.find(entry => entry.id === 'doppelganger-memory')?.disabled).toBe(true)
-    expect(effective.at(-1)).toMatchObject({
-      id: 'doppelganger-memory-capture',
-      name: '@doppelganger/doppelganger-memory/capture',
-    })
+    expect(effective.find(entry => entry.id === 'test-persona')?.config).toEqual({ instanceId: 'patched' })
+    expect(effective.find(entry => entry.id === 'test-memory')?.disabled).toBe(true)
+    expect(effective.at(-1)).toMatchObject({ id: 'test-capture', name: pathToFileURL('/tmp/feature.mjs').href })
   })
 
-  it('activates the checked-in Mark Runtime Preset through Loader interpolation', async () => {
-    const home = fileURLToPath(new URL('../../../dev/doppelganger', import.meta.url))
-    const preset = await new RuntimePresetRoster({ home, includeShippedRoot: false }).resolve('mark')
-
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'doppelganger-mark-preset-'))
-    temporaryRoots.push(workspaceRoot)
+  it('activates a generated test Runtime Preset through Loader interpolation', async () => {
+    const { root, preset } = await fullStackTestPreset()
+    const workspaceRoot = join(root, 'workspace')
+    await mkdir(workspaceRoot)
     const runtime = createCompositionRuntime({ watch: false })
-    const hostActor: Plugin = {
-      name: 'checked-in-mark-host-actor',
-      apply(ctx: Context) {
-        ctx.provide('doppelgangerActor', Object.freeze({ state: 'bound', actorId: 'integration-actor' }))
-      },
-    }
     try {
       const session = await runtime.activate({
         composition: createCompositionDefinition({
@@ -96,10 +101,8 @@ describe('native Cordis patch layers', () => {
           revision: preset.revision,
           loaderPath: preset.loaderPath,
         }),
-        sessionId: 'checked-in-mark',
+        sessionId: 'generated-test-preset',
         workspaceRoot,
-        runtimePlugins: { 'host-actor': hostActor },
-        runtimePluginIsolation: { 'host-actor': ['doppelgangerActor'] },
       })
       await session.dispose()
     } finally {

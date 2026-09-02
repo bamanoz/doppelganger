@@ -48,6 +48,29 @@ describe('doppelganger-persona-evolution skill', () => {
     expect(content).toContain('do not claim activation')
   })
 
+  it('keeps reminded Persona proposals inert until explicit review and preserves direct modes', async () => {
+    const content = await skill()
+    expect(content).toContain('`review` — inspect, evaluate, and optionally submit one revision.')
+    expect(content).toContain('`review --dry-run` — inspect and evaluate, but never call the revision tool.')
+    expect(content).toContain('`review <proposal-id>` — review one explicitly selected active Persona Evolution proposal')
+    const inert = content.indexOf('A Persona proposal or reminder is inert.')
+    const inspectProposal = content.indexOf('Call `evolution.inspect`')
+    const inspectPersona = content.indexOf('Call `persona.inspect`')
+    expect(inert).toBeGreaterThan(-1)
+    expect(inspectProposal).toBeGreaterThan(inert)
+    expect(inspectPersona).toBeGreaterThan(inspectProposal)
+    expect(content).toContain('until the user explicitly chooses review for that proposal')
+    expect(content).toContain('the proposal is workflow context, not proof that a revision is justified')
+  })
+
+  it('completes selected proposals only after confirmed activation and leaves failures open', async () => {
+    const content = await skill()
+    expect(content).toContain('transition its latest exact revision to `done` only after `persona.revise` returns `applied` with HMR-confirmed activation or `already-current`')
+    expect(content).toContain('For any proposal-first outcome without confirmed active content')
+    expect(content).toContain('leave the proposal open unless the user explicitly snoozes or rejects it')
+    expect(content).toContain('Do not mark it `done` or claim evolution occurred.')
+  })
+
   it('forbids alternate mutation authority and path-based fallback', async () => {
     const content = await skill()
     expect(content).toContain('Never use filesystem, shell, patch, general editing, or another tool as a fallback.')

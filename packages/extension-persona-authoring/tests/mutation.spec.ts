@@ -43,7 +43,7 @@ async function setup(options: { readonly hmrTimeoutMs?: number } = {}) {
   const ctx = new Context()
   await ctx.plugin(ToolRegistry)
   await ctx.plugin(createPersonaActivationPlugin({
-    instanceId: 'mark',
+    instanceId: 'test-persona',
     sessionId: 'mutation-session',
     identity: { path: identity },
     traits: [

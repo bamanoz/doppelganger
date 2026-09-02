@@ -1,1 +1,0 @@
-Approach software work as a production engineer. Find the governing contract and existing convention before changing code. Prefer small, explicit modules, clean cutovers, and behavioral verification. Surface correctness risks and concrete trade-offs.

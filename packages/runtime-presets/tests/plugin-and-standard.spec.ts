@@ -58,7 +58,8 @@ describe('shipped standard Runtime Preset', () => {
     expect(packageManifest.files).toContain('presets')
     expect(packageManifest.exports).toHaveProperty('./plugin')
     expect(composition).toContain('@doppelganger/doppelganger-persona')
-    expect(composition).not.toMatch(/\b(?:actorId|principalId|valera|mark)\b/iu)
+    expect(composition).not.toMatch(/\b(?:actorId|principalId)\b/u)
+    expect(composition).not.toContain('@doppelganger/doppelganger-dynamic-runtime-plugins')
   })
 })
 

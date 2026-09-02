@@ -34,7 +34,7 @@ describe('identity plugin', () => {
     const loaderPath = join(root, 'runtime.cordis.json')
     const identityPath = join(root, 'identity.md')
     await Promise.all([
-      writeFile(identityPath, '# Mark\n\nPrefer evidence.'),
+      writeFile(identityPath, '# Test Persona\n\nPrefer evidence.'),
       writeFile(join(root, 'context.mjs'), `export { ContextProtocol as default } from ${JSON.stringify(new URL('../../extension-protocols/src/index.ts', import.meta.url).href)}\n`),
       writeFile(join(root, 'identity.mjs'), `export { IdentityPlugin as default } from ${JSON.stringify(new URL('../src/index.ts', import.meta.url).href)}\n`),
       writeFile(loaderPath, JSON.stringify([
@@ -70,7 +70,7 @@ describe('identity plugin', () => {
       runtimePlugins: {
         host,
         persona: createPersonaActivationPlugin({
-          instanceId: 'aiden',
+          instanceId: 'test-persona',
           sessionId: 'identity-session',
           identity: { path: identityPath, priority: 500 },
         }),
@@ -87,10 +87,10 @@ describe('identity plugin', () => {
       source: 'persona.identity',
       authority: 'instruction',
       priority: 500,
-      content: '# Mark\n\nPrefer evidence.',
+      content: '# Test Persona\n\nPrefer evidence.',
     })])
     let changed = observe(identityUrl, 'success')
-    await writeFile(identityPath, '# Mark\n\nPrefer verified evidence.')
+    await writeFile(identityPath, '# Test Persona\n\nPrefer verified evidence.')
     notify(identityUrl)
     await changed
     expect((await resolver()).content).toContain('verified evidence')
@@ -100,7 +100,7 @@ describe('identity plugin', () => {
     await changed
     expect((await resolver()).content).toContain('verified evidence')
     changed = observe(identityUrl, 'success')
-    await writeFile(identityPath, '# Mark\n\nPrefer recoverable evidence.')
+    await writeFile(identityPath, '# Test Persona\n\nPrefer recoverable evidence.')
     notify(identityUrl)
     await changed
     expect((await resolver()).content).toContain('recoverable evidence')

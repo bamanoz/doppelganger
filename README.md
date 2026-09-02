@@ -19,6 +19,7 @@ Persona is the first product layer built on the runtime. It is composed from ord
 - Independent FTS5 and optional semantic top-K retrieval, deterministic reciprocal-rank fusion, canonical revalidation, temporal eligibility, and hard budgets.
 - A versioned framed JSON-RPC bridge for Oh My Pi (OMP).
 - Dynamic OMP tools translated from runtime JSON Schemas.
+- Optional session-owned Dynamic Runtime Plugins with source-verified inspection, immutable Packages, guarded JavaScript evaluation, and exact one-shot approval.
 
 Doppelganger does **not** implement an agent loop or model provider. It extends an existing host.
 
@@ -57,6 +58,7 @@ packages/
 ├── extension-protocols Context, tools, and normalized lifecycle contracts
 ├── extension-persona   Persona activation metadata, identity, traits, and Loader root
 ├── extension-persona-authoring  Logical inspection and approved exact trait revision
+├── extension-dynamic-runtime-plugins  Opt-in inspected temporary Cordis plugin workflow
 ├── extension-sqlite    Directly loadable SQLite infrastructure
 ├── extension-memory    Canonical memory, lexical/hybrid retrieval, tools, capture, and semantic contracts
 ├── extension-embedding-local  Lazy EmbeddingGemma/MiniLM Loader plugin and validated model cache
@@ -118,21 +120,7 @@ With no authored selection and no `DOPPELGANGER_ACTOR_ID`, the linked plugin act
 
 The home path may be absent before launch. The first Runtime Preset selection creates `config.yaml`, an empty editable `runtime.cordis.patch.yml`, and `.runtime-presets/`. The shipped `standard` tree stays in the installed package, like DSH profile bundles; copy it to a new user preset ID only when you want an independently editable preset.
 
-Repository Mark dogfooding uses the project-local `.omp/extensions/doppelganger.ts`, which is only a default re-export from that same package entrypoint. Supply the development home and actor binding explicitly from the repository root:
-
-```bash
-DOPPELGANGER_HOME="$PWD/dev/doppelganger" \
-DOPPELGANGER_ACTOR_ID=valera \
-omp
-```
-
-A non-interactive Mark smoke uses the same environment:
-
-```bash
-DOPPELGANGER_HOME="$PWD/dev/doppelganger" \
-DOPPELGANGER_ACTOR_ID=valera \
-omp -p --no-session "Reply with exactly DOPPELGANGER_SMOKE_OK and do not use tools."
-```
+The project-local `.omp/extensions/doppelganger.ts` is only a default re-export from that same package entrypoint. Repository integration tests exercise it with generated temporary Runtime Presets and test actors; they do not consume a personal preset or durable user state.
 
 The extension starts one child runtime for the OMP session, appends assembled runtime context to each model turn, and exposes available runtime tools with the `doppelganger_` prefix.
 
@@ -141,9 +129,9 @@ The extension starts one child runtime for the OMP session, appends assembled ru
 The runtime home resolves from an explicit host option, then `DOPPELGANGER_HOME`, then `~/.doppelganger`. The default roster searches the package-owned shipped root, any configured roots in order, then `$DOPPELGANGER_HOME/.runtime-presets`. Each root has `system` or `user` trust; the first occupied ID wins even when broken. User selection contains no Persona or plugin settings:
 
 ```yaml
-# dev/doppelganger/config.yaml
+# ~/.doppelganger/config.yaml
 version: 1
-defaultRuntimePreset: mark
+defaultRuntimePreset: my-assistant
 ```
 
 Without a higher-precedence selection, the normal package/OMP deployment activates the shipped actor-neutral `standard` preset. Hosts may explicitly configure a defaultless roster when inactive behavior is required.
@@ -151,7 +139,7 @@ Without a higher-precedence selection, the normal package/OMP deployment activat
 A Runtime Preset is a complete Cordis Loader tree plus adjacent owned assets. Plugin configuration and persistence ownership stay in that tree:
 
 ```yaml
-# dev/doppelganger/.runtime-presets/mark/runtime.cordis.yml
+# ~/.doppelganger/.runtime-presets/my-assistant/runtime.cordis.yml
 - id: doppelganger-context
   name: "@doppelganger/doppelganger-protocols/context"
   isolate: { doppelgangerContext: session }
@@ -166,7 +154,7 @@ A Runtime Preset is a complete Cordis Loader tree plus adjacent owned assets. Pl
     doppelgangerContext: session
     doppelgangerPersona: session
   config:
-    instanceId: mark
+    instanceId: my-assistant
     identity: { path: identity.md, priority: 1000 }
     traits:
       - { name: engineer, path: traits/engineer.md, priority: 700 }
@@ -191,9 +179,9 @@ A Runtime Preset is a complete Cordis Loader tree plus adjacent owned assets. Pl
 Project selection is deliberately minimal:
 
 ```yaml
-# .doppelganger/manifest.yaml
+# <project>/.doppelganger/manifest.yaml
 version: 1
-runtimePreset: mark
+runtimePreset: my-assistant
 ```
 
 Selection precedence is explicit host/session choice, nearest project `runtimePreset`, user `defaultRuntimePreset`, then the roster's optional deployment default (`standard` in the normal deployment). A selected missing or broken preset fails visibly and never falls through. A defaultless roster can yield inactive state. The nearest `.doppelganger/manifest.yaml` is found while walking from the working directory to the Git root.
@@ -239,18 +227,53 @@ Start a new OMP session after changing selection. Edit the copied tree rather th
 
 The same roster is available to in-process Cordis hosts through `@doppelganger/doppelganger-runtime-presets/plugin` as `ctx.doppelgangerRuntimePresets`. OMP deliberately consumes the pure API before its child runtime exists.
 
-### Active local Mark preset
+### Optional full-stack user presets
 
-`mark` is the checked-in development Runtime Preset selected by both the development home and this repository. It is distinct from the shipped `standard` preset: `standard` contains generic Persona identity/traits plus context and tools, while `mark` additionally composes personal identity, Persona Authoring, SQLite, memory, embedding, and semantic retrieval. Mark composes, in the same session isolation realm:
+An editable user Runtime Preset may extend `standard` with Persona Authoring, Evolution, Dynamic Runtime Plugins, SQLite, lexical memory, a local embedder, one vector backend, and the semantic coordinator. Such a composition remains user-owned configuration rather than a shipped or repository-specific preset. Each feature stays an independently addressable Loader row, and tests construct equivalent full-stack presets under temporary roots.
 
-1. context, tools, Persona identity, and ordered traits, including `trait:evolving-profile`;
-2. `@doppelganger/doppelganger-persona-authoring`, with only `trait:evolving-profile` writable;
-3. SQLite-owned canonical memory with lexical retrieval;
-4. `@doppelganger/doppelganger-embedding-local` with pinned q8 `embeddinggemma-300m` and normalized 384-dimensional Matryoshka output;
-5. `@doppelganger/doppelganger-memory-vectors/sqlite-exact` with an absolute plugin-owned database path, a Mark-specific q8/384 namespace, and the same 384 dimensions;
-6. `@doppelganger/doppelganger-memory-vectors` as the coordinator after memory, embedder, and index are available.
+Persona Authoring writes only explicitly configured logical trait targets. Evolution exists only when its Loader row is present and stores non-executing proposals in actor-partitioned SQLite or project YAML. Dynamic Runtime Plugins exist only when their Loader row is present and keep every definition in Runtime Session process memory. Omitting the authoring row leaves every Persona asset read-only. Omitting Evolution exposes no proposal controls or reminders. Omitting the dynamic row exposes no runtime-plugin controls. Omitting the semantic rows leaves memory valid and lexical-only. `all-MiniLM-L6-v2` remains an explicit 384-dimensional compatibility selection through the embedder row's `model` field; it is not an alias for EmbeddingGemma and produces a distinct semantic generation.
 
-The preset does not compose the capture plugin, so candidate capture remains disabled. Persona identity plus the `engineer` and `concise` traits remain read-only; omission of Persona Authoring leaves every Persona asset read-only. Presets that omit all three semantic rows remain valid and lexical-only. `all-MiniLM-L6-v2` remains an explicit 384-dimensional compatibility selection through the embedder row's `model` field; it is not an alias for EmbeddingGemma and produces a distinct semantic generation.
+### Dynamic Runtime Plugin development
+
+Add the optional Loader row to an editable user Runtime Preset; shipped `standard` deliberately omits it:
+
+```yaml
+- id: doppelganger-dynamic-runtime-plugins
+  name: "@doppelganger/doppelganger-dynamic-runtime-plugins/loader"
+  inject: [doppelgangerRuntimeSession, doppelgangerTools]
+  isolate:
+    doppelgangerRuntimeSession: session
+    doppelgangerTools: session
+  config:
+    vmTimeoutMs: 1000
+    maximumSourceBytes: 65536
+    maximumPlugins: 32
+    maximumPackagesPerPlugin: 32
+    maximumTotalSourceBytes: 524288
+```
+
+The preset must already compose the session-isolated `doppelgangerTools` protocol row. The private OMP product package includes the optional Loader package in its dependency closure; other deployments must make the package resolvable themselves. Invalid or unknown configuration fails activation before any controls register.
+
+The feature exposes `runtime-plugin.inspect-list`, `runtime-plugin.inspect-query`, `runtime-plugin.inspect-self`, `runtime-plugin.define`, `runtime-plugin.run`, `runtime-plugin.stop`, and `runtime-plugin.undefine`. Inspect exact catalog contracts first. `define` stores inert immutable plain-JavaScript source. `run` evaluates one exact Package only after a fresh native approval binding its Plugin ID, Package ID, mode, name, purpose, and SHA-256 source digest. `stop` retains versions; `undefine` removes them. Update, rollback, and restart are explicit separately approved runs.
+
+Generated Package code is trusted process code with authority comparable to shell access. `node:vm` shapes the available API but is not a security sandbox; OMP's child is a failure boundary, not hostile-code containment, and future native DSH execution is same-process. Definitions and running state do not survive owner replacement, Runtime Session disposal, child/process restart, or host restart and never write the preset, patches, repository, configuration, or durable state.
+
+Install the canonical cross-host development Skill at project scope:
+
+```bash
+npx skills add bamanoz/doppelganger \
+  --skill doppelganger-runtime-plugin-development \
+  --agent universal --copy -y
+```
+
+Invoke it through the host's native syntax:
+
+```text
+OMP: /skill:doppelganger-runtime-plugin-development <temporary runtime behavior>
+DSH: /doppelganger-runtime-plugin-development <temporary runtime behavior>
+```
+
+The Skill grants no execution authority. Every `runtime-plugin.run` call still requires its own host approval. See [`docs/features/dynamic-runtime-plugins.md`](docs/features/dynamic-runtime-plugins.md) for the complete lifecycle, catalog, limits, failure, and host-projection contract.
 
 ### Persona evolution review
 
@@ -273,9 +296,57 @@ DSH: /doppelganger-persona-evolution review
 
 Append `--dry-run` to inspect evidence and display the complete proposed replacement without calling `persona.revise`. A normal review inspects `trait:evolving-profile`, accepts only an explicit user request or consistent durable observations across sessions, excludes user facts/preferences and task-local instructions, preserves unrelated trait meaning, and submits at most one complete replacement.
 
-The skill itself has no write authority. `persona.revise` accepts only a configured logical target and exact inspected revision; OMP projects it as `doppelganger_persona_x2e_revise`, while DSH preserves `persona.revise`. Every call requires a separate one-shot native approval showing the exact arguments. Rejection, cancellation, unavailable approval, conflict, candidate rejection, or HMR timeout ends the review without retry. Success is reported only after exact-revision HMR confirmation; candidate failure or timeout restores the previous bytes.
+The skill itself has no write authority. `persona.revise` accepts only a configured logical target and exact inspected revision; OMP projects it as `doppelganger_persona_revise`, while DSH preserves `persona.revise`. Every call requires a separate one-shot native approval showing the exact arguments. Rejection, cancellation, unavailable approval, conflict, candidate rejection, or HMR timeout ends the review without retry. Success is reported only after exact-revision HMR confirmation; candidate failure or timeout restores the previous bytes.
 
 Persona Authoring has no persistent proposal or revision history. An atomic rename followed by a process crash can leave unconfirmed candidate bytes on disk; inspect the current revision and recover from the user-owned preset's backup or version control. Never bypass the logical tools with direct file editing as part of the review workflow.
+
+### Evolution proposals
+
+Add Evolution only to an editable user Runtime Preset that already composes session-isolated Runtime Session, actor, Persona, SQLite, context, and tool services. Shipped `standard` deliberately omits it:
+
+```yaml
+- id: doppelganger-evolution
+  name: "@doppelganger/doppelganger-evolution"
+  inject:
+    - doppelgangerRuntimeSession
+    - doppelgangerActor
+    - doppelgangerPersona
+    - doppelgangerInstanceSqlite
+    - doppelgangerContext
+    - doppelgangerTools
+  isolate:
+    doppelgangerRuntimeSession: session
+    doppelgangerActor: session
+    doppelgangerPersona: session
+    doppelgangerInstanceSqlite: session
+    doppelgangerContext: session
+    doppelgangerTools: session
+    doppelgangerEvolution: session
+  config:
+    namespace: evolution
+    remindersEnabled: true
+    reminderCooldownDays: 7
+    projectLockTimeoutMs: 2000
+```
+
+The feature exposes exactly `evolution.propose`, `evolution.list`, `evolution.inspect`, `evolution.transition`, `evolution.snooze`, `evolution.reject`, and `evolution.reminder.record`. These tools mutate only an inert proposal ledger. Global proposals are partitioned by Persona Instance and bound actor in plugin-owned SQLite. Project capability proposals are canonical Git-visible YAML under `<workspaceRoot>/.doppelganger/evolution/opportunities/`; do not place secrets in them.
+
+Persona proposals require explicit review consent before invoking the existing Persona evolution skill. Use `review <proposal-id>` only after selecting that proposal; a successful `persona.revise` application then marks it done. Capability proposals require separate research consent. Install the repository-owned capability workflow at project scope:
+
+```bash
+npx skills add bamanoz/doppelganger \
+  --skill doppelganger-capability-evolution \
+  --agent universal --copy -y
+```
+
+Invoke it through the host's native syntax:
+
+```text
+OMP: /skill:doppelganger-capability-evolution <proposal-id>
+DSH: /doppelganger-capability-evolution <proposal-id>
+```
+
+The skill grants no executor authority. It inspects the selected proposal, researches current primary sources only after explicit consent, records bounded options, waits for explicit selection, and creates a reviewable plan. Dynamic Runtime Plugins remain session-only trusted generated code with separate native approvals; permanent portable behavior belongs in an installable package and Loader plugin; host plugins are reserved for genuine host surfaces. See [`docs/features/evolution.md`](docs/features/evolution.md) for lifecycle, storage, reminders, reload, rollback, and trust boundaries.
 
 The Loader entrypoints validate bounded configuration. Memory owns retrieval limits (`lexicalTopK`, `semanticTopK`, `semanticQueryMaximumCharacters`, `semanticTimeoutMs`); the local embedder accepts `model`, `cacheDir`, `offline`, `device`, `batchSize`, `maximumCharacters`, and `acquisitionTimeoutMs`. The coordinator accepts `instanceId`, `pollIntervalMs`, `batchSize`, `maximumAttempts`, `retryBaseMs`, and `operationTimeoutMs`. SQLite exact requires `databasePath` (absolute) and `dimensions`; `namespace`, `sanitizedTarget`, and `busyTimeoutMs` are optional. Backend dimensions must equal the selected embedder dimensions. The example's explicit limits are safe bounded starting points, not universal performance claims; tune them from representative retrieval and latency measurements.
 
@@ -293,7 +364,7 @@ Portable server rows use Loader-compatible backend subpaths and contain referenc
   config:
     endpoint: https://chroma.internal.example
     dimensions: 384
-    namespace: mark-prod.embeddinggemma-q8-384
+    namespace: assistant-prod.embeddinggemma-q8-384
     tenant: doppelganger
     database: personas
     collection: memory
@@ -306,7 +377,7 @@ Portable server rows use Loader-compatible backend subpaths and contain referenc
   config:
     url: https://qdrant.internal.example
     dimensions: 384
-    namespace: mark-prod.embeddinggemma-q8-384
+    namespace: assistant-prod.embeddinggemma-q8-384
     apiKeyEnv: DOPPELGANGER_QDRANT_API_KEY
     sanitizedTarget: qdrant:production
 
@@ -316,13 +387,13 @@ Portable server rows use Loader-compatible backend subpaths and contain referenc
   config:
     dsnEnv: DOPPELGANGER_PGVECTOR_DSN
     dimensions: 384
-    namespace: mark-prod.embeddinggemma-q8-384
+    namespace: assistant-prod.embeddinggemma-q8-384
     sanitizedTarget: pgvector:production
     connectionTimeoutMs: 5000
     poolSize: 4
 ```
 
-Each selected backend row still requires the local embedder row and coordinator row shown by `mark`; these alternatives replace only the SQLite exact row. Environment-variable names are portable authored configuration, while deployments provide their values out of band.
+Each selected backend row still requires the local embedder and semantic coordinator rows in the same Runtime Preset; these alternatives replace only the vector-backend row. Environment-variable names are portable authored configuration, while deployments provide their values out of band.
 
 ### Semantic model cache and offline operation
 
@@ -383,4 +454,4 @@ This syntax is intentionally conservative. Alternative extractors can implement 
 
 ## Current boundary
 
-The completed milestone proves one portable Persona Definition across the generic runtime and the OMP host, including persistence, candidate capture, lifecycle transport, dynamic tools, and hot reload. A native DeepSeek Harness host is the next integration milestone; it should reuse the same definitions and feature plugins without duplicating persona logic.
+The completed milestone proves one portable Persona Definition across the generic runtime and the OMP host, including persistence, candidate capture, lifecycle transport, dynamic tools, hot reload, optional Dynamic Runtime Plugins, and optional Evolution proposals/reminders. A native DeepSeek Harness host is the next integration milestone; it should reuse the same definitions and feature plugins without duplicating Persona or Evolution logic.

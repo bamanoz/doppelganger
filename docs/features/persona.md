@@ -32,7 +32,7 @@ After replacement, Persona Authoring waits for Persona's exact canonical URL and
 
 ## Evolution skill
 
-The repository-owned `doppelganger-persona-evolution` Agent Skill supplies the review workflow but no authority. It inspects first, distinguishes stable assistant qualities from user memory and temporary instructions, requires an explicit current request or consistent durable observations, preserves unrelated meaning, offers dry-run, and attempts at most one complete revision. It stops on weak evidence, unavailable authoring, approval non-grant, conflict, rollback, or unconfirmed activation. Installation and host-native invocation are documented in the root README.
+The repository-owned `doppelganger-persona-evolution` Agent Skill supplies the review workflow but no authority. Direct `review` and `review --dry-run` remain inspect-first and independent of Evolution. When optional Evolution is active, `review <proposal-id>` accepts one selected open Persona proposal as bounded workflow context only after explicit current review consent; reminders and proposal existence remain inert. The skill re-evaluates evidence, preserves unrelated trait meaning, and attempts at most one complete revision under the existing native approval, compare-and-swap, HMR confirmation, conflict, and rollback rules. It marks the proposal done only after `applied` or `already-current`; every non-application outcome leaves it open unless the user explicitly snoozes or rejects it. Installation and host-native invocation are documented in the root README, and the proposal ledger contract is owned by [Evolution](evolution.md).
 
 ## Reload
 
@@ -42,9 +42,9 @@ A valid asset change replaces content behind the existing contribution identity 
 
 ## Composition
 
-The shipped `standard` Runtime Preset is an actor-neutral Persona composition owned by `runtime-presets`. It supplies generic identity plus concise and engineering traits, context, and tools, but deliberately omits SQLite, memory, embedding, and vector rows. Its Persona `instanceId` is `standard`; it is the normal deployment default and requires no user-home copy.
+The shipped `standard` Runtime Preset is an actor-neutral Persona composition owned by `runtime-presets`. It supplies generic identity plus concise and engineering traits, context, and tools, but deliberately omits SQLite, memory, embedding, vector, and Persona Authoring rows. Its Persona `instanceId` is `standard`; it is the normal deployment default and requires no user-home copy.
 
-The development `mark` preset is distinct: it is a declarative user-root Runtime Preset selected by the checked-in development configuration. Its Loader tree owns Mark's personal identity, ordered traits, scoped Persona Authoring policy, SQLite, memory, embedding, and semantic rows. Only `trait:evolving-profile` is writable; identity plus the `engineer` and `concise` traits remain read-only. The project-local OMP bootstrap supplies actor `valera` outside the preset; generic selection, Runtime Session metadata, Persona configuration, and the shipped `standard` preset do not interpret or store that binding. No Mark-specific aggregate plugin is required.
+User Runtime Presets may select any identity and ordered traits, opt into Persona Authoring for explicit logical trait targets, and compose storage, memory, embedding, or semantic rows as needed. These capabilities remain ordinary independently configured plugins; no named Persona or preset receives product-level special handling.
 
 ## Primary implementation
 
@@ -55,4 +55,4 @@ The development `mark` preset is distinct: it is a declarative user-root Runtime
 - `packages/extension-persona/src/plugin.ts`
 - `packages/extension-persona-authoring/src/plugin.ts`
 - `skills/persona/doppelganger-persona-evolution/SKILL.md`
-- `dev/doppelganger/.runtime-presets/`
+- user Runtime Preset assets selected by deployment configuration

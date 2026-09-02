@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@doppelganger/doppelganger-persona'
+import { containsCredentialMaterial } from '@doppelganger/doppelganger-protocols'
 import type {} from '@doppelganger/doppelganger-protocols'
 import type { InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
 import type {} from '@doppelganger/doppelganger-sqlite'
-import { containsMemorySecret } from './content-policy.ts'
 import { memoryEligibility, memoryTemporalState, type MemoryPartition } from './eligibility.ts'
 import { deleteMemoryRecordRows, migrateMemorySchema } from './schema.ts'
 import {
@@ -244,7 +244,7 @@ function validateContent(content: string, field = 'memory content'): string {
   content = content.trim()
   if (content.length === 0) throw new MemoryError('INVALID_CONTENT', `${field} must be non-empty`)
   if (content.length > MAX_CONTENT_LENGTH) throw new MemoryError('CONTENT_TOO_LARGE', `${field} exceeds ${MAX_CONTENT_LENGTH} characters`)
-  if (containsMemorySecret(content)) {
+  if (containsCredentialMaterial(content)) {
     throw new MemoryError('SECRET_REJECTED', `${field} appears to contain a credential or secret`)
   }
   return content

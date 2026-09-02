@@ -2,9 +2,9 @@
 
 ## Current status
 
-Doppelganger is experimental and private. The generic OMP Runtime Preset vertical slice, authoritative Runtime Preset roster, private local `@doppelganger/doppelganger-omp` install package, and opt-in Persona Authoring vertical slice are implemented. The roster proves ordered trusted roots, deterministic broken-winner shadowing, a shipped actor-neutral `standard` deployment default, copy-only user authoring, a Cordis service facade, and pure-API OMP consumption. The OMP package proves normal local plugin linking, an isolated shipped-standard dependency closure, a deployment-neutral entrypoint, package-relative child startup, repository Mark dogfooding, exact dynamic tools, and one-shot required approval even in permissive modes. Mark exposes one logical writable trait through exact-byte CAS, interprocess exclusion, HMR-confirmed commit/rollback, and the repository-owned cross-host evolution Agent Skill; shipped `standard` remains read-only.
+Doppelganger is experimental and private. The generic OMP Runtime Preset vertical slice, authoritative Runtime Preset roster, private local `@doppelganger/doppelganger-omp` install package, opt-in Persona Authoring, opt-in Dynamic Runtime Plugins, and opt-in Evolution are implemented. Evolution supplies actor-partitioned global Persona/capability proposals, canonical project capability YAML, explicit state machines, operation replay, context policy, relevant cooled-down reminders, seven portable non-executing controls, and consent-gated Persona/capability skills. Shipped `standard` remains unchanged.
 
-The native DeepSeek Harness host is the next integration milestone and its active change consumes the roster service, `standard` default, exact portable tool names, and required approval contract. DSH's existing project Agent Skill loader already discovers the installed evolution skill from `.agents/skills`; the deferred adapter is still required to supply Persona Authoring tools. Public npm release, marketplace distribution, compatibility policy, actor onboarding/authentication, and the plugin workshop remain deferred until portability and release requirements are addressed explicitly.
+The native DeepSeek Harness host is the next integration milestone and its active change consumes the roster service, `standard` default, exact portable tool names, required approval contract, Dynamic Runtime Plugin surface, and generic Evolution projection. DSH's existing project Agent Skill loader already discovers installed repository skills from `.agents/skills`; the deferred adapter is still required to supply compatible Persona Authoring, Dynamic Runtime Plugin, and Evolution services and tools. Public npm release, marketplace distribution, compatibility policy, actor onboarding/authentication, persistent generated-plugin promotion, dependency installation, and hostile-code sandboxing remain deferred until their portability and security requirements are addressed explicitly.
 
 ## Runtime Preset acceptance
 
@@ -22,21 +22,30 @@ The implemented cutover is accepted when:
 10. runtime failure disables Doppelganger without terminating OMP;
 11. the private OMP install package owns the shipped `standard` dependency closure while `host-omp` remains free of Persona, storage, memory, embedding, vector, and named-preset dependencies;
 12. the project-local OMP extension delegates to the same neutral package entrypoint used by plugin linking and supplies no development home, actor, child path, or construction logic;
-13. Mark activates as an ordinary optional Runtime Preset through explicit development home and actor environment, with extension-owned Persona configuration and storage;
-14. Mark context, tools, actor-isolated lexical and semantic memory, canonical migration, persistence, rebuild, and reload remain functional.
-15. Persona Authoring is optional, makes only `trait:evolving-profile` writable in Mark, requires exact one-shot host approval, serializes competing writers, and reports success only after exact-revision HMR confirmation;
+13. an arbitrary actor-aware user Runtime Preset activates through explicit selection and host actor binding, with extension-owned Persona configuration and storage;
+14. generated full-stack test presets prove context, tools, actor-isolated lexical and semantic memory, canonical migration, persistence, rebuild, and reload without depending on personal runtime assets;
+15. Persona Authoring is optional, makes only configured logical traits writable, requires exact one-shot host approval, serializes competing writers, and reports success only after exact-revision HMR confirmation;
 16. the canonical `doppelganger-persona-evolution` skill installs project-locally into `.agents/skills` and is discoverable through OMP and DSH native invocation syntax without granting alternate mutation authority;
 17. shipped `standard`, unrelated runtime tools, and presets omitting Persona Authoring retain their prior behavior.
+18. an opt-in Dynamic Runtime Plugins row alone exposes exactly seven portable controls, while shipped `standard` and presets omitting the row remain unchanged;
+19. definitions are inert immutable bounded Packages, every exact run/update requires a fresh native approval, and denial, cancellation, unavailable approval, or metadata mismatch executes no source;
+20. generated Plugins use source-verified catalogued capabilities and ordinary child Fibers, with deterministic first run, update, explicit rollback, waiting, diagnostics, stop, undefine, stale-proxy rejection, reload, isolation, and exhaustive cleanup behavior;
+21. the canonical `doppelganger-runtime-plugin-development` skill is discoverable through OMP and DSH native syntax and grants no authority beyond the separately approved portable tools;
+22. an opt-in Evolution row exposes exactly seven non-executing portable controls and bounded policy/reminder context, while shipped `standard` and omitted rows remain neutral;
+23. global proposals remain partitioned by Persona Instance and actor, project capability proposals use validated canonical YAML with isolated diagnostics and atomic writes, and stable operation IDs plus exact revisions protect every mutation;
+24. reminders are relevant, snooze- and cooldown-aware, read-only until confirmed delivery is recorded, and never imply review, research, code generation, or execution consent;
+25. Persona review and capability research begin only after explicit user selection, route through repository-owned discoverable skills, retain executor-specific approval boundaries, and persist their decisions in proposal history;
+26. Composition Runtime reload, invalid rollback, omission, new Runtime Sessions, OMP child transport, stale-proxy removal, and package installation preserve the documented Evolution state and neutrality contracts.
 
 ## Deferred scope
 
 The current milestone excludes:
 
 - automatic Runtime Preset package installation, dependency solving, lockfiles, and distribution;
-- plugin workshop and Persona-generated extension workflow;
+- persistent promotion of generated Packages into Runtime Presets, patches, repository files, or installable packages;
 - native DSH host implementation;
 - marketplace and package distribution;
-- a security sandbox for generated code;
+- security containment for hostile generated code beyond the current guarded API and explicit trust warning;
 - daemon, HTTP, or MCP as the primary architecture;
 - cross-Persona memory sharing;
 - blocking host-tool interception;

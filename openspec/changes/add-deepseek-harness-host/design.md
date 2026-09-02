@@ -2,18 +2,19 @@
 
 Doppelganger currently has one concrete host, OMP. OMP cannot share its Cordis process with the runtime, so `packages/host-omp` uses a Node child and framed JSON-RPC. DeepSeek Harness already owns the compatible Cordis root, Loader family, agent scopes, system-prompt registry, native tool pipeline, append-only Session log, and quiescent agent teardown. A native DSH adapter should therefore run in-process and reuse those host APIs instead of reusing the OMP transport.
 
-The research gate was revalidated against DeepSeek Harness commit `cd5ef8148158c3a752a658978873241fdf8e2bbc` on August 31, 2026. The relevant source contracts are:
+The research gate was revalidated against DeepSeek Harness commit `4e84901e6471b79ec0338099867ebb4606d12bb5` on September 1, 2026. The relevant source contracts are:
 
 - `apps/cli/src/profile-boot.ts`, `packages/boot/app-boot/src/index.ts`, and `apps/cli/src/process-shutdown.ts`: one root Cordis Context, Loader activation audit, and bounded process shutdown.
 - `vendor/loader/src/config/{entry,group,tree}.ts`, `vendor/include/src/index.ts`, and `vendor/cordis/src/fiber.ts`: serialized Include mutation, Loader-owned rollback, Fiber settlement, and quiescent disposal.
 - `packages/core/agent-loop/src/index.ts::AgentLoop.prepare/setupAndPublish` and `packages/core/agent-loop/src/agent.ts::ReactLoopAgent`: agent scope creation, setup-before-publication, turn boundaries, and disposal order.
 - `packages/core/scope/src/index.ts`: ancestor-routed scoped registrations and events; this is routing/lifecycle isolation, not a security boundary or wildcard service container.
-- `packages/core/system-prompt/src/index.ts::SystemPrompt.assemble`: scoped prompt layers plus an awaited `system-prompt/assemble` waterfall.
-- `packages/core/tools/src/index.ts::ToolRuntime.register`: scoped native tools, supported JSON Schema validation, canonical JSON outputs, result rendering, and effect-owned removal.
-- `packages/core/session/src/index.ts` and `packages/core/session/src/types.ts::SessionEventMap`: post-commit `session/event` observation and durable turn/tool facts.
-- `packages/compaction/compaction/src/types.ts`: durable `compaction/start`, `compaction/summary`, and `compaction/end` markers.
-- `packages/preset/agent-presets/src/index.ts` and `mount.ts`: standing preset scopes route registrations to descendant agents, but shared standing plugin objects are deliberately unsuitable for Doppelganger's per-session mutable plugin trees.
-- `packages/extensions/cordis-{host,client}-runner`: trusted dynamic-code façades, explicitly not containment; they are not required by this adapter.
+- `packages/core/system-prompt/src/index.ts::SystemPrompt.assemble`: scoped prompt layers, centrally resolved section/context ordering, and an awaited `system-prompt/assemble` waterfall.
+- `packages/core/tools/src/index.ts::ToolRuntime.register`: scoped native tools, supported JSON Schema validation, canonical JSON outputs, result rendering, effect-owned removal, and the `tools/pre-execute` ask path.
+- `packages/interaction/user-approval/src/index.ts::ApprovalService.request`: turn-enclosed audited one-shot approval with `ask`/`never` policy and fail-closed rejected, cancelled, or unavailable outcomes.
+- `packages/core/session/src/index.ts` and `packages/core/session/src/types.ts::SessionEventMap`: post-commit `session/event` observation, branded `SessionSeq` event identities, distinct `SessionLogOffset` boundaries, `eventAt`, and durable turn/tool facts.
+- `packages/compaction/compaction/src/types.ts`: durable `compaction/start`, `compaction/summary`, and `compaction/end` markers keyed by branded Session event sequences.
+- `packages/preset/agent-presets/src/index.ts` and `mount.ts`: standing preset scopes, live-mount-first inventory, per-runtime mount filtering, and descendant-agent routing; shared standing plugin objects remain unsuitable for Doppelganger's per-session mutable plugin trees.
+- `packages/extensions/cordis-{host,client}-runner`: trusted dynamic-code façades, explicitly not containment; the refreshed host runner preserves the same immutable Package, guarded evaluator, current/next, and Fiber lifecycle model and remains unnecessary for this adapter.
 
 Doppelganger's host-neutral seams exist in `runtime-presets`, `composition-runtime`, and `extension-protocols`. The companion shipped-roster change makes `runtime-presets` the authoritative ordered multi-root roster, exposes the same API as a Cordis service, and supplies the `standard` deployment default. `CompositionRuntime` accepts a caller-owned Context and mounts protected runtime plugins after authored layers. The remaining work is a DSH lifecycle owner and direct projection adapter.
 
@@ -28,13 +29,15 @@ Doppelganger's host-neutral seams exist in `runtime-presets`, `composition-runti
 - Translate committed DSH Session events into lifecycle protocol version 2 with stable identities and replay safety.
 - Make activation, reload, projection, and teardown serialized, idempotent, and session-contained.
 - Prove portability with hermetic tests against the actual DSH public package APIs.
+- Prove that an opt-in Runtime Preset can expose the portable Dynamic Runtime Plugins control surface, execute one exactly approved Package, project its effects, replace or stop it, and dispose it through the ordinary Runtime Session lifecycle.
+- Prove that an opt-in Runtime Preset can expose Evolution's stable instruction, relevant reminder data, and exact portable controls while all proposal persistence and user-directed workflow remain owned by the extension.
 
 **Non-Goals:**
 
 - Replacing or extending the DSH agent loop, Session log, Loader, scope system, prompt registry, or tool scheduler.
 - Reusing the OMP child process, framed RPC, process failure boundary, or OMP schema translator.
 - Sharing one Doppelganger plugin tree across DSH agents through a standing preset generation.
-- Treating DSH scope routing, `node:vm`, or the Cordis runners as a security sandbox.
+- Treating DSH scope routing, `node:vm`, the Cordis runners, or Dynamic Runtime Plugins as a security sandbox.
 - Adding account authentication, actor onboarding, in-session actor switching, Runtime Preset package installation, or cross-host behavioral identity.
 - Changing the existing Runtime Preset, composition-runtime, actor-identity, or lifecycle protocol requirements.
 
@@ -48,7 +51,7 @@ The package declares `@deepseek-ai/cordis` and each consumed `@deepseek-ai/dsh-*
 
 Alternative considered: add the adapter directly to DSH. Rejected because Doppelganger owns Runtime Preset selection and protocol translation, and the portable host package must remain versioned and testable with this repository.
 
-Alternative considered: use DSH's dynamic Cordis runner. Rejected because installed Doppelganger plugins are already trusted code and the runner adds a generated-code façade without providing containment.
+Alternative considered: use DSH's dynamic Cordis runner to implement Doppelganger Dynamic Runtime Plugins. Rejected because the optional Runtime-Session extension owns the portable registry, immutable Packages, inspection catalog, guarded evaluator, and transition semantics; `host-dsh` must only project its ordinary portable descriptors and must not duplicate or delegate that product contract to a host-specific runner. Neither mechanism provides hostile-code containment.
 
 ### 2. Start per-agent activation from `agent/session-start`; await it at projection barriers
 
@@ -111,7 +114,7 @@ Alternative considered: use the DSH session ID. Rejected because it destroys per
 
 Alternative considered: use workspace, hostname, git remote, or model-visible metadata. Rejected because those values are neither user identity nor privacy-preserving host authority.
 
-Alternative considered: remain unbound by default. Rejected because DSH owns an appropriate anonymous installation identity for actor-aware Runtime Presets. The shipped `standard` deployment default is actor-neutral and can activate regardless; stable default binding additionally lets a later explicit Mark/memory selection preserve actor-partitioned persistence. Explicit unbound mode remains available for generic deployments.
+Alternative considered: remain unbound by default. Rejected because DSH owns an appropriate anonymous installation identity for actor-aware Runtime Presets. The shipped `standard` deployment default is actor-neutral and can activate regardless; stable default binding additionally lets a later explicit actor-aware memory preset preserve partitioned persistence. Explicit unbound mode remains available for generic deployments.
 
 ### 6. Project context through `system-prompt/assemble`, preserving authority
 
@@ -154,13 +157,17 @@ Native DSH tools outside the adapter's agent-scoped registrations are untouched.
 
 Alternative considered: prefix or encode portable tool names as OMP does. Rejected because DSH accepts the qualified names directly and renaming would make one Runtime Preset expose different tool identities by host.
 
+An opt-in Dynamic Runtime Plugins row needs no host-specific registration path. Its exact seven `runtime-plugin.*` descriptors enter this same candidate projection unchanged. Every `runtime-plugin.run` descriptor carries portable required approval, so each exact first run, restart, update, or rollback asks through the native gate before portable dispatch. Generated context and tools appear and disappear through the existing bridge notifications and transactional refresh; a retained DSH closure consults current committed state and cannot approve or invoke a removed generated handler.
+
+An opt-in Evolution row follows the same host-neutral path. Its instruction-authority policy and at most one data-authority reminder candidate enter ordinary prompt projection, while its seven `evolution.*` descriptors enter ordinary tool projection unchanged. The adapter does not interpret proposal kinds, stores, state transitions, cooldown, review consent, research consent, or executor routing. Evolution requires a bound actor through the protected bridge; an explicitly unbound DSH agent can still run actor-neutral presets, but a selected preset requiring Evolution fails that row visibly.
+
 Alternative considered: register one generic dispatch tool. Rejected because it hides schemas, weakens DSH policy/presentation, and breaks normal durable tool correlation.
 
 Alternative considered: call `ctx.approval.request()` inside each projected tool body. Rejected because it bypasses DSH's native pre-execute policy chain and can produce duplicate prompts when another scoped gate also asks.
 
 ### 8. Translate lifecycle from durable DSH facts
 
-The state observes scoped `session/event` notifications only for its exact Session and only for events at or after `session.firstLiveSeq`. Seeded history is never republished. A small per-state reducer tracks turns, calls, assistant text, principal text, and compaction identities.
+The state observes scoped `session/event` notifications only for its exact Session and only for events whose branded `event.seq` is at or after the numeric `session.firstLiveSeq` `SessionLogOffset`. Seeded history is never republished. Event positions use `SessionSeq`; prefix lengths and replay boundaries use `SessionLogOffset` and are never treated as interchangeable identities. A small per-state reducer tracks turns, calls, assistant text, principal text, and compaction identities.
 
 Mapping:
 
@@ -214,11 +221,13 @@ Cleanup is memoized and exhaustive:
 
 The agent-owned effect invokes this cleanup before its scope reaches quiescence. The host plugin's own disposer snapshots and settles every remaining state so plugin unload is safe even if DSH teardown order changes.
 
+Active generated Packages remain owned by the Runtime Session below the Composition Runtime. Ordinary evaluation, apply, guard, waiting, and cleanup failures returned by the optional extension stay structured and agent-contained. Generated code nevertheless executes in the DSH process: deliberate process termination, corruption, or non-cooperative work is outside lifecycle containment and can affect the native host. Agent or host-plugin cleanup must still await Composition Runtime disposal so every reachable generated Fiber is attempted before the state is cleared.
+
 Alternative considered: rely only on parent Fiber recursive disposal. Rejected because Composition Runtime has explicit serialized mutation queues and aggregate cleanup semantics that must be awaited and diagnosed.
 
 ## Risks / Trade-offs
 
-- **DSH API maturity**: the adapter targets `0.1.2-alpha.1` APIs at commit `cd5ef814...`; package changes can be breaking. Mitigation: exact compatible peer ranges, compile-time API coverage, and a native composition smoke test.
+- **DSH API maturity**: the adapter targets `0.1.2-alpha.4` APIs at commit `4e84901e...`; package changes can be breaking. Mitigation: exact compatible peer ranges, compile-time API coverage, and a native composition smoke test.
 - **Activation starts after publication**: DSH's public observer is not awaited. Mitigation: start immediately at `agent/session-start`, memoize the operation, and make the awaited prompt waterfall the first hard barrier. An upstream setup-composition hook would be cleaner but is not required.
 - **Anonymous actor semantics**: the default identifies a DSH home, not a verified person, and deletion intentionally forks memory. Mitigation: document the boundary, namespace the identifier, support explicit unbound and trusted deployment resolvers, and do not call it authentication.
 - **Tool schema intersection**: portable JSON Schema may exceed DSH's supported subset. Mitigation: validate the complete candidate projection before commit and fail visibly rather than silently weakening schemas.

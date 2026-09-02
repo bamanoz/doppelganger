@@ -1,6 +1,6 @@
 import type { Context, Plugin } from '@deepseek-ai/cordis'
-import type { TurnCommittedEvent } from '@doppelganger/doppelganger-protocols'
-import { containsMemorySecret, stripRecursiveMemoryContent } from './content-policy.ts'
+import { containsCredentialMaterial, type TurnCommittedEvent } from '@doppelganger/doppelganger-protocols'
+import { stripRecursiveMemoryContent } from './content-policy.ts'
 import type { MemoryKind, MemoryRole, RememberMemoryRequest } from './service.ts'
 import type { MemorySemanticNeighborRequest, MemorySemanticNeighborSuggestion, MemorySemanticNeighborRelation } from './semantic.ts'
 
@@ -84,7 +84,7 @@ function stableCandidate(kindText: string, keyText: string, contentText: string)
   if (kind === undefined || content.length === 0 || content.length > 2_000) return
   if (!SUBJECT_KEY.test(key) || key.length > 200 || key.split(/[._-]/u).length < 2) return
   if (SECRET_KEY.test(key) || key.startsWith('persona.') || key.startsWith('identity.') || key.startsWith('trait.') || key.startsWith('profile.')) return
-  if (containsMemorySecret(content) || AMBIGUOUS.test(content) || PERSONA.test(content) || PROMISE.test(content) || TASK_CHATTER.test(content)) return
+  if (containsCredentialMaterial(content) || AMBIGUOUS.test(content) || PERSONA.test(content) || PROMISE.test(content) || TASK_CHATTER.test(content)) return
   const scope = key.startsWith('project.') ? 'project' : 'relationship'
   return Object.freeze({ subjectKey: key, kind, content, scope, confidence: 0.75, salience: 0.5, evidenceRole: 'principal' })
 }
@@ -220,7 +220,7 @@ function applyMemoryCapture(ctx: Context, config: MemoryCapturePluginConfig): vo
       const principalInput = filteredText(event.principalInput.value, policy.maxInputLength)
       const assistantOutput = filteredText(event.assistantOutput.value, policy.maxOutputLength)
       if (principalInput === undefined || assistantOutput === undefined) return
-      if (containsMemorySecret(principalInput) || containsMemorySecret(assistantOutput)) return
+      if (containsCredentialMaterial(principalInput) || containsCredentialMaterial(assistantOutput)) return
       const material: MemoryCaptureMaterial = Object.freeze({ deliveryId: event.deliveryId, sessionId: event.sessionId, turnId: event.turnId, principalInput, assistantOutput })
       let extracted: readonly ExtractedMemoryCandidate[]
       try {

@@ -95,6 +95,13 @@ function collectCleanupFailure(failures: unknown[], seen: Set<unknown>, error: u
   failures.push(error)
 }
 
+
+function loggedFailure(args: readonly unknown[]): unknown {
+  const first = args[0]
+  if (first instanceof Error) return first
+  return new Error(args.map(value => typeof value === 'string' ? value : String(value)).join(' '))
+}
+
 async function settleCleanup(stages: readonly (() => Promise<void>)[], message: string): Promise<void> {
   const failures: unknown[] = []
   const seen = new Set<unknown>()
@@ -105,7 +112,10 @@ async function settleCleanup(stages: readonly (() => Promise<void>)[], message: 
       collectCleanupFailure(failures, seen, error)
     }
   }
-  if (failures.length > 0) throw new AggregateError(failures, message)
+  if (failures.length > 0) {
+    const details = failures.map(error => error instanceof Error ? error.message : String(error)).join('; ')
+    throw new AggregateError(failures, `${message}: ${details}`)
+  }
 }
 
 function validRuntimePlugins(input: Readonly<Record<string, Plugin>> | undefined): Readonly<Record<string, Plugin>> {
@@ -320,6 +330,12 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
 
       const sessionOwner = owner.ctx.plugin(sessionOwnerPlugin)
       await sessionOwner.await()
+      const sessionFibers = new WeakSet<Fiber>([sessionOwner.ctx.fiber])
+      sessionOwner.ctx.on('internal/plugin', fiber => {
+        if (sessionFibers.has(fiber.parent.fiber)) sessionFibers.add(fiber)
+      }, { global: true })
+      let collectSessionCleanupFailures = false
+      const loggedSessionCleanupFailures: unknown[] = []
       let mounted: SessionTreeMount | undefined
       let generation: CompositionGeneration | undefined
       let initialDiagnostics: CompositionDiagnostics | undefined
@@ -359,6 +375,14 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
         await disposeFiber(sessionOwner)
         throw new Error('composition activation completed without an audited tree')
       }
+      const removeCleanupExporter = owner.ctx.logger.exporter({
+        export(message) {
+          if (!collectSessionCleanupFailures || message.type !== 'error') return
+          const fiber = message.fiber?.deref()
+          if (fiber === undefined || !sessionFibers.has(fiber)) return
+          loggedSessionCleanupFailures.push(loggedFailure(message.args))
+        },
+      })
       let currentGeneration = generation
       let diagnostics = initialDiagnostics
       let mutation = Promise.resolve()
@@ -451,11 +475,18 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
         refresh,
         dispose: () => (sessionDisposal ??= (async () => {
           disposing = true
+          collectSessionCleanupFailures = true
           try {
             await settleCleanup([
               () => mutation,
               removeInputWatches,
               () => disposeFiber(sessionOwner),
+              async () => {
+                if (loggedSessionCleanupFailures.length > 0) {
+                  throw new AggregateError(loggedSessionCleanupFailures, 'session-owned cleanup failed')
+                }
+              },
+              async () => { await removeCleanupExporter() }
             ], `failed to dispose composition session ${request.sessionId}`)
           } finally {
             sessions.delete(session)

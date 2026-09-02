@@ -489,8 +489,8 @@ The memory Loader row SHALL activate its complete service, tool, context, and st
 - **WHEN** the memory Loader row is enabled without a bound `doppelgangerActor` service in its session isolation realm
 - **THEN** audited activation fails and no database, memory context, tool, capture, or persistent mutation surface becomes active
 
-#### Scenario: Mark persists across restart
+#### Scenario: Actor-aware Persona memory persists across restart
 - **ID**: `memory.persistence.restart`
 - **EVIDENCE**: `packages/host-omp/tests/vertical.spec.ts::preserves relationship and project memory across process restarts without leaking project or actor scope`
-- **WHEN** two Runtime Sessions activate the Mark preset with the same configured Persona Instance storage and host actor binding
+- **WHEN** two Runtime Sessions activate the same generated full-stack test preset with the same configured Persona Instance storage and host actor binding
 - **THEN** eligible memory written by the first session is available to the second without sharing mutable session objects or handlers

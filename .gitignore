@@ -39,3 +39,6 @@ temp/
 # Development Persona Instance persistence.
 dev/doppelganger/instances/*/storage/
 dev/doppelganger/model-cache/
+
+# skills.sh
+skills-lock.json

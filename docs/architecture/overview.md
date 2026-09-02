@@ -4,7 +4,7 @@
 
 Doppelganger is a portable Cordis extension runtime for AI-agent hosts. It activates user-authored plugin compositions inside isolated host sessions and projects optional context, tools, lifecycle events, and plugin-owned persistent behavior through a host adapter.
 
-Doppelganger does not implement an agent loop or model provider. Persona and memory are optional extension layers, not kernel concepts.
+Doppelganger does not implement an agent loop or model provider. Persona, memory, and Evolution are optional extension layers, not kernel concepts.
 
 ## Canonical terms
 
@@ -16,6 +16,7 @@ Doppelganger does not implement an agent loop or model provider. Persona and mem
 - **Persona Instance** — extension-owned stable identity and persistent-state lineage. The kernel neither selects it nor assigns its storage.
 - **Persona Session** — a Runtime Session whose selected composition explicitly includes Persona extensions.
 - **Actor binding** — an optional immutable host-authoritative user identity exposed through a session-isolated protocol service. It is separate from Persona identity and authored composition.
+- **Evolution proposal** — an extension-owned, durable, non-executing record of a user-directed Persona or capability improvement opportunity, with exact revision and immutable decision history.
 - **Runtime Preset root** — an absolute directory configured with `system` or `user` trust. Roots are searched in order, and the first occupied preset ID wins even when that winner is broken.
 - **Runtime Preset roster** — the control-plane service that owns roots, deterministic discovery, health, display metadata, selection, copy-only authoring, and deployment default policy outside activated Runtime Sessions.
 
@@ -28,9 +29,11 @@ The workspace is layered around a small generic kernel:
 - `runtime-presets`, `extension-protocols`, and `extension-sqlite` are independent foundation packages;
 - `runtime-presets` exposes one pure Node roster API plus an optional Cordis service facade and ships the actor-neutral `standard` preset;
 - `composition-runtime` owns generic Loader activation, patches, sessions, reload, and disposal;
-- Persona, scoped Persona Authoring, memory, local embedding, and vector backends are optional extension layers;
+- Persona, scoped Persona Authoring, memory, local embedding, vector backends, Dynamic Runtime Plugins, and Evolution are optional extension layers;
+- Dynamic Runtime Plugins add an opt-in session-owned generated Cordis plugin workflow; generated code is trusted process code and never a kernel or host responsibility;
+- Evolution adds an opt-in actor-partitioned proposal ledger, policy context, portable controls, and relevant cooled-down reminders without executor authority;
 - repository-owned Agent Skills under `skills/` teach cross-host workflows but grant no runtime authority;
-- `host-omp` depends only on generic composition, protocol, and Runtime Preset seams and remains Persona- and storage-neutral.
+- `host-omp` depends only on generic composition, protocol, and Runtime Preset seams and remains Persona-, storage-, Evolution-, and generated-plugin-neutral.
 
 The authoritative allowed internal dependency edges live in `scripts/package-boundaries.json`. `scripts/check-package-boundaries.mjs` validates the manifest schema, requires every workspace package to be registered, and rejects package-manifest dependencies or source imports that are not allowed there. Architecture prose explains the intended layering; it does not maintain a second executable edge table.
 
@@ -49,13 +52,13 @@ The generic runtime:
 - disposes owned fibers, effects, watchers, and roots deterministically;
 - never writes normalized effective state back to authored files.
 
-The kernel does not interpret Persona, identity, traits, memory, actors, storage, project identity, context content, tool semantics, embeddings, vectors, or concrete hosts.
+The kernel does not interpret Persona, identity, traits, memory, actors, storage, project identity, context content, tool semantics, generated Package source or version state, embeddings, vectors, or concrete hosts.
 
 ## Plugin model
 
 Every extension is a native Cordis plugin. Required services use `inject`; optional services enable controlled degradation; shared session services use matching Loader `isolate` realms. Duplicate providers in one realm fail rather than being selected by load order. Definitions do not branch on host identity.
 
-Protocol plugins are explicitly composed. Empty Runtime Presets and absent context, tool, lifecycle, Persona, memory, embedding, or vector services are valid.
+Protocol and feature plugins are explicitly composed. Empty Runtime Presets and absent context, tool, lifecycle, Persona, memory, embedding, vector, Dynamic Runtime Plugin, or Evolution services are valid.
 
 ## Governing principle
 

@@ -89,6 +89,12 @@ For every DSH model step, the native host SHALL resolve the active Doppelganger 
 - **WHEN** a DSH turn performs multiple model steps after tool calls
 - **THEN** every step resolves context with the same stable turn identity and original direct principal input
 
+#### Scenario: Evolution context is projected generically
+- **ID**: `host.dsh.context.evolution-generic`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/context.spec.ts::projects Evolution instruction and reminder data without interpreting proposals`
+- **WHEN** an active Runtime Preset composes Evolution and its context provider returns policy instruction plus one due reminder candidate
+- **THEN** DSH projects both contributions with their declared authority and adds no host-owned Evolution behavior
+
 ### Requirement: Portable tools are native scoped DSH tools
 The native host SHALL translate each available portable tool descriptor into an agent-scoped DSH tool definition, validate its JSON Schema and optional approval metadata before registration, invoke the portable registry with JSON-compatible arguments, return the canonical JSON value on success, and preserve structured domain failures as failed DSH tool results. A portable descriptor with `approval.policy: "required"` SHALL enter DSH's scoped `tools/pre-execute` ask path and SHALL reach the portable handler only after `ApprovalService` returns `allowed-once`. Portable tool registrations SHALL not mask unrelated DSH tools.
 
@@ -97,6 +103,12 @@ The native host SHALL translate each available portable tool descriptor into an 
 - **EVIDENCE**: `planned:packages/host-dsh/tests/tools.spec.ts::invokes a portable tool through the native DSH pipeline`
 - **WHEN** the model invokes a projected Doppelganger tool with valid arguments
 - **THEN** DSH records a native tool call and result whose canonical value came from the owning portable handler
+
+#### Scenario: Evolution controls are projected generically
+- **ID**: `host.dsh.tools.evolution-generic`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/tools.spec.ts::projects Evolution controls without host-specific routing`
+- **WHEN** an active Runtime Preset registers the seven portable `evolution.*` descriptors
+- **THEN** DSH exposes and invokes them through the same scoped portable tool path without interpreting proposal state or granting executor authority
 
 #### Scenario: Portable tool returns a structured error
 - **ID**: `host.dsh.tools.structured-error`
@@ -247,3 +259,42 @@ The DSH host package SHALL use the host-provided `@deepseek-ai/cordis` identity 
 - **EVIDENCE**: `planned:packages/host-dsh/tests/composition.spec.ts::projects protocols without starting an OMP child transport`
 - **WHEN** a DSH agent activates Doppelganger
 - **THEN** context, tool, lifecycle, and actor projection use direct Cordis APIs without starting the OMP child or JSON-RPC transport
+
+### Requirement: DSH projects opt-in Dynamic Runtime Plugins through the portable surface
+When a selected Runtime Preset explicitly composes Dynamic Runtime Plugins and the optional extension package is resolvable by the DSH deployment, the native host SHALL project the exact portable `runtime-plugin.inspect-list`, `runtime-plugin.inspect-query`, `runtime-plugin.inspect-self`, `runtime-plugin.define`, `runtime-plugin.run`, `runtime-plugin.stop`, and `runtime-plugin.undefine` descriptors through its ordinary scoped tool path. It SHALL NOT import, delegate to, or duplicate `@deepseek-ai/dsh-cordis-host-runner` registry, evaluator, inspection, or version-transition semantics. Every exact `runtime-plugin.run` first run, restart, update, or rollback SHALL require a new native one-shot approval before portable dispatch. Generated context and tools SHALL follow the same committed dynamic projection and stale-closure rules as other portable effects. Ordinary structured extension failures SHALL remain agent-contained, while documentation SHALL state that generated code executes in the native DSH process and is not hostile-code containment. Agent and host teardown SHALL await exhaustive Runtime Session disposal of every reachable generated Fiber.
+
+#### Scenario: Opt-in preset exposes the portable control surface
+- **ID**: `host.dsh.dynamic-runtime-plugins.opt-in-surface`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/dynamic-runtime-plugins.spec.ts::projects the exact portable control surface without the DSH runner`
+- **WHEN** a DSH agent activates a Runtime Preset containing Dynamic Runtime Plugins and the standard protocol services
+- **THEN** the exact seven qualified control tools are native scoped DSH tools and no host-specific runner or dispatch surface is created
+
+#### Scenario: Every generated activation is approved exactly once
+- **ID**: `host.dsh.dynamic-runtime-plugins.approval-exact`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/dynamic-runtime-plugins.spec.ts::requires native approval for every exact run update restart and rollback`
+- **WHEN** the model requests a first run, restart, update, or rollback for one immutable generated Package
+- **THEN** DSH presents the exact Plugin, Package, mode, name, purpose, and source digest and dispatches only after one `allowed-once` decision
+
+#### Scenario: Generated projection cuts over transactionally
+- **ID**: `host.dsh.dynamic-runtime-plugins.effects-cutover`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/dynamic-runtime-plugins.spec.ts::cuts over generated context and tools through ordinary projection refresh`
+- **WHEN** an approved generated Package starts, successfully updates, stops, or is undefined
+- **THEN** subsequent DSH prompt and tool projection reflects exactly the committed generated effects while unrelated native and portable tools remain active
+
+#### Scenario: Retained generated closure is stale
+- **ID**: `host.dsh.dynamic-runtime-plugins.stale-closure-denied`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/dynamic-runtime-plugins.spec.ts::denies retained generated closures before approval or portable invocation`
+- **WHEN** a caller retains a DSH closure after stop, update, undefine, owner replacement, or Runtime Session disposal removes its generated descriptor
+- **THEN** the closure fails unavailable without asking for approval or invoking the removed generated handler
+
+#### Scenario: Generated code crosses the native process boundary
+- **ID**: `host.dsh.dynamic-runtime-plugins.native-failure-boundary`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/dynamic-runtime-plugins.spec.ts::distinguishes structured generated failures from native process compromise`
+- **WHEN** generated evaluation, apply, guard, or disposal fails through the extension's structured path
+- **THEN** the failure is contained to the owning agent state, while the host makes no containment claim for code that terminates, corrupts, or blocks the shared DSH process
+
+#### Scenario: Agent disposal exhausts generated cleanup
+- **ID**: `host.dsh.dynamic-runtime-plugins.agent-disposal`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/dynamic-runtime-plugins.spec.ts::disposes every reachable generated Fiber before agent quiescence`
+- **WHEN** a DSH agent or the host plugin is disposed while one or more generated Packages are active
+- **THEN** teardown attempts every generated cleanup through Runtime Session disposal, removes projected effects and ephemeral definitions, and reports aggregate failures only after reachable work settles

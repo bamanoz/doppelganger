@@ -1,0 +1,37 @@
+{
+  "name": "@doppelganger/doppelganger-evolution",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.1",
+    "@doppelganger/doppelganger-composition-runtime": "0.0.0",
+    "@doppelganger/doppelganger-persona": "0.0.0",
+    "@doppelganger/doppelganger-protocols": "0.0.0",
+    "@doppelganger/doppelganger-sqlite": "0.0.0",
+    "js-yaml": "^4.1.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "26.4.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -9,7 +9,9 @@ This tree is the navigation root and authoritative description of the currently 
 | Architecture | [System overview](architecture/overview.md) | Product boundary, canonical terms, package topology, governing invariants |
 | Architecture | [Composition and reload](architecture/composition-and-reload.md) | Runtime Preset roster/service, roots/trust, copy-only authoring, patches, Runtime Sessions, activation, rollback, disposal, and feature-coordinated HMR |
 | Architecture | [Extension protocols](architecture/protocols.md) | Context, tools, required approval, lifecycle events, and the host seam |
-| Features | [Persona](features/persona.md) | Persona Activation, identity, traits, scoped authoring, evolution workflow, and standard-versus-Mark composition boundary |
+| Features | [Persona](features/persona.md) | Persona Activation, identity, traits, scoped authoring, evolution workflow, and generic composition boundaries |
+| Features | [Dynamic Runtime Plugins](features/dynamic-runtime-plugins.md) | Opt-in generated Cordis plugins, inspection, immutable Packages, approval, lifecycle, limits, and host projection |
+| Features | [Evolution](features/evolution.md) | Optional proposal ledger, state machines, storage, controls, reminders, consent, and executor boundaries |
 | Features | [Memory](features/memory.md) | Canonical memory, candidates, retrieval, mutations, and semantic contracts |
 | Hosts | [Oh My Pi](hosts/oh-my-pi.md) | OMP pure-roster activation, child process, RPC, context/tool/approval projection, and failure behavior |
 | Hosts | [DeepSeek Harness](hosts/deepseek-harness.md) | Deferred host, mandatory source-research gate, planned approval projection, and current Agent Skill discovery seam |

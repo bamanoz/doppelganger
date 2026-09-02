@@ -60,7 +60,7 @@ SQLite exact and pgvector persist an explicit vector schema version and transact
 ### q4/256 to q8/384 procedure
 
 1. Warm and verify the pinned q8 cache online, or provision the exact verified cache before enabling `offline: true`. A q4-only cache cannot satisfy q8 acquisition.
-2. Change the embedder profile by deploying this q8/384 release and set the selected backend to 384 dimensions. For SQLite exact or Qdrant, also choose a new non-secret namespace/collection such as `mark.embeddinggemma-q8-384`; their persisted storage identity cannot reopen a 256-dimensional namespace as 384. Chroma isolates each generation in its own collection; pgvector includes dimensions in its derived storage names.
+2. Change the embedder profile by deploying this q8/384 release and set the selected backend to 384 dimensions. For SQLite exact or Qdrant, also choose a new non-secret namespace/collection such as `assistant.embeddinggemma-q8-384`; their persisted storage identity cannot reopen a 256-dimensional namespace as 384. Chroma isolates each generation in its own collection; pgvector includes dimensions in its derived storage names.
 3. Activate or reload the Runtime Preset. The coordinator embeds canonical current active revisions into the new generation; it never reads, copies, or resizes q4 vectors.
 4. Inspect `memory.semantic.status`. Treat the migration as complete only when the q8/384 identity is active and indexed/current counts match with zero missing or stale entries. Lexical FTS5 remains available throughout.
 5. Retain the q4 storage until the deployment is accepted. Cleanup is optional derived-data maintenance after the rollback window.

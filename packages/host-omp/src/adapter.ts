@@ -20,6 +20,7 @@ export interface OmpAdapterDiagnostic {
 export interface OmpChildDisposal {
   readonly outcome: 'graceful' | 'terminated' | 'killed'
   readonly sessionDisposeAcknowledged: boolean
+  readonly diagnostic?: string
 }
 
 export interface OmpChildConnection {
@@ -53,6 +54,7 @@ export interface OmpAdapterSnapshot {
 export interface OmpAdapterDisposal {
   readonly outcome: 'not-started' | OmpChildDisposal['outcome']
   readonly sessionDisposeAcknowledged: boolean
+  readonly diagnostic?: string
 }
 
 async function exists(path: string): Promise<boolean> {

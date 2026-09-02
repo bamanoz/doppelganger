@@ -28,7 +28,7 @@ async function session(filename: string, id: string) {
   const ctx = new Context()
   await ctx.plugin(ToolRegistry)
   await ctx.plugin(createPersonaActivationPlugin({
-    instanceId: 'mark',
+    instanceId: 'test-persona',
     sessionId: id,
     traits: [{ name: 'evolving-profile', path: filename }],
   }))

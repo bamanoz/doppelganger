@@ -117,6 +117,8 @@ describe('package boundary checker', () => {
       '@doppelganger/doppelganger-runtime-presets',
     ])
     expect(manifest.packages['@doppelganger/doppelganger-omp']?.dependencies).toEqual([
+      '@doppelganger/doppelganger-dynamic-runtime-plugins',
+      '@doppelganger/doppelganger-evolution',
       '@doppelganger/doppelganger-host-omp',
       '@doppelganger/doppelganger-persona',
       '@doppelganger/doppelganger-persona-authoring',

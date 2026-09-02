@@ -152,7 +152,7 @@ Runtime-owned host plugins SHALL be inserted after caller-controlled layers, and
 
 #### Scenario: Layered composition activates successfully
 - **ID**: `composition.runtime.audit.layered.success`
-- **EVIDENCE**: `packages/composition-runtime/tests/patches.spec.ts::activates the checked-in Mark Runtime Preset through Loader interpolation`
+- **EVIDENCE**: `packages/composition-runtime/tests/patches.spec.ts::activates a generated test Runtime Preset through Loader interpolation`
 - **WHEN** every document is valid, every targeted mutation matches, every required mount lands, and every enabled plugin settles active
 - **THEN** the runtime returns the audited Runtime Session
 

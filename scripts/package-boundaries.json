@@ -7,10 +7,25 @@
         "@doppelganger/doppelganger-runtime-presets"
       ]
     },
+    "@doppelganger/doppelganger-dynamic-runtime-plugins": {
+      "directory": "extension-dynamic-runtime-plugins",
+      "dependencies": [
+        "@doppelganger/doppelganger-protocols"
+      ]
+    },
     "@doppelganger/doppelganger-embedding-local": {
       "directory": "extension-embedding-local",
       "dependencies": [
         "@doppelganger/doppelganger-memory"
+      ]
+    },
+    "@doppelganger/doppelganger-evolution": {
+      "directory": "extension-evolution",
+      "dependencies": [
+        "@doppelganger/doppelganger-composition-runtime",
+        "@doppelganger/doppelganger-persona",
+        "@doppelganger/doppelganger-protocols",
+        "@doppelganger/doppelganger-sqlite"
       ]
     },
     "@doppelganger/doppelganger-host-omp": {
@@ -40,6 +55,8 @@
     "@doppelganger/doppelganger-omp": {
       "directory": "omp",
       "dependencies": [
+        "@doppelganger/doppelganger-dynamic-runtime-plugins",
+        "@doppelganger/doppelganger-evolution",
         "@doppelganger/doppelganger-host-omp",
         "@doppelganger/doppelganger-persona",
         "@doppelganger/doppelganger-persona-authoring",

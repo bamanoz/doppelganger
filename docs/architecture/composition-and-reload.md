@@ -40,6 +40,10 @@ Runtime Session metadata is limited to:
 
 Feature metadata belongs to feature extensions.
 
+Dynamic Runtime Plugin metadata is feature-owned and session-ephemeral: immutable Package source, current/next version pointers, active child Fibers, waiting services, and diagnostics never enter Runtime Session metadata or authored Loader files.
+
+Evolution metadata is also feature-owned: proposal kinds, scopes, revisions, immutable history, operation receipts, evidence, and reminder deliveries never enter Runtime Session metadata. Global state belongs to its instance SQLite namespace; project state belongs to canonical workspace YAML.
+
 ## Transactional reload
 
 The runtime watches the selected base file and all applicable optional patch paths, including creation and deletion. One serialized mutation queue rebuilds all filesystem layers on every change.
@@ -50,9 +54,13 @@ Reload resets plugin-local runtime state. Plugin-owned persistent state survives
 
 Optional feature plugins may coordinate an authored asset mutation with this same reload owner; they do not create a second watcher or activation path. Persona Authoring writes one exact configured trait candidate under its own lock, waits for Persona's URL-and-byte-revision reload outcome, and reports success only after the candidate is active. A rejected or timed-out candidate is atomically restored and the previous revision is awaited. Composition Runtime remains the sole generation and rollback authority.
 
+An explicitly composed Dynamic Runtime Plugins row owns one in-memory registry under its Loader Fiber. Generated activations are child Fibers in that registry, not independent watchers or Runtime Sessions. A successful owner reload disposes every generated effect and starts an empty registry; an invalid owner reload retains the previous audited generation and its active generated state. Package update is an explicit approved feature transition: it disposes the active child Fiber before applying the target Package. A failed target leaves the Plugin stopped while retaining the prior known-good pointer and the failed target diagnostic for inspection and explicit restart.
+
+An explicitly composed Evolution row owns one actor-aware service, instruction/reminder context provider, and seven ledger controls. Valid owner replacement disposes and recreates those session effects while global SQLite and project YAML remain durable. Invalid owner reload retains the previous audited generation. Removing the row cleanly removes the service, context, and tools without deleting stored proposals.
+
 ## Disposal
 
-Session disposal is idempotent and first waits for the serialized mutation queue. It then attempts every owned cleanup stage even if another rejects: exact config watches are removed, the session Fiber is disposed to Cordis quiescence, and runtime ownership is removed in a `finally`-equivalent path. Failures are collected and reported only after all reachable session cleanup settles.
+Session disposal is idempotent and first waits for the serialized mutation queue. It then attempts every owned cleanup stage even if another rejects: exact config watches are removed, the session Fiber is disposed to Cordis quiescence, and runtime ownership is removed in a `finally`-equivalent path. Because Cordis deliberately contains individual effect-disposer exceptions, the session owner collects error-level records from only its own Fiber subtree during teardown and includes them in the final cleanup failure. Failures are reported only after all reachable session cleanup settles.
 
 Runtime disposal snapshots every active session and attempts all of them before disposing the runtime owner and any runtime-owned Cordis root. A caller-owned root is never disposed. Multiple cleanup failures are reported together after exhaustive settlement; repeated disposal reuses the completed or rejected disposal result without reviving ownership or repeating side effects.
 
@@ -66,4 +74,5 @@ Runtime disposal snapshots every active session and attempts all of them before 
 - `packages/composition-runtime/src/serialized-activation.ts` — serialized host activation decoding.
 - `packages/composition-runtime/src/patches.ts` — patch validation and layering.
 - `packages/composition-runtime/src/runtime.ts` — activation, audit, reload, exhaustive disposal, and ownership.
+- `packages/extension-dynamic-runtime-plugins/src/registry.ts` — feature-owned Package transitions and child-Fiber cleanup.
 - `packages/composition-runtime/src/activation-audit.ts` — structured Loader diagnostics.

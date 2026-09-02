@@ -20,6 +20,10 @@ Feature plugins register transport-neutral, namespaced tools with JSON Schema in
 
 A host adapter translates supported JSON Schema into its native schema and exactly replaces dynamic proxies when definitions change. Removed tools disappear; stale proxy closures must not invoke removed handlers. Invocation returns a JSON-compatible value or structured transport-neutral error. Required approval is a tool-owned minimum: one explicit native grant authorizes only that exact call, permissive modes and prior grants do not satisfy it, and rejection, cancellation, or an unavailable approval channel fails closed before the portable handler. Hosts may impose stricter policy.
 
+Dynamic Runtime Plugins consume the same protocol rather than adding a host-specific execution channel. Their seven `runtime-plugin.*` control tools are ordinary portable definitions, and generated Packages may register further tools only through the guarded `doppelgangerTools` service. `runtime-plugin.run` declares required approval because it evaluates one exact immutable Package with process-level authority; the grant binds the submitted Plugin ID, Package ID, mode, name, purpose, and source digest. Inspection and definition do not execute source. Host denial, cancellation, or unavailable approval fails before dispatch.
+
+Evolution uses the same protocols without an executor channel. Its seven `evolution.*` definitions are ordinary portable ledger controls whose schemas stay within the supported cross-host translation subset. `evolution.transition` publishes one object schema and enforces the selected target's required and irrelevant metadata at invocation. Stable operation IDs and exact revision checks remain mandatory, and no input accepts actor or Persona override fields. Its context provider contributes one instruction-authority policy and at most one data-authority reminder candidate. Proposal or reminder state grants no approval to Persona Authoring, research, Dynamic Runtime Plugins, package installation, or host APIs.
+
 ## Lifecycle
 
 Host adapters publish normalized, deeply frozen, bounded lifecycle events through `publishLifecycleEvent`. Lifecycle protocol version 2 gives each event kind one payload owner: `turn-committed` carries committed principal input, assistant output, and turn outcome, while each tool result or structured tool error appears only in its correlated `tool-completed` event. Stable `sessionId`, `turnId`, `callId`, and `deliveryId` values preserve correlation across transport, including for consumers that reconstruct a turn from separate events.
@@ -34,7 +38,7 @@ A host integration has two sides:
 native host adapter <-> versioned transport <-> runtime-side Cordis host plugin
 ```
 
-The runtime-side bridge maps host actor identity, lifecycle, context requests, and tool operations to optional standard protocols. A host may expose extra functionality only through explicit optional Cordis services or explicit RPC capabilities; portable feature plugins do not receive the raw host runtime.
+The runtime-side bridge maps host actor identity, lifecycle, context requests, tool operations, and approval metadata to optional standard protocols. A host may expose extra functionality only through explicit optional Cordis services or explicit RPC capabilities; portable feature plugins, Evolution workflows, and generated Packages do not receive the raw host runtime.
 
 ## Primary implementation
 

@@ -13,7 +13,7 @@
     "test": "npm run test:workspaces && npm run test:scripts",
     "check:cordis": "node scripts/check-single-cordis.mjs",
     "check:boundaries": "node scripts/check-package-boundaries.mjs",
-    "check:integrity": "node scripts/check-repository-integrity.mjs",
+    "check:integrity": "node scripts/check-repository-integrity.mjs && npm run check:catalog --workspace @doppelganger/doppelganger-dynamic-runtime-plugins",
     "check:focused-specs": "node scripts/check-focused-specs.mjs",
     "check:focused-specs:change": "node scripts/check-focused-specs.mjs --change",
     "test:focused-specs": "node scripts/run-focused-specs.mjs",

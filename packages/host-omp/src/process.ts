@@ -38,8 +38,10 @@ class NodeOmpChildConnection implements OmpChildConnection {
   readonly #child: ChildProcessWithoutNullStreams
   readonly #peer: FramedJsonRpcPeer
   readonly #shutdownTimeoutMs: number
-  readonly #stderr: Buffer[] = []
+  readonly #stderr: Array<{ readonly sequence: number; readonly chunk: Buffer }> = []
   readonly #notificationHandlers = new Map<string, Set<(params: unknown) => void>>()
+  #nextStderrSequence = 0
+  #exitFailure: string | undefined
   #disposing = false
   #disposal: Promise<OmpChildDisposal> | undefined
 
@@ -61,8 +63,8 @@ class NodeOmpChildConnection implements OmpChildConnection {
     child.stderr.on('data', chunk => { this.#appendStderr(Buffer.from(chunk)) })
     child.once('exit', (code, signal) => {
       if (this.#disposing) return
-      const details = this.#stderr.length === 0 ? '' : `: ${Buffer.concat(this.#stderr).toString('utf8').trim()}`
-      const message = `runtime child exited unexpectedly (${signal ?? code ?? 'unknown'})${details}`
+      const message = this.#unexpectedExitMessage(code, signal)
+      this.#exitFailure = message
       for (const handler of this.#notificationHandlers.get('runtime.failed') ?? []) handler({ message })
     })
   }
@@ -75,12 +77,38 @@ class NodeOmpChildConnection implements OmpChildConnection {
   }
 
   #appendStderr(chunk: Buffer): void {
-    this.#stderr.push(chunk)
-    while (this.#stderr.reduce((total, part) => total + part.length, 0) > 64 * 1024) this.#stderr.shift()
+    this.#stderr.push({ sequence: this.#nextStderrSequence++, chunk })
+    while (this.#stderr.reduce((total, part) => total + part.chunk.length, 0) > 64 * 1024) this.#stderr.shift()
   }
 
-  request(method: string, params?: unknown): Promise<unknown> {
-    return this.#peer.request(method, params)
+  #stderrText(fromSequence = 0): string | undefined {
+    const text = Buffer.concat(this.#stderr
+      .filter(part => part.sequence >= fromSequence)
+      .map(part => part.chunk)).toString('utf8').trim()
+    return text.length === 0 ? undefined : text
+  }
+
+  #unexpectedExitMessage(code = this.#child.exitCode, signal = this.#child.signalCode): string {
+    const details = this.#stderrText()
+    return `runtime child exited unexpectedly (${signal ?? code ?? 'unknown'})${details === undefined ? '' : `: ${details}`}`
+  }
+
+  async request(method: string, params?: unknown): Promise<unknown> {
+    try {
+      return await this.#peer.request(method, params)
+    } catch (cause) {
+      if (this.#disposing) throw cause
+      if (this.#exitFailure === undefined && this.#child.exitCode === null && this.#child.signalCode === null) {
+        await waitForExit(this.#child, Math.min(this.#shutdownTimeoutMs, 100))
+      }
+      const message = this.#exitFailure ?? (
+        this.#child.exitCode === null && this.#child.signalCode === null
+          ? undefined
+          : this.#unexpectedExitMessage()
+      )
+      if (message === undefined) throw cause
+      throw new Error(message, { cause })
+    }
   }
 
   onNotification(method: string, handler: (params: unknown) => void): () => void {
@@ -98,12 +126,17 @@ class NodeOmpChildConnection implements OmpChildConnection {
   async dispose(): Promise<OmpChildDisposal> {
     if (this.#disposal !== undefined) return this.#disposal
     this.#disposing = true
+    const diagnosticStart = this.#nextStderrSequence
     this.#disposal = (async () => {
       let outcome: OmpChildDisposal['outcome'] = 'graceful'
       let sessionDisposeAcknowledged = false
+      let sessionDisposeDiagnostic: string | undefined
       if (this.#child.exitCode === null && this.#child.signalCode === null) {
         sessionDisposeAcknowledged = await Promise.race([
-          this.#peer.request('session.dispose').then(() => true, () => false),
+          this.#peer.request('session.dispose').then(() => true, cause => {
+            sessionDisposeDiagnostic = cause instanceof Error ? cause.message : String(cause)
+            return false
+          }),
           delay(this.#shutdownTimeoutMs).then(() => false),
         ])
       }
@@ -119,7 +152,13 @@ class NodeOmpChildConnection implements OmpChildConnection {
         }
       }
       this.#peer.close()
-      return Object.freeze({ outcome, sessionDisposeAcknowledged })
+      const stderrDiagnostic = this.#stderrText(diagnosticStart)
+      const diagnostic = [sessionDisposeDiagnostic, stderrDiagnostic].filter(value => value !== undefined).join('\n')
+      return Object.freeze({
+        outcome,
+        sessionDisposeAcknowledged,
+        ...(diagnostic.length === 0 ? {} : { diagnostic }),
+      })
     })()
     return this.#disposal
   }

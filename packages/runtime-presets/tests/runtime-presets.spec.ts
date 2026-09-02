@@ -83,8 +83,8 @@ describe('runtime-owned selection documents', () => {
 
   it('rejects legacy and malformed fields with file-level diagnostics', async () => {
     const files = await fixture()
-    await writeFile(files.userConfig, 'version: 1\nprincipalId: valera\ninstances: {}\n')
-    await writeFile(files.manifest, 'version: 2\nprojectId: project\ninstanceId: mark\n')
+    await writeFile(files.userConfig, 'version: 1\nprincipalId: test-actor\ninstances: {}\n')
+    await writeFile(files.manifest, 'version: 2\nprojectId: project\ninstanceId: test-persona\n')
     for (const [filename, paths] of [
       [files.userConfig, ['$.principalId', '$.instances']],
       [files.manifest, ['$.version', '$.projectId', '$.instanceId']],
@@ -273,12 +273,12 @@ describe('Runtime Preset authoring', () => {
       roots: [{ path: writable, trust: 'user' }],
       includeUserRoot: false,
     })
-    const destination = await roster.copy({ from: 'standard', id: 'mark', name: 'Mark' })
-    expect(destination).toBe(join(writable, 'mark'))
+    const destination = await roster.copy({ from: 'standard', id: 'standard-copy-test', name: 'Standard Copy Test' })
+    expect(destination).toBe(join(writable, 'standard-copy-test'))
     await expect(readFile(join(destination, 'identity.md'), 'utf8')).resolves.toContain('durable personal and technical assistant')
     await expect(readFile(join(destination, 'traits', 'engineer.md'), 'utf8')).resolves.toContain('production engineer')
     await expect(readFile(join(destination, 'preset.yml'), 'utf8')).resolves.toBe(
-      'name: Mark\ndescription: Neutral personal and technical assistant with concise production-engineering guidance.\n',
+      'name: Standard Copy Test\ndescription: Neutral personal and technical assistant with concise production-engineering guidance.\n',
     )
   })
 

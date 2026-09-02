@@ -119,6 +119,30 @@ interface LinkedOmpRun {
   readonly stderr: string
 }
 
+interface OmpJsonMessage {
+  readonly type?: string
+  readonly message?: unknown
+}
+
+function decodeOmpStdout(stdout: string): readonly OmpJsonMessage[] {
+  return stdout.split('\n').flatMap(line => {
+    const trimmed = line.trim()
+    return trimmed.length === 0 ? [] : [JSON.parse(trimmed) as OmpJsonMessage]
+  })
+}
+
+function mountedXdevToolNames(run: LinkedOmpRun): string[] {
+  const event = decodeOmpStdout(run.stdout).find(message => {
+    if (message.type !== 'message_end' || message.message === null || typeof message.message !== 'object') return false
+    return 'customType' in message.message && message.message.customType === 'xdev-mount-notice'
+  })
+  if (event?.message === null || typeof event?.message !== 'object' || !('content' in event.message)
+    || typeof event.message.content !== 'string') {
+    throw new Error(`missing OMP xdev mount notice: ${run.stdout}`)
+  }
+  return [...event.message.content.matchAll(/^- xd:\/\/([a-z0-9_]+)\b/gmu)].map(match => match[1]!)
+}
+
 function delay(milliseconds: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>()
   setTimeout(resolve, milliseconds)
@@ -254,21 +278,21 @@ async function destroyLinkedOmpFixture(fixture: LinkedOmpFixture): Promise<void>
 }
 
 async function writeToolBearingPreset(fixture: LinkedOmpFixture): Promise<void> {
-  const preset = join(fixture.doppelgangerHome, '.runtime-presets', 'mark')
+  const preset = join(fixture.doppelgangerHome, '.runtime-presets', 'tool-projection-test')
   await mkdir(preset, { recursive: true })
   await Promise.all([
-    writeFile(join(fixture.doppelgangerHome, 'config.yaml'), 'version: 1\ndefaultRuntimePreset: mark\n'),
+    writeFile(join(fixture.doppelgangerHome, 'config.yaml'), 'version: 1\ndefaultRuntimePreset: tool-projection-test\n'),
     writeFile(join(preset, 'feature.mjs'), [
       'export default {',
-      "  name: 'mark-probe',",
+      "  name: 'tool-projection-probe',",
       "  inject: ['doppelgangerActor', 'doppelgangerContext', 'doppelgangerTools'],",
       '  apply(ctx) {',
       '    ctx.doppelgangerContext.register({',
-      "      id: 'mark-probe', authority: 'instruction', priority: 100,",
-      "      resolve: () => [{ source: 'mark-probe', authority: 'instruction', priority: 100, content: 'Repository Mark smoke context.' }],",
+      "      id: 'tool-projection-probe', authority: 'instruction', priority: 100,",
+      "      resolve: () => [{ source: 'tool-projection-probe', authority: 'instruction', priority: 100, content: 'Tool projection smoke context.' }],",
       '    })',
       '    ctx.doppelgangerTools.register({',
-      "      name: 'mark.actor', description: 'Inspect the Mark smoke actor', available: true,",
+      "      name: 'test.actor', description: 'Inspect the test actor', available: true,",
       "      inputSchema: { type: 'object', properties: {}, additionalProperties: false },",
       '      invoke: () => ({ actorId: ctx.doppelgangerActor.actorId }),',
       '    })',
@@ -285,7 +309,7 @@ async function writeToolBearingPreset(fixture: LinkedOmpFixture): Promise<void> 
       '  name: "@doppelganger/doppelganger-protocols/tools"',
       '  isolate:',
       '    doppelgangerTools: session',
-      '- id: mark-probe',
+      '- id: tool-projection-probe',
       '  name: ./feature.mjs',
       '  inject: [doppelgangerActor, doppelgangerContext, doppelgangerTools]',
       '  isolate:',
@@ -295,6 +319,82 @@ async function writeToolBearingPreset(fixture: LinkedOmpFixture): Promise<void> 
       '',
     ].join('\n')),
   ])
+}
+
+async function writeEvolutionPreset(fixture: LinkedOmpFixture): Promise<void> {
+  const preset = join(fixture.doppelgangerHome, '.runtime-presets', 'evolution-test')
+  await mkdir(preset, { recursive: true })
+  await Promise.all([
+    writeFile(join(fixture.doppelgangerHome, 'config.yaml'), 'version: 1\ndefaultRuntimePreset: evolution-test\n'),
+    writeFile(join(preset, 'runtime.cordis.yml'), [
+      '- id: context',
+      '  name: "@doppelganger/doppelganger-protocols/context"',
+      '  isolate:',
+      '    doppelgangerContext: session',
+      '- id: tools',
+      '  name: "@doppelganger/doppelganger-protocols/tools"',
+      '  isolate:',
+      '    doppelgangerTools: session',
+      '- id: persona',
+      '  name: "@doppelganger/doppelganger-persona"',
+      '  inject: [doppelgangerRuntimeSession, doppelgangerContext]',
+      '  isolate:',
+      '    doppelgangerRuntimeSession: session',
+      '    doppelgangerContext: session',
+      '    doppelgangerPersona: session',
+      '  config:',
+      '    instanceId: evolution-test',
+      '- id: sqlite',
+      '  name: "@doppelganger/doppelganger-sqlite"',
+      '  isolate:',
+      '    doppelgangerInstanceSqlite: session',
+      '  config:',
+      `    home: ${JSON.stringify(fixture.doppelgangerHome)}`,
+      '- id: evolution',
+      '  name: "@doppelganger/doppelganger-evolution"',
+      '  inject: [doppelgangerRuntimeSession, doppelgangerActor, doppelgangerPersona, doppelgangerInstanceSqlite, doppelgangerContext, doppelgangerTools]',
+      '  isolate:',
+      '    doppelgangerRuntimeSession: session',
+      '    doppelgangerActor: session',
+      '    doppelgangerPersona: session',
+      '    doppelgangerInstanceSqlite: session',
+      '    doppelgangerContext: session',
+      '    doppelgangerTools: session',
+      '    doppelgangerEvolution: session',
+      '  config:',
+      '    remindersEnabled: true',
+      '',
+    ].join('\n')),
+  ])
+}
+
+async function seedProjectEvolutionProposal(fixture: LinkedOmpFixture, workspace: string): Promise<void> {
+  const script = join(fixture.root, 'seed-evolution.mjs')
+  await writeFile(script, [
+    `import { Context } from ${JSON.stringify(import.meta.resolve('@deepseek-ai/cordis'))}`,
+    `import { createRuntimeSessionMetadataPlugin } from ${JSON.stringify(new URL('../../composition-runtime/src/index.ts', import.meta.url).href)}`,
+    `import { EvolutionService } from ${JSON.stringify(new URL('../../extension-evolution/src/index.ts', import.meta.url).href)}`,
+    `import { createPersonaActivationPlugin } from ${JSON.stringify(new URL('../../extension-persona/src/index.ts', import.meta.url).href)}`,
+    `import { createActorIdentityPlugin } from ${JSON.stringify(new URL('../../extension-protocols/src/index.ts', import.meta.url).href)}`,
+    `import { InstanceSqliteService } from ${JSON.stringify(new URL('../../extension-sqlite/src/index.ts', import.meta.url).href)}`,
+    `const workspace = ${JSON.stringify(workspace)}`,
+    `const home = ${JSON.stringify(fixture.doppelgangerHome)}`,
+    'const ctx = new Context()',
+    `await ctx.plugin(createRuntimeSessionMetadataPlugin({ sessionId: 'seed-session', runtimePresetId: 'evolution-test', workspaceRoot: workspace })).await()`,
+    "await ctx.plugin(createActorIdentityPlugin('test-actor')).await()",
+    `await ctx.plugin(createPersonaActivationPlugin({ instanceId: 'evolution-test', sessionId: 'seed-session', projectId: workspace, projectRoot: workspace })).await()`,
+    'await ctx.plugin(InstanceSqliteService, { home }).await()',
+    'await ctx.plugin(EvolutionService).await()',
+    'await ctx.doppelgangerEvolution.propose({',
+    "  operationId: 'seed-project-proposal', kind: 'capability', scope: 'project',",
+    "  dedupeKey: 'project.probe-linked-context', title: 'Probe linked context improvement',",
+    "  rationale: 'Probe linked context work repeatedly needs a reusable project capability.',",
+    "  tags: ['probe', 'linked', 'context'],",
+    '})',
+    'await ctx.fiber.dispose()',
+    '',
+  ].join('\n'))
+  await execFileAsync(process.execPath, ['--no-warnings', script], { cwd: repositoryRoot })
 }
 
 function activatedToolNames(run: LinkedOmpRun): string[] {
@@ -322,6 +422,8 @@ async function runLinkedOmp(
   actorId?: string,
   workspace = fixture.workspace,
   doppelgangerHome = fixture.doppelgangerHome,
+  afterContext?: () => Promise<void>,
+  awaitXdevMount = false,
 ): Promise<LinkedOmpRun> {
   const environment = {
     ...fixture.environment,
@@ -379,6 +481,15 @@ async function runLinkedOmp(
       const output = await capturedMessages(fixture.captureRoot, '.out.bin')
       return output.some(message => message.id === request.id) ? output : undefined
     })
+    if (awaitXdevMount) {
+      await eventually('linked OMP xdev mount notice', () => decodeOmpStdout(
+        Buffer.concat(stdout).toString('utf8'),
+      ).find(message => {
+        if (message.type !== 'message_end' || message.message === null || typeof message.message !== 'object') return false
+        return 'customType' in message.message && message.message.customType === 'xdev-mount-notice'
+      }))
+    }
+    await afterContext?.()
     child.stdin.write(`${JSON.stringify({ id: 'abort-probe', type: 'abort' })}\n`)
     child.stdin.end()
     await Promise.race([
@@ -447,7 +558,7 @@ describe('local OMP plugin package', () => {
   it('uses the same package entrypoint for project discovery and plugin linking', async () => {
     const source = await readFile(join(repositoryRoot, '.omp', 'extensions', 'doppelganger.ts'), 'utf8')
     expect(source).toBe("export { default } from '@doppelganger/doppelganger-omp'\n")
-    expect(source).not.toMatch(/dev\/doppelganger|valera|child\.ts|createDoppelgangerOmpExtension/u)
+    expect(source).not.toMatch(/dev\/doppelganger|DOPPELGANGER_ACTOR_ID|child\.ts|createDoppelgangerOmpExtension/u)
   })
 
   it('is discovered through real isolated OMP local plugin linking', async () => {
@@ -485,6 +596,7 @@ describe('local OMP plugin package', () => {
       expect(await readFile(join(fixture.doppelgangerHome, 'runtime.cordis.patch.yml'), 'utf8')).toContain('[]')
       await expect(readdir(join(fixture.doppelgangerHome, '.runtime-presets'))).resolves.toEqual([])
       expect(projectedContext(run)).toContain('durable personal and technical assistant')
+      expect(activatedToolNames(run).filter(name => name.startsWith('evolution.'))).toEqual([])
       await expect(access(join(fixture.doppelgangerHome, '.runtime-presets', 'standard'))).rejects.toMatchObject({ code: 'ENOENT' })
       await expect(access(join(fixture.doppelgangerHome, 'config.yml'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
@@ -496,22 +608,54 @@ describe('local OMP plugin package', () => {
     const fixture = await createLinkedOmpFixture()
     try {
       await writeToolBearingPreset(fixture)
-      const run = await runLinkedOmp(fixture, 'valera')
-      expect(activationRequest(run).params).toMatchObject({ composition: { id: 'mark' }, actorId: 'valera' })
-      expect(projectedContext(run)).toContain('Repository Mark smoke context.')
-      expect(activatedToolNames(run)).toContain('mark.actor')
+      const run = await runLinkedOmp(fixture, 'test-actor')
+      expect(activationRequest(run).params).toMatchObject({ composition: { id: 'tool-projection-test' }, actorId: 'test-actor' })
+      expect(projectedContext(run)).toContain('Tool projection smoke context.')
+      expect(activatedToolNames(run)).toContain('test.actor')
     } finally {
       await destroyLinkedOmpFixture(fixture)
     }
   }, 30_000)
 
-  it('dogfoods Mark through the delegated repository extension', async () => {
+  it('projects opt-in Evolution policy and all seven controls through real OMP', async () => {
+    const fixture = await createLinkedOmpFixture()
+    try {
+      await writeEvolutionPreset(fixture)
+      const run = await runLinkedOmp(fixture, 'test-actor', fixture.workspace, fixture.doppelgangerHome, undefined, true)
+      expect(activationRequest(run).params).toMatchObject({ composition: { id: 'evolution-test' }, actorId: 'test-actor' })
+      expect(projectedContext(run)).toContain('[Doppelganger Evolution Policy]')
+      expect(activatedToolNames(run).filter(name => name.startsWith('evolution.'))).toEqual([
+        'evolution.inspect',
+        'evolution.list',
+        'evolution.propose',
+        'evolution.reject',
+        'evolution.reminder.record',
+        'evolution.snooze',
+        'evolution.transition',
+      ])
+      expect(mountedXdevToolNames(run).filter(name => name.startsWith('doppelganger_evolution_'))).toEqual([
+        'doppelganger_evolution_inspect',
+        'doppelganger_evolution_list',
+        'doppelganger_evolution_propose',
+        'doppelganger_evolution_reject',
+        'doppelganger_evolution_reminder_record',
+        'doppelganger_evolution_snooze',
+        'doppelganger_evolution_transition',
+      ])
+      expect(run.stderr).toBe('')
+    } finally {
+      await destroyLinkedOmpFixture(fixture)
+    }
+  }, 30_000)
+
+  it('uses the delegated repository extension with a generated test preset', async () => {
     const fixture = await createLinkedOmpFixture()
     try {
       await disableLinkedPluginForProjectDogfood(fixture)
-      const dogfoodWorkspace = join(fixture.root, 'dogfood-workspace')
-      const extensionDirectory = join(dogfoodWorkspace, '.omp', 'extensions')
-      const projectDirectory = join(dogfoodWorkspace, '.doppelganger')
+      await writeToolBearingPreset(fixture)
+      const delegatedWorkspace = join(fixture.root, 'delegated-workspace')
+      const extensionDirectory = join(delegatedWorkspace, '.omp', 'extensions')
+      const projectDirectory = join(delegatedWorkspace, '.doppelganger')
       await Promise.all([
         mkdir(extensionDirectory, { recursive: true }),
         mkdir(projectDirectory, { recursive: true }),
@@ -521,28 +665,71 @@ describe('local OMP plugin package', () => {
           join(repositoryRoot, '.omp', 'extensions', 'doppelganger.ts'),
           join(extensionDirectory, 'doppelganger.ts'),
         ),
-        writeFile(join(projectDirectory, 'manifest.yaml'), 'version: 1\nruntimePreset: mark\n'),
+        writeFile(join(projectDirectory, 'manifest.yaml'), 'version: 1\nruntimePreset: tool-projection-test\n'),
       ])
-      const run = await runLinkedOmp(
-        fixture,
-        'valera',
-        dogfoodWorkspace,
-        join(repositoryRoot, 'dev', 'doppelganger'),
-      )
-      expect(activationRequest(run).params).toMatchObject({ composition: { id: 'mark' }, actorId: 'valera' })
-      expect(projectedContext(run)).toContain('You are Mark')
-      expect(activatedToolNames(run)).toContain('memory.search')
+      const run = await runLinkedOmp(fixture, 'test-actor', delegatedWorkspace)
+      expect(activationRequest(run).params).toMatchObject({
+        composition: { id: 'tool-projection-test' },
+        actorId: 'test-actor',
+      })
+      expect(projectedContext(run)).toContain('Tool projection smoke context.')
+      expect(activatedToolNames(run)).toContain('test.actor')
       expect(run.stderr).toBe('')
     } finally {
       await destroyLinkedOmpFixture(fixture)
     }
   }, 30_000)
 
-  it('binds only a non-empty externally configured development actor', async () => {
+  it('uses the real project-local extension with Evolution persistence, reminder data, reload, and shutdown', async () => {
     const fixture = await createLinkedOmpFixture()
     try {
-      const run = await runLinkedOmp(fixture, 'valera')
-      expect(activationRequest(run).params).toMatchObject({ actorId: 'valera' })
+      await disableLinkedPluginForProjectDogfood(fixture)
+      await writeEvolutionPreset(fixture)
+      const delegatedWorkspace = join(fixture.root, 'evolution-delegated-workspace')
+      const extensionDirectory = join(delegatedWorkspace, '.omp', 'extensions')
+      const projectDirectory = join(delegatedWorkspace, '.doppelganger')
+      await Promise.all([mkdir(extensionDirectory, { recursive: true }), mkdir(projectDirectory, { recursive: true })])
+      await Promise.all([
+        symlink(join(repositoryRoot, '.omp', 'extensions', 'doppelganger.ts'), join(extensionDirectory, 'doppelganger.ts')),
+        writeFile(join(projectDirectory, 'manifest.yaml'), 'version: 1\nruntimePreset: evolution-test\n'),
+      ])
+      await seedProjectEvolutionProposal(fixture, delegatedWorkspace)
+      const presetPath = join(fixture.doppelgangerHome, '.runtime-presets', 'evolution-test', 'runtime.cordis.yml')
+      const run = await runLinkedOmp(fixture, 'test-actor', delegatedWorkspace, fixture.doppelgangerHome, async () => {
+        const before = (await capturedMessages(fixture.captureRoot, '.out.bin'))
+          .filter(message => message.method === 'runtime.changed').length
+        const source = await readFile(presetPath, 'utf8')
+        await writeFile(presetPath, source.replace('remindersEnabled: true', 'remindersEnabled: false'))
+        await eventually('Evolution project-local reload', async () => {
+          const count = (await capturedMessages(fixture.captureRoot, '.out.bin'))
+            .filter(message => message.method === 'runtime.changed').length
+          return count > before ? true : undefined
+        })
+      })
+      expect(activationRequest(run).params).toMatchObject({
+        composition: { id: 'evolution-test' },
+        actorId: 'test-actor',
+        workspaceRoot: delegatedWorkspace,
+      })
+      expect(projectedContext(run)).toContain('[Doppelganger Evolution Policy]')
+      expect(projectedContext(run)).toContain('[Evolution reminder candidate;')
+      expect(activatedToolNames(run).filter(name => name.startsWith('evolution.'))).toHaveLength(7)
+      expect(run.output.some(message => message.method === 'runtime.changed')).toBe(true)
+      const opportunities = join(delegatedWorkspace, '.doppelganger', 'evolution', 'opportunities')
+      const files = (await readdir(opportunities)).filter(name => name.endsWith('.yaml'))
+      expect(files).toHaveLength(1)
+      expect(await readFile(join(opportunities, files[0]!), 'utf8')).toContain('Probe linked context improvement')
+      expect(run.stderr).toBe('')
+    } finally {
+      await destroyLinkedOmpFixture(fixture)
+    }
+  }, 30_000)
+
+  it('binds only a non-empty externally configured test actor', async () => {
+    const fixture = await createLinkedOmpFixture()
+    try {
+      const run = await runLinkedOmp(fixture, 'test-actor')
+      expect(activationRequest(run).params).toMatchObject({ actorId: 'test-actor' })
       const authoredFiles = [
         new URL('../package.json', import.meta.url),
         new URL('../src/index.ts', import.meta.url),
@@ -550,8 +737,7 @@ describe('local OMP plugin package', () => {
         join(repositoryRoot, 'packages', 'runtime-presets', 'presets', 'standard', 'runtime.cordis.yml'),
         join(fixture.workspace, 'probe.txt'),
       ]
-      for (const path of authoredFiles) expect(await readFile(path, 'utf8')).not.toContain('valera')
-      await expect(access(join(fixture.workspace, '.doppelganger', 'manifest.yaml'))).rejects.toMatchObject({ code: 'ENOENT' })
+      for (const path of authoredFiles) expect(await readFile(path, 'utf8')).not.toContain('test-actor')
     } finally {
       await destroyLinkedOmpFixture(fixture)
     }
@@ -575,7 +761,7 @@ describe('local OMP plugin package', () => {
     expect(captureExtensionOptions).toHaveBeenLastCalledWith({ actorId: 'actor-two' })
   })
 
-  it('contains the resolvable dependency closure for shipped standard', async () => {
+  it('contains the resolvable dependency closure for shipped standard and opt-in dynamic plugins', async () => {
     const { root, internalPackages } = await isolatedPluginTree()
     const standardComposition = await readFile(
       join(repositoryRoot, 'packages', 'runtime-presets', 'presets', 'standard', 'runtime.cordis.yml'),
@@ -583,7 +769,12 @@ describe('local OMP plugin package', () => {
     )
     const standardModules = [...standardComposition.matchAll(/^\s*name:\s*"([^"]+)"/gmu)]
       .map(match => match[1]!)
-    const specifiers = ['@doppelganger/doppelganger-omp', ...standardModules]
+    const specifiers = [
+      '@doppelganger/doppelganger-omp',
+      '@doppelganger/doppelganger-dynamic-runtime-plugins',
+      '@doppelganger/doppelganger-evolution',
+      ...standardModules,
+    ]
     const probePath = join(root, 'probe.mjs')
     await writeFile(probePath, [
       `const specifiers = ${JSON.stringify(specifiers)}`,

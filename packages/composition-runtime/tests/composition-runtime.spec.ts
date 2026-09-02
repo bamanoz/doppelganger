@@ -278,8 +278,13 @@ describe('layered activation and session isolation', () => {
 
     const disposal = session.dispose()
     expect(session.dispose()).toBe(disposal)
-    await expect(disposal).rejects.toMatchObject({
-      errors: [expect.objectContaining({ message: 'watch disposal failed' })],
+    const cleanupFailure = await disposal.catch(error => error)
+    expect(cleanupFailure).toMatchObject({
+      message: expect.stringContaining('plugin disposal failed'),
+      errors: expect.arrayContaining([
+        expect.objectContaining({ message: 'watch disposal failed' }),
+        expect.objectContaining({ message: 'plugin disposal failed' }),
+      ]),
     })
     expect(watchDisposals).toBe(1)
     expect(siblingDisposals).toBe(1)

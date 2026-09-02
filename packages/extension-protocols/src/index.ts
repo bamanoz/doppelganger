@@ -4,6 +4,7 @@ export {
   createActorIdentityPlugin,
   type ActorIdentity,
 } from './actor.ts'
+export { containsCredentialMaterial } from './content-policy.ts'
 export { ContextProtocolPlugin } from './context-plugin.ts'
 export { ToolRegistryPlugin } from './tools-plugin.ts'
 export {

@@ -39,7 +39,7 @@ Choose by fit, in this order:
 
 1. Reuse an existing capability when it already satisfies the need.
 2. For reversible current-session host behavior supported by the inspected catalog, route through `doppelganger-runtime-plugin-development` and preserve its inspection, trust, lifecycle, and native approval gates.
-3. For portable persistent behavior, recommend a permanent installable Doppelganger package and Loader plugin using exposed services, lifecycle, storage, context, and tool contracts.
+3. For portable persistent behavior, recommend a permanent installable Doppelganger package and Loader plugin using exposed services, lifecycle, storage, context, and tool contracts, then route a separately authorized implementation request to `doppelganger-plugin-development`; that workflow must obtain the user-selected implementation repository before any mutation.
 4. Use an existing host-agent plugin only when the required surface is genuinely host-specific or absent from Doppelganger, such as browser DOM, native host Client UI, or another unexposed host API; record why Doppelganger is insufficient.
 5. Otherwise offer another supported solution or a deliberate host adaptation.
 

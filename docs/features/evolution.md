@@ -94,7 +94,7 @@ Proposal creation and reminders are inert. A Persona review begins only after th
 
 Capability research begins only after the user explicitly selects research for an identified proposal. The `doppelganger-capability-evolution` skill compares current primary-source implementations, records bounded sourced options, waits for explicit option selection, records the chosen mechanism as `selected`, and stops. It does not choose or create a repository, package, planning system, OpenSpec change, or implementation artifact; write implementation instructions; advance the proposal to `planned`, `implementing`, or `done`; or execute the mechanism. Those later states remain available to separately invoked owning planning and executor workflows with their own user decisions and authority boundaries.
 
-Capability routing is fit-driven in this order: reuse an existing capability; select Dynamic Runtime Plugins for reversible current-session behavior; recommend a permanent installable Doppelganger package and Loader plugin for portable persistent behavior; recommend a supported host plugin only for genuinely host-specific surfaces; otherwise offer explicit adaptation or alternatives. Selection records the mechanism, not its implementation details or location. Each later executor retains its own trust and approval boundary.
+Capability routing is fit-driven in this order: reuse an existing capability; select Dynamic Runtime Plugins for reversible current-session behavior; recommend a permanent installable Doppelganger package and Loader plugin for portable persistent behavior; recommend a supported host plugin only for genuinely host-specific surfaces; otherwise offer explicit adaptation or alternatives. Selection records the mechanism, not its implementation details or location. A later permanent-package request routes to `doppelganger-plugin-development`, which must obtain an explicit current, named existing, or user-located new repository choice before any mutation and then obey that target repository's planning and engineering rules. Each executor retains its own trust and approval boundary.
 
 ## Reload, rollback, and removal
 
@@ -114,5 +114,6 @@ After repository verification succeeds, opt the user-owned Mark Runtime Preset i
 - `packages/extension-evolution/tests/` — contracts, storage, tools, context, reminders, persistence, and concurrency.
 - `skills/evolution/doppelganger-capability-evolution/SKILL.md` — consent-gated research and routing.
 - `skills/persona/doppelganger-persona-evolution/SKILL.md` — direct and proposal-first Persona review.
+- `skills/development/doppelganger-plugin-development/SKILL.md` — ownership-gated permanent installable plugin development after mechanism selection.
 - `packages/composition-runtime/tests/evolution.spec.ts` — arbitrary Runtime Preset composition, patch, reload, omission, dependency, and actor behavior.
 - `packages/host-omp/tests/child-integration.spec.ts` and `packages/omp/tests/plugin-package.spec.ts` — generic projection and real OMP dogfood scenarios.

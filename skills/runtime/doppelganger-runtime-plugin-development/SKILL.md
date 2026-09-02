@@ -18,7 +18,7 @@ Skill invocation grants no runtime authority. Every `runtime-plugin.run` attempt
 
 Use Dynamic Runtime Plugins only for reversible host-side behavior that belongs to the current Runtime Session and must observe or contribute beyond one immediate tool call.
 
-Do not define a temporary Plugin for permanent product code, authored Runtime Preset composition or patches, persistence across restart, package installation, a direct one-shot tool invocation, browser DOM or React work, host Client code, or host-specific UI. Route those requests to their owning mechanism.
+Do not define a temporary Plugin for permanent product code, authored Runtime Preset composition or patches, persistence across restart, package installation, a direct one-shot tool invocation, browser DOM or React work, host Client code, or host-specific UI. Route permanent installable Doppelganger package work to `doppelganger-plugin-development`; route the other requests to their owning mechanism.
 
 Confirm all seven portable controls are available: `runtime-plugin.inspect-list`, `runtime-plugin.inspect-query`, `runtime-plugin.inspect-self`, `runtime-plugin.define`, `runtime-plugin.run`, `runtime-plugin.stop`, and `runtime-plugin.undefine`. If any required control is absent, report that the active Runtime Preset omitted the optional capability or the host cannot project it, then stop. Never fall back to DSH `cordis_*` tools, shell, filesystem editing, direct `node:vm`, Loader mutation, or private host APIs.
 
@@ -56,4 +56,4 @@ Own every listener, provider, tool, timer, subscription, callback, and external 
 
 - Use `runtime-plugin.stop` to disable active effects while retaining immutable Packages, pointers, diagnostics, inspection, restart, and rollback context.
 - Use `runtime-plugin.undefine` only when the user no longer needs the Plugin or any version in this Runtime Session. Its identities are invalid afterward.
-- Neither operation persists or promotes source. If the user wants the behavior after restart or as a maintained capability, explain that promotion is outside this capability. Do not edit Runtime Presets, patches, plugin files, configuration, or install packages as a fallback.
+- Neither operation persists or promotes source. If the user wants maintained behavior after restart, route a separately authorized request to `doppelganger-plugin-development`, whose implementation-location gate must run before any repository mutation. Do not edit Runtime Presets, patches, plugin files, configuration, or install packages as a fallback.

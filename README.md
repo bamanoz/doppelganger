@@ -275,6 +275,25 @@ DSH: /doppelganger-runtime-plugin-development <temporary runtime behavior>
 
 The Skill grants no execution authority. Every `runtime-plugin.run` call still requires its own host approval. See [`docs/features/dynamic-runtime-plugins.md`](docs/features/dynamic-runtime-plugins.md) for the complete lifecycle, catalog, limits, failure, and host-projection contract.
 
+### Permanent plugin development
+
+Use the canonical cross-host workflow when a maintained Doppelganger plugin must survive Runtime Sessions and process restarts, ship as installable package source, or expose a Loader entry. Install it at project scope:
+
+```bash
+npx skills add bamanoz/doppelganger \
+  --skill doppelganger-plugin-development \
+  --agent universal --copy -y
+```
+
+This creates `.agents/skills/doppelganger-plugin-development/`, which compatible OMP and DSH hosts discover from the same project copy. Invoke it through the host's native syntax:
+
+```text
+OMP: /skill:doppelganger-plugin-development <permanent plugin request>
+DSH: /doppelganger-plugin-development <permanent plugin request>
+```
+
+Before any file or planning mutation, the Skill requires an explicit implementation location: the current repository chosen explicitly, a named existing repository with its concrete path, or a new repository at a user-selected local path. It then restarts discovery in that repository, follows its package and planning conventions, inspects current Cordis and Doppelganger contracts, and verifies package contents, public exports, disposable-consumer installation, Loader activation when applicable, behavior, and cleanup. It does not infer ownership from `cwd`, require OpenSpec outside repositories that own that workflow, promote Dynamic Runtime Plugin state, publish, release, create a remote, commit, push, or mutate a deployment without separate direction.
+
 ### Persona evolution review
 
 The canonical cross-host skill is authored at `skills/persona/doppelganger-persona-evolution/SKILL.md`. Install it into a project root shared by OMP and DSH:
@@ -346,7 +365,7 @@ OMP: /skill:doppelganger-capability-evolution <proposal-id>
 DSH: /doppelganger-capability-evolution <proposal-id>
 ```
 
-The skill grants no executor or planning authority. It inspects the selected proposal, researches current primary sources only after explicit consent, records bounded options, waits for explicit selection, records the chosen mechanism as `selected`, and stops. It does not choose a repository or package, create an OpenSpec change or implementation plan, write implementation instructions, or execute the mechanism. Dynamic Runtime Plugins remain session-only trusted generated code with separate native approvals; permanent portable behavior may be recommended as an installable package and Loader plugin; host plugins are reserved for genuine host surfaces. See [`docs/features/evolution.md`](docs/features/evolution.md) for lifecycle, storage, reminders, reload, rollback, and trust boundaries.
+The skill grants no executor or planning authority. It inspects the selected proposal, researches current primary sources only after explicit consent, records bounded options, waits for explicit selection, records the chosen mechanism as `selected`, and stops. It does not choose a repository or package, create an OpenSpec change or implementation plan, write implementation instructions, or execute the mechanism. Dynamic Runtime Plugins remain session-only trusted generated code with separate native approvals. A later permanent-package request uses `doppelganger-plugin-development`, whose explicit implementation-location gate runs before any repository mutation. Host plugins remain reserved for genuine host surfaces. See [`docs/features/evolution.md`](docs/features/evolution.md) for lifecycle, storage, reminders, reload, rollback, and omission behavior.
 
 The Loader entrypoints validate bounded configuration. Memory owns retrieval limits (`lexicalTopK`, `semanticTopK`, `semanticQueryMaximumCharacters`, `semanticTimeoutMs`); the local embedder accepts `model`, `cacheDir`, `offline`, `device`, `batchSize`, `maximumCharacters`, and `acquisitionTimeoutMs`. The coordinator accepts `instanceId`, `pollIntervalMs`, `batchSize`, `maximumAttempts`, `retryBaseMs`, and `operationTimeoutMs`. SQLite exact requires `databasePath` (absolute) and `dimensions`; `namespace`, `sanitizedTarget`, and `busyTimeoutMs` are optional. Backend dimensions must equal the selected embedder dimensions. The example's explicit limits are safe bounded starting points, not universal performance claims; tune them from representative retrieval and latency measurements.
 

@@ -32,7 +32,7 @@ The workspace is layered around a small generic kernel:
 - Persona, scoped Persona Authoring, memory, local embedding, vector backends, Dynamic Runtime Plugins, and Evolution are optional extension layers;
 - Dynamic Runtime Plugins add an opt-in session-owned generated Cordis plugin workflow; generated code is trusted process code and never a kernel or host responsibility;
 - Evolution adds an opt-in actor-partitioned proposal ledger, policy context, portable controls, and relevant cooled-down reminders without executor authority;
-- repository-owned Agent Skills under `skills/` teach cross-host workflows but grant no runtime authority;
+- repository-owned Agent Skills under `skills/` teach cross-host workflows but grant no runtime authority; permanent plugin development is ownership-gated and begins only after the user explicitly selects the implementation repository;
 - `host-omp` depends only on generic composition, protocol, and Runtime Preset seams and remains Persona-, storage-, Evolution-, and generated-plugin-neutral.
 
 The authoritative allowed internal dependency edges live in `scripts/package-boundaries.json`. `scripts/check-package-boundaries.mjs` validates the manifest schema, requires every workspace package to be registered, and rejects package-manifest dependencies or source imports that are not allowed there. Architecture prose explains the intended layering; it does not maintain a second executable edge table.

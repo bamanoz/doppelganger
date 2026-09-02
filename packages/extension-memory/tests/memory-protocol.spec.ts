@@ -162,4 +162,97 @@ describe('memory protocol', () => {
     expect(context.doppelgangerTools.list()).toEqual([])
     await context.fiber.dispose()
   })
+  it('automatically recalls stable relationship profile without lexical overlap', async () => {
+    const instanceHome = await mkdtemp(join(tmpdir(), 'doppelganger-memory-stable-recall-'))
+    temporaryRoots.push(instanceHome)
+    const context = new Context()
+    await context.plugin(createPersonaActivationPlugin({
+      instanceId: 'smith',
+      sessionId: 'stable-recall-session',
+      projectId: 'project-one',
+      projectRoot: join(instanceHome, 'project'),
+    }))
+    await context.plugin(createActorIdentityPlugin('valera'))
+    await context.plugin(InstanceSqliteService, { home: instanceHome })
+    await context.plugin(ContextProtocol)
+    await context.plugin(ToolRegistry)
+    await context.plugin(MemoryService, { now: () => new Date('2026-09-02T12:00:00.000Z') })
+    await context.plugin(MemoryProtocolPlugin)
+
+    const identity = context.doppelgangerMemory.remember({
+      operationId: 'remember-principal-name',
+      subjectKey: 'principal.identity.name',
+      kind: 'fact',
+      content: 'Пользователя зовут Валера.',
+      scope: 'relationship',
+    })
+    const preference = context.doppelgangerMemory.remember({
+      operationId: 'remember-stable-preference',
+      subjectKey: 'preference.response.concision',
+      kind: 'preference',
+      content: 'Отвечай кратко.',
+      scope: 'relationship',
+    })
+    context.doppelgangerMemory.pin({
+      operationId: 'pin-stable-preference',
+      id: preference.id,
+      pinned: true,
+    })
+    context.doppelgangerMemory.remember({
+      operationId: 'remember-unpinned-preference',
+      subjectKey: 'preference.response.language',
+      kind: 'preference',
+      content: 'Всегда отвечай по-французски.',
+      scope: 'relationship',
+    })
+    context.doppelgangerMemory.remember({
+      operationId: 'remember-expired-identity',
+      subjectKey: 'principal.identity.former-city',
+      kind: 'fact',
+      content: 'Валера живёт в устаревшем городе.',
+      scope: 'relationship',
+      expiresAt: '2026-09-01T00:00:00.000Z',
+    })
+    context.doppelgangerMemory.remember({
+      operationId: 'remember-unrelated-project-fact',
+      subjectKey: 'project.storage.engine',
+      kind: 'fact',
+      content: 'Проект использует SQLite.',
+    })
+
+    const assembled = await context.doppelgangerContext.resolve({
+      turn: { input: 'Как ко мне обращаться?' },
+      tokenBudget: 100,
+    })
+
+    expect(assembled.contributions).toEqual([
+      expect.objectContaining({
+        source: `memory.${preference.id}`,
+        authority: 'instruction',
+        priority: 700,
+      }),
+      expect.objectContaining({
+        source: `memory.${identity.id}`,
+        authority: 'data',
+        priority: 300,
+        content: expect.stringContaining('Пользователя зовут Валера.'),
+      }),
+    ])
+    expect(assembled.content).not.toContain('Всегда отвечай по-французски.')
+    expect(assembled.content).not.toContain('Валера живёт в устаревшем городе.')
+    expect(assembled.content).not.toContain('Проект использует SQLite.')
+
+    const constrained = await context.doppelgangerContext.resolve({
+      turn: { input: 'SQLite' },
+      tokenBudget: assembled.tokenCount,
+    })
+    expect(constrained.contributions.map(contribution => contribution.source)).toEqual([
+      `memory.${preference.id}`,
+      `memory.${identity.id}`,
+    ])
+    expect(constrained.omittedSources).toHaveLength(1)
+    expect(constrained.content).not.toContain('Проект использует SQLite.')
+    await context.fiber.dispose()
+  })
+
 })

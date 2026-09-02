@@ -225,6 +225,8 @@ const SUBJECT_KEY_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/
 const MAX_CONTENT_LENGTH = 16_000
 const MAX_EVIDENCE_LENGTH = 1_000
 const RRF_K = 60
+const STABLE_PROFILE_LIMIT = 20
+
 
 function text(value: unknown, field: string): string {
   if (typeof value !== 'string') throw new Error(`invalid memory database ${field}`)
@@ -1214,6 +1216,26 @@ export class MemoryService extends Service {
       revisionId: hit.revisionId,
       rank: Number(hit.rank),
     })
+  }
+
+  stableProfile(): readonly MemoryRecord[] {
+    const now = this.timestamp()
+    const eligible = memoryEligibility(this.partition(), now, { statuses: ['active'], temporal: true })
+    const rows = this.database.prepare(`${RECORD_SELECT}
+      WHERE ${eligible.sql}
+        AND r.scope_kind = 'relationship'
+        AND (
+          (r.pinned = 1 AND r.kind = 'preference')
+          OR (r.kind = 'fact' AND r.subject_key LIKE 'principal.identity.%')
+        )
+      ORDER BY
+        CASE WHEN r.pinned = 1 AND r.kind = 'preference' THEN 1 ELSE 0 END DESC,
+        r.salience DESC,
+        r.updated_at DESC,
+        r.id
+      LIMIT ?
+    `).all(...eligible.parameters, STABLE_PROFILE_LIMIT)
+    return Object.freeze(rows.map(row => recordFrom(row, now)))
   }
 
   async search(request: MemorySearchRequest): Promise<readonly MemorySearchResult[]> {

@@ -94,7 +94,7 @@ function toolHandler(operation: (input: Readonly<Record<string, JsonValue>>) => 
   }
 }
 
-function recordContribution(record: MemoryRecord): ContextContribution {
+function recordContribution(record: MemoryRecord, stable = false): ContextContribution {
   const scope = record.scope.kind === 'relationship' ? 'relationship' : `project:${record.scope.projectId}`
   const authority = record.kind === 'preference' ? 'instruction' : 'data'
   return Object.freeze({
@@ -102,7 +102,7 @@ function recordContribution(record: MemoryRecord): ContextContribution {
     content: `[Memory ${record.kind}; ${scope}; subject=${record.subjectKey}]\n${record.revision.content}`,
     priority: record.pinned && record.scope.kind === 'relationship' && record.kind === 'preference'
       ? 700
-      : authority === 'instruction' ? 500 : 100,
+      : stable ? 300 : authority === 'instruction' ? 500 : 100,
     authority,
   })
 }
@@ -324,12 +324,19 @@ export const MemoryProtocolPlugin: Plugin = {
     ctx.doppelgangerContext.register({
       id: 'persona.memory',
       async resolve(request) {
-        if (request.turn.input.trim().length === 0 || request.tokenBudget === 0) return []
-        const results = await ctx.doppelgangerMemory.search({
-          query: request.turn.input,
-          tokenBudget: request.tokenBudget,
-        })
-        return Object.freeze(results.map(result => recordContribution(result.record)))
+        if (request.tokenBudget === 0) return []
+        const stable = ctx.doppelgangerMemory.stableProfile()
+        const stableIds = new Set(stable.map(record => record.id))
+        const ranked = request.turn.input.trim().length === 0
+          ? []
+          : await ctx.doppelgangerMemory.search({
+              query: request.turn.input,
+              tokenBudget: request.tokenBudget,
+            })
+        return Object.freeze([
+          ...stable.map(record => recordContribution(record, true)),
+          ...ranked.flatMap(result => stableIds.has(result.record.id) ? [] : [recordContribution(result.record)]),
+        ])
       },
     })
   },

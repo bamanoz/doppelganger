@@ -71,13 +71,19 @@ The memory plugin SHALL support actor-partition-safe lexical retrieval without s
 - **THEN** FTS5 receives the complete turn while the embedder receives a deterministic bounded intent projection
 
 ### Requirement: Recall authority and budget
-Automatic recall SHALL treat ordinary records as data, SHALL treat approved preference records as behavioral contributions, and SHALL respect the host-provided context budget.
+Automatic recall SHALL contribute an eligible stable relationship-profile subset before query-ranked memory, SHALL treat ordinary records as data, SHALL treat approved preference records as behavioral contributions, and SHALL respect the host-provided context budget. The stable subset SHALL contain pinned relationship preferences and relationship facts whose subject key is under `principal.identity.*`; it SHALL remain subject to actor partition, active status, temporal eligibility, whole-record budgeting, and canonical current-revision validation.
+
+#### Scenario: Stable relationship profile does not lexically match
+- **ID**: `context.stable-profile-recall`
+- **EVIDENCE**: `packages/extension-memory/tests/memory-protocol.spec.ts::automatically recalls stable relationship profile without lexical overlap`
+- **WHEN** a current turn has no lexical overlap with an eligible relationship identity fact and a pinned relationship preference
+- **THEN** automatic recall contributes both stable records before ordinary ranked data, excludes unpinned preferences and temporally ineligible identity facts, and contributes any duplicate ranked record only once
 
 #### Scenario: Pinned global preference exists
 - **ID**: `context.pinned-precedence-budget`
 - **EVIDENCE**: `packages/extension-memory/tests/memory-search.spec.ts::uses lexical retrieval with strict scope, pinned relationship precedence, diversity, and whole budgets`
 - **WHEN** persona context is assembled
-- **THEN** the pinned preference is considered before ranked memory and lower-priority records are omitted when required by the budget
+- **THEN** the pinned preference is considered before stable identity and ranked memory, and lower-priority records are omitted when required by the budget
 
 ### Requirement: Memory maintenance tools
 The memory plugin SHALL expose namespaced tools for search, remember, correct, forget, candidate review, approval and rejection, and pinning and unpinning.
@@ -350,7 +356,7 @@ Recall SHALL run canonical FTS5 and optional semantic top-K retrieval as indepen
 - **THEN** canonical validation discards it without exposing projected content
 
 ### Requirement: Deterministic context authority and budget
-Recall SHALL prioritize eligible pinned relationship preferences, diversify results by subject, and fit whole contributions within the supplied token budget. Approved preferences may contribute instructions; facts, decisions, procedures, archive fragments, candidates, and conflicts SHALL NOT gain instruction authority.
+Recall SHALL prioritize eligible pinned relationship preferences, then query-matched approved preferences, then eligible stable relationship identity facts, then ordinary query-ranked memory; diversify ranked results by subject; deduplicate stable and ranked records; and fit whole contributions within the supplied token budget. Approved preferences may contribute instructions; identity facts, other facts, decisions, procedures, archive fragments, candidates, and conflicts SHALL NOT gain instruction authority.
 
 #### Scenario: Memory conflicts with authored profile
 - **ID**: `context.profile-authority`
@@ -360,6 +366,7 @@ Recall SHALL prioritize eligible pinned relationship preferences, diversify resu
 
 #### Scenario: Budget cannot fit a record
 - **ID**: `context.whole-record-budget`
+- **EVIDENCE**: `packages/extension-memory/tests/memory-protocol.spec.ts::automatically recalls stable relationship profile without lexical overlap`
 - **EVIDENCE**: `packages/extension-memory/tests/memory-search.spec.ts::uses lexical retrieval with strict scope, pinned relationship precedence, diversity, and whole budgets`
 - **WHEN** adding a record would exceed the supplied token budget
 - **THEN** that record is omitted without truncating it into misleading content

@@ -23,6 +23,13 @@ import {
   type EvolutionTransitionRequest,
 } from './model.ts'
 import { ProjectEvolutionStore } from './project-store.ts'
+import {
+  GlobalEvolutionSignalStore,
+  type RecordEvolutionSignalDiagnosticRequest,
+  type RecordEvolutionSignalsRequest,
+  type RecordEvolutionSignalsResult,
+} from './signal-store.ts'
+import type { EvolutionSignalDiagnostic, EvolutionSignalPolicy } from './signal-model.ts'
 
 export type {
   EvolutionDiagnostic,
@@ -62,6 +69,7 @@ export interface EvolutionServiceConfig {
 interface Stores {
   readonly global: GlobalEvolutionStore
   readonly project?: ProjectEvolutionStore
+  readonly signals: GlobalEvolutionSignalStore
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -125,7 +133,11 @@ export class EvolutionService extends Service {
           actorId: actor.actorId,
           projectId: persona.projectId!,
         }, this.projectLockTimeoutMs)
-    this.stores = { global, ...(project === undefined ? {} : { project }) }
+    this.stores = {
+      global,
+      signals: new GlobalEvolutionSignalStore(database, { instanceId: persona.instanceId, actorId: actor.actorId }),
+      ...(project === undefined ? {} : { project }),
+    }
   }
 
   async propose(request: EvolutionProposeRequest): Promise<EvolutionProposal> {
@@ -144,17 +156,31 @@ export class EvolutionService extends Service {
       .filter(proposal => request.query === undefined || relevanceScore(proposal, request.query) > 0)
       .filter(proposal => request.dueOnly !== true || proposalIsReminderEligible(proposal, now, this.cooldownMs))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-    return deepFreeze({ proposals: Object.freeze(proposals), diagnostics: project.diagnostics })
+    return deepFreeze({
+      proposals: Object.freeze(proposals),
+      diagnostics: Object.freeze([...project.diagnostics, ...this.stores.signals.listDiagnostics()]),
+    })
   }
 
   async inspect(id: string): Promise<EvolutionInspectResult> {
     await this.resumeExpiredSnoozes()
     const global = this.stores.global.inspect(id)
-    if (global !== undefined) return deepFreeze({ proposal: global, diagnostics: Object.freeze([]) })
+    if (global !== undefined) {
+      return deepFreeze({
+        proposal: global,
+        diagnostics: Object.freeze(this.stores.signals.listDiagnostics().filter(item => item.proposalId === id)),
+      })
+    }
     const project = await this.projectSnapshot()
     const proposal = project.proposals.find(item => item.id === id)
     if (proposal === undefined) throw new EvolutionError('NOT_FOUND', `proposal "${id}" was not found`)
-    return deepFreeze({ proposal, diagnostics: project.diagnostics })
+    return deepFreeze({
+      proposal,
+      diagnostics: Object.freeze([
+        ...project.diagnostics,
+        ...this.stores.signals.listDiagnostics().filter(item => item.proposalId === id),
+      ]),
+    })
   }
 
   async transition(request: EvolutionTransitionRequest): Promise<EvolutionProposal> {
@@ -186,6 +212,61 @@ export class EvolutionService extends Service {
         || left.proposal.id.localeCompare(right.proposal.id)
       ))
     return ranked[0]?.proposal
+  }
+  recordSignals(request: RecordEvolutionSignalsRequest): RecordEvolutionSignalsResult {
+    return this.stores.signals.record(request)
+  }
+
+  recordSignalDiagnostic(
+    request: Omit<RecordEvolutionSignalDiagnosticRequest, 'createdAt'> & { readonly createdAt?: string },
+  ): EvolutionSignalDiagnostic {
+    return this.stores.signals.recordDiagnostic({
+      ...request,
+      createdAt: request.createdAt ?? this.now().toISOString(),
+    })
+  }
+
+  pruneSignalState(policy: EvolutionSignalPolicy): void {
+    this.stores.signals.prune(this.now(), policy)
+  }
+
+  signalLastPrunedAt(): string | undefined {
+    return this.stores.signals.lastPrunedAt()
+  }
+
+  async promoteEligibleSignals(): Promise<void> {
+    for (const candidate of this.stores.signals.listEligible()) {
+      if (candidate.aggregate.scope === 'project') {
+        const projectId = this.ctx.doppelgangerPersona.projectId
+        if (this.stores.project === undefined || candidate.aggregate.projectId === undefined || candidate.aggregate.projectId !== projectId) {
+          this.recordSignalDiagnostic({
+            code: 'PROJECT_PROMOTION_UNAVAILABLE',
+            message: 'Project signal promotion requires the matching current workspace.',
+            patternKey: candidate.aggregate.patternKey,
+          })
+          continue
+        }
+      }
+      try {
+        const proposal = await this.mutate(candidate.request.scope, { kind: 'propose', request: candidate.request })
+        this.stores.signals.linkPromotion(candidate, proposal.id)
+      } catch (cause) {
+        if (cause instanceof EvolutionError && cause.code === 'DEDUPE_TERMINAL') {
+          this.stores.signals.markTerminalCollision(candidate)
+          this.recordSignalDiagnostic({
+            code: 'SIGNAL_TERMINAL_COLLISION',
+            message: 'A terminal proposal already owns the signal deduplication key.',
+            patternKey: candidate.aggregate.patternKey,
+          })
+          continue
+        }
+        this.recordSignalDiagnostic({
+          code: 'SIGNAL_PROMOTION_FAILED',
+          message: 'Signal promotion failed and remains pending for retry.',
+          patternKey: candidate.aggregate.patternKey,
+        })
+      }
+    }
   }
 
   private mutationContext(): EvolutionMutationContext {

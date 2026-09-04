@@ -23,8 +23,7 @@
   "dependencies": {
     "@doppelganger/doppelganger-protocols": "0.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
-    "ajv": "8.20.0",
-    "zod": "4.1.12"
+    "ajv": "8.20.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1"

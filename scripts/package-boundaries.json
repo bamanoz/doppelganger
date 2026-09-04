@@ -49,6 +49,12 @@
         "@doppelganger/doppelganger-runtime-presets"
       ]
     },
+    "@doppelganger/doppelganger-inference-pi": {
+      "directory": "extension-inference-pi",
+      "dependencies": [
+        "@doppelganger/doppelganger-protocols"
+      ]
+    },
     "@doppelganger/doppelganger-memory": {
       "directory": "extension-memory",
       "dependencies": [
@@ -73,6 +79,7 @@
         "@doppelganger/doppelganger-evolution",
         "@doppelganger/doppelganger-extension-mcp",
         "@doppelganger/doppelganger-host-omp",
+        "@doppelganger/doppelganger-inference-pi",
         "@doppelganger/doppelganger-persona",
         "@doppelganger/doppelganger-persona-authoring",
         "@doppelganger/doppelganger-protocols",

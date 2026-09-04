@@ -7,7 +7,6 @@ import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv
 import type { JsonSchemaType } from '@modelcontextprotocol/sdk/validation'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { JsonValue, ToolDefinition, ToolInvocationContext } from '@doppelganger/doppelganger-protocols'
-import { z } from 'zod/v4'
 import type { NormalizedMcpServerConfig, NormalizedMcpToolPolicy } from './config.ts'
 import { McpImportError, toToolInvocationError } from './errors.ts'
 import type { McpServerSnapshot } from './service.ts'
@@ -24,10 +23,6 @@ function validateJsonSchema(schema: unknown, label: string): void {
   }
 }
 
-const McpCallResultEnvelopeSchema = z.object({
-  resultType: z.string().optional(),
-  toolResult: z.unknown().optional(),
-}).loose()
 
 export interface McpClientOwner {
   isCurrent(generation: McpClientGeneration): boolean
@@ -391,7 +386,7 @@ export class McpClientGeneration {
     try {
       const raw = await this.#client.request(
         { method: 'tools/call', params: { name: tool.name, arguments: argumentsRecord(input, tool, this.#validator) } },
-        McpCallResultEnvelopeSchema,
+        CompatibilityCallToolResultSchema,
         { signal: controller.signal },
       )
       if (raw.resultType === 'input_required') {

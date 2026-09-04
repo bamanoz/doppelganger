@@ -8,7 +8,7 @@ This tree is the navigation root and authoritative description of the currently 
 | --- | --- | --- |
 | Architecture | [System overview](architecture/overview.md) | Product boundary, canonical terms, package topology, governing invariants |
 | Architecture | [Composition and reload](architecture/composition-and-reload.md) | Runtime Preset roster/service, roots/trust, copy-only authoring, patches, Runtime Sessions, activation, rollback, disposal, and feature-coordinated HMR |
-| Architecture | [Extension protocols](architecture/protocols.md) | Actor Identity states, context, revisioned tools, approval/cancellation, lifecycle events, the closed Runtime Host API, adapter conformance, and typed host-specific extensions |
+| Architecture | [Extension protocols](architecture/protocols.md) | Actor Identity states, context, provider-neutral structured inference, revisioned tools, approval/cancellation, lifecycle events, the closed Runtime Host API, adapter conformance, and typed host-specific extensions |
 | Features | [Persona](features/persona.md) | Persona Activation, identity, traits, scoped authoring, evolution workflow, and generic composition boundaries |
 | Features | [Dynamic Runtime Plugins](features/dynamic-runtime-plugins.md) | Opt-in generated Cordis plugins, inspection, immutable Packages, approval, lifecycle, limits, and host projection |
 | Features | [CodeGraph](features/codegraph.md) | Optional workspace-bound CodeGraph tools, freshness, subprocess bounds, lifecycle, compatibility, and trust boundary |

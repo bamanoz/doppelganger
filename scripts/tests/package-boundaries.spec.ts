@@ -122,6 +122,7 @@ describe('package boundary checker', () => {
       '@doppelganger/doppelganger-evolution',
       '@doppelganger/doppelganger-extension-mcp',
       '@doppelganger/doppelganger-host-omp',
+      '@doppelganger/doppelganger-inference-pi',
       '@doppelganger/doppelganger-persona',
       '@doppelganger/doppelganger-persona-authoring',
       '@doppelganger/doppelganger-protocols',

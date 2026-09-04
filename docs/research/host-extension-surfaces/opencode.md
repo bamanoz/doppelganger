@@ -79,6 +79,8 @@ Trust is implicit in the host's config/package loading and permission policy rat
 
 **Recommendation.** Map portable context, tools, approvals, and lifecycle to the domain/event/session seams above. Keep TUI, MCP configuration and transport, Bun shell, workspace adapters, provider auth/model hooks, and legacy chat hooks in an optional OpenCode edge adapter. Do not place OpenCode's mutable catalog/integration/provider details in portable core metadata. The recommendation is an architectural inference from the observed seams, not a claim that Doppelganger support exists.
 
+**Planning decision (2026-09-04).** Native OpenCode host implementation is deferred until the public OpenCode 2.0 plugin surface stabilizes the seams required by the shared Runtime Host contract: scoped dynamic tool registration with exact replacement and removal, plugin readiness before the first model request, exact-call required approval, and committed session and turn lifecycle observations. Doppelganger will not add kernel, bridge, bootstrap-session, generic-dispatch-tool, or `extension-mcp` workarounds for limitations in the host API.
+
 ## Compatibility gaps
 
 - OpenCode's v2 plugin context has no portable Doppelganger context/turn projection contract; an adapter must define stable principal, session, turn, and context-epoch identities.

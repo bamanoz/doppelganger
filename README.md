@@ -250,9 +250,9 @@ The same roster is available to in-process Cordis hosts through `@doppelganger/d
 
 ### Optional full-stack user presets
 
-An editable user Runtime Preset may extend `standard` with Persona Authoring, Evolution, Dynamic Runtime Plugins, CodeGraph, MCP tool import, SQLite, lexical memory, a local embedder, one vector backend, and the semantic coordinator. Such a composition remains user-owned configuration rather than a shipped or repository-specific preset. Each feature stays an independently addressable Loader row, and tests construct equivalent full-stack presets under temporary roots.
+An editable user Runtime Preset may extend `standard` with Persona Authoring, Evolution, a structured-inference provider, Dynamic Runtime Plugins, CodeGraph, MCP tool import, SQLite, lexical memory, a local embedder, one vector backend, and the semantic coordinator. Such a composition remains user-owned configuration rather than a shipped or repository-specific preset. Each feature stays an independently addressable Loader row, and tests construct equivalent full-stack presets under temporary roots.
 
-Persona Authoring writes only explicitly configured logical trait targets. Evolution exists only when its Loader row is present and stores non-executing proposals in actor-partitioned SQLite or project YAML. Dynamic Runtime Plugins exist only when their Loader row is present and keep every definition in Runtime Session process memory. CodeGraph exists only when its Loader row is present and uses the Runtime Session workspace plus a separately installed, user-initialized local index. MCP tool import exists only when its Loader row is present and owns only its configured external server connections and imported portable tool sets. Omitting a row leaves that feature and its tools absent.
+Persona Authoring writes only explicitly configured logical trait targets. Evolution exists only when its Loader row is present, stores non-executing proposals in actor-partitioned SQLite or project YAML, and defaults to bounded deterministic signal discovery from completed lifecycle events. Structured inference exists only when a provider row is present; Evolution model calls additionally require `signalInferenceEnabled: true`. Dynamic Runtime Plugins exist only when their Loader row is present and keep every definition in Runtime Session process memory. CodeGraph exists only when its Loader row is present and uses the Runtime Session workspace plus a separately installed, user-initialized local index. MCP tool import exists only when its Loader row is present and owns only its configured external server connections and imported portable tool sets. Omitting a row leaves that feature and its tools absent.
 
 ### CodeGraph code intelligence
 
@@ -419,7 +419,26 @@ Add Evolution only to an editable user Runtime Preset that already composes sess
     remindersEnabled: true
     reminderCooldownDays: 7
     projectLockTimeoutMs: 2000
+    proactiveSignalsEnabled: true
+    signalInferenceEnabled: false
 ```
+
+Deterministic capture observes only completed committed turns and correlated tool outcomes, persists bounded credential-screened signal state, and may create only ordinary inert `proposed` records after at least three distinct capability turns or three distinct Persona sessions. Set `proactiveSignalsEnabled: false` for the previous proposal-only behavior. Inference, research, review, planning, implementation, and execution never start from capture alone.
+
+Inference-assisted extraction is a separate network/cost opt-in. Place one provider before Evolution, then add `doppelgangerInference` to the Evolution row's `inject` and `isolate` maps and set `signalInferenceEnabled: true`:
+
+```yaml
+- id: doppelganger-inference-pi
+  name: "@doppelganger/doppelganger-inference-pi"
+  isolate:
+    doppelgangerInference: session
+  config:
+    provider: openai
+    model: gpt-5
+    apiKeyEnv: OPENAI_API_KEY
+```
+
+The provider/model pair must exist in the installed Pi catalog unless the row explicitly defines an OpenAI-compatible `baseUrl` together with the model's `modelContextWindow`; credentials must never be embedded in that URL. A configured credential environment variable is resolved per call and fails without ambient fallback; omitting `apiKeyEnv` deliberately permits provider-owned ambient authentication. The adapter disables SDK retries, never executes the returned result tool call, and returns only schema-validated JSON. Exact limits and optional reasoning levels are documented in [`docs/features/evolution.md`](docs/features/evolution.md).
 
 The feature exposes exactly `evolution.propose`, `evolution.list`, `evolution.inspect`, `evolution.transition`, `evolution.snooze`, `evolution.reject`, and `evolution.reminder.record`. These tools mutate only an inert proposal ledger. Global proposals are partitioned by Persona Instance and bound actor in plugin-owned SQLite. Project capability proposals are canonical Git-visible YAML under `<workspaceRoot>/.doppelganger/evolution/opportunities/`; do not place secrets in them.
 

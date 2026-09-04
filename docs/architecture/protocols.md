@@ -8,6 +8,14 @@ Actor Identity is an optional protected plugin separate from the shared Runtime 
 
 Generic compositions and the shared Runtime Host API may run without the service. Persistent actor-aware extensions must explicitly inject it and fail activation when it is absent or unbound rather than inventing an anonymous, default, Persona-authored, bridge-authored, or model-selected identity.
 
+## Structured inference
+
+`extension-protocols` defines the optional session-scoped `doppelgangerInference` service for one-shot structured extraction. A request has exact keys: a bounded lowercase purpose identifier, bounded system instruction, untrusted input string, portable JSON output schema, optional output-token cap, and optional `AbortSignal`. The wrapper validates schema depth, node count, serialized size, supported keywords, request bounds, provider result shape, JSON compatibility, output size, schema conformance, and bounded token usage; accepted requests and results are immutable.
+
+Providers return only the schema-shaped JSON value and optional usage. Stable errors distinguish invalid requests, unavailable providers, authentication, timeout, cancellation, provider failure, missing output, and invalid output. Raw prompts, provider payloads, thinking, tool text, credentials, and provider diagnostics are not part of the result contract. A Runtime Preset may substitute any conforming provider by composing one `doppelgangerInference` implementation in the session realm; duplicate providers fail rather than winning by order. Omitting the service is valid.
+
+`extension-inference-pi` is one optional Node-compatible provider. Its Loader row selects an installed Pi provider/model snapshot or explicitly constructs one OpenAI-compatible endpoint snapshot at activation, optionally resolves one named environment credential per call, requests exactly one schema-shaped `return_result` tool call with SDK retries disabled, and maps timeout, caller cancellation, disposal, authentication, and malformed output into the shared error contract. It neither executes returned tool calls nor uses the host's agent loop, model selection, credentials, conversation, or transport. Provider traffic and cost occur only when a consuming plugin explicitly enables and invokes inference.
+
 ## Context
 
 Feature plugins register scoped context providers as Cordis effects. A host resolves providers at the cadence declared by its immutable capability profile. `per-turn` resolution uses the current direct principal input once before one user-initiated agent run; every model continuation after tool calls receives that same snapshot. `per-request` remains available only for hosts and features that intentionally require fresh assembly before every model request. The assembler orders contributions deterministically and applies the supplied token budget.
@@ -22,7 +30,7 @@ A host adapter translates supported JSON Schema into its native schema and exact
 
 Dynamic Runtime Plugins consume the same protocol rather than adding a host-specific execution channel. Their seven `runtime-plugin.*` control tools are ordinary portable definitions, and generated Packages may register further tools only through the guarded `doppelgangerTools` service. `runtime-plugin.run` declares required approval because it evaluates one exact immutable Package with process-level authority; the grant binds the submitted Plugin ID, Package ID, mode, name, purpose, and source digest. Inspection and definition do not execute source. Host denial, cancellation, or unavailable approval fails before dispatch.
 
-Evolution uses the same protocols without an executor channel. Its seven `evolution.*` definitions are ordinary portable ledger controls whose schemas stay within the supported cross-host translation subset. `evolution.transition` publishes one object schema and enforces the selected target's required and irrelevant metadata at invocation. Stable operation IDs and exact revision checks remain mandatory, and no input accepts actor or Persona override fields. Its context provider contributes one instruction-authority policy and at most one data-authority reminder candidate. Proposal or reminder state grants no approval to Persona Authoring, research, Dynamic Runtime Plugins, package installation, or host APIs.
+Evolution uses the same context and tool protocols without an executor channel. Its seven `evolution.*` definitions are ordinary portable ledger controls whose schemas stay within the supported cross-host translation subset. `evolution.transition` publishes one object schema and enforces the selected target's required and irrelevant metadata at invocation. Stable operation IDs and exact revision checks remain mandatory, and no input accepts actor or Persona override fields. Its context provider contributes one instruction-authority policy and at most one data-authority reminder candidate. Its optional lifecycle signal worker may consume committed events and may call same-realm structured inference only when explicitly configured; neither path expands tool authority. Proposal or reminder state grants no approval to Persona Authoring, research, Dynamic Runtime Plugins, package installation, or host APIs.
 
 ## Typed host-specific extensions
 
@@ -36,7 +44,7 @@ This one-host-transport rule does not apply to ordinary Runtime Preset plugins c
 
 Host adapters publish normalized, deeply frozen, bounded lifecycle events through `publishLifecycleEvent`. Lifecycle protocol version 2 gives each event kind one payload owner: `turn-committed` carries committed principal input, assistant output, and turn outcome, while each tool result or structured tool error appears only in its correlated `tool-completed` event. Stable `sessionId`, `turnId`, `callId`, and `deliveryId` values preserve correlation across transport, including for consumers that reconstruct a turn from separate events.
 
-The lifecycle event version is independent of any host transport version. Candidate capture consumes committed turns only; partial turns, tool-completion events, and disposal are not committed capture input.
+The lifecycle event version is independent of any host transport version. Candidate capture and Evolution signal discovery consume completed committed turns only. Partial, failed, or cancelled turns never become evidence; uncommitted tool-completion events are bounded correlation material and expire without persistence. Lifecycle publication never awaits Evolution extraction, inference, storage, or promotion.
 
 ## Host seam
 
@@ -59,7 +67,10 @@ Every supported adapter passes the same transport-independent Runtime Host confo
 - `packages/extension-protocols/src/context.ts`
 - `packages/extension-protocols/src/tools.ts`
 - `packages/extension-protocols/src/lifecycle.ts`
+- `packages/extension-protocols/src/inference.ts`
 - `packages/extension-protocols/src/runtime-host.ts`
 - `packages/extension-protocols/tests/support/runtime-host-conformance.ts`
+- `packages/extension-inference-pi/src/plugin.ts`
+- `packages/extension-inference-pi/src/provider.ts`
 - `packages/host-omp/src/contracts.ts`
 - `packages/host-omp/src/omp-host-events.ts`

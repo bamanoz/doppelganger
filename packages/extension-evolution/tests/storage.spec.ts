@@ -7,7 +7,12 @@ import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-person
 import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
 import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { EvolutionError, EvolutionService } from '../src/index.ts'
+import {
+  EVOLUTION_SCHEMA_VERSION,
+  EvolutionError,
+  EvolutionService,
+  migrateEvolutionSchema,
+} from '../src/index.ts'
 
 const roots: string[] = []
 
@@ -139,6 +144,118 @@ describe('Evolution global storage', () => {
       await expect(isolated.doppelgangerEvolution.inspect(proposal.id)).rejects.toMatchObject({ code: 'NOT_FOUND' })
       await isolated.fiber.dispose()
     }
+  })
+})
+
+describe('Evolution schema migration', () => {
+  it('initializes fresh version-two signal tables without creating project YAML', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-schema-fresh-'))
+    const workspace = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-schema-workspace-'))
+    roots.push(home, workspace)
+    const context = await session(home, { workspaceRoot: workspace })
+    const storage = await context.doppelgangerInstanceSqlite.open('schema-inspection')
+
+    migrateEvolutionSchema(storage)
+    expect(storage.prepare('SELECT version FROM evolution_schema').get()).toEqual({ version: EVOLUTION_SCHEMA_VERSION })
+    const tables = (storage.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name LIKE 'evolution_signal_%'
+      ORDER BY name
+    `).all() as Array<{ name: string }>).map(row => row.name)
+    expect(tables).toEqual([
+      'evolution_signal_aggregates',
+      'evolution_signal_diagnostics',
+      'evolution_signal_meta',
+      'evolution_signal_receipts',
+      'evolution_signals',
+    ])
+    expect((storage.prepare('PRAGMA table_info(evolution_signal_aggregates)').all() as Array<{ name: string }>).map(row => row.name))
+      .toContain('deterministic_occurrence_count')
+    await expect(lstat(join(workspace, '.doppelganger', 'evolution'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await context.fiber.dispose()
+  })
+
+  it('repairs an earlier version-two aggregate table additively', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-schema-v2-additive-'))
+    roots.push(home)
+    const context = new Context()
+    await context.plugin(InstanceSqliteService, { home })
+    const storage = await context.doppelgangerInstanceSqlite.open('evolution')
+    migrateEvolutionSchema(storage)
+    storage.exec('ALTER TABLE evolution_signal_aggregates DROP COLUMN deterministic_occurrence_count;')
+
+    migrateEvolutionSchema(storage)
+
+    expect(storage.prepare('SELECT version FROM evolution_schema').get()).toEqual({ version: EVOLUTION_SCHEMA_VERSION })
+    expect((storage.prepare('PRAGMA table_info(evolution_signal_aggregates)').all() as Array<{ name: string }>).map(row => row.name))
+      .toContain('deterministic_occurrence_count')
+    await context.fiber.dispose()
+  })
+
+  it('preserves version-one proposal rows during the additive migration', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-schema-v1-'))
+    roots.push(home)
+    const fixtureContext = new Context()
+    await fixtureContext.plugin(InstanceSqliteService, { home })
+    const storage = await fixtureContext.doppelgangerInstanceSqlite.open('evolution')
+    migrateEvolutionSchema(storage)
+    storage.exec(`
+      DROP TABLE evolution_signal_meta;
+      DROP TABLE evolution_signal_diagnostics;
+      DROP TABLE evolution_signal_aggregates;
+      DROP TABLE evolution_signals;
+      DROP TABLE evolution_signal_receipts;
+      DROP TABLE evolution_schema;
+      CREATE TABLE evolution_schema (version INTEGER NOT NULL CHECK(version = 1));
+      INSERT INTO evolution_schema(version) VALUES (1);
+    `)
+    storage.prepare(`
+      INSERT INTO evolution_proposals(
+        instance_id, actor_id, id, kind, scope, dedupe_key, status, current_revision,
+        snoozed_until, resume_status, created_at, updated_at
+      ) VALUES (?, ?, ?, 'capability', 'global', ?, 'proposed', 1, NULL, NULL, ?, ?)
+    `).run('mark', 'actor-a', 'preserved-v1', 'capability.preserved-v1', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+    storage.prepare(`
+      INSERT INTO evolution_revisions(
+        instance_id, actor_id, proposal_id, revision, title, rationale, tags_json,
+        status, snoozed_until, resume_status, created_at
+      ) VALUES (?, ?, ?, 1, ?, ?, '[]', 'proposed', NULL, NULL, ?)
+    `).run('mark', 'actor-a', 'preserved-v1', 'Preserved proposal', 'Existing version-one state.', '2026-09-01T00:00:00.000Z')
+    await fixtureContext.fiber.dispose()
+
+    const migrated = await session(home)
+    expect((await migrated.doppelgangerEvolution.inspect('preserved-v1')).proposal).toMatchObject({
+      id: 'preserved-v1',
+      title: 'Preserved proposal',
+      revision: 1,
+    })
+    await migrated.fiber.dispose()
+  })
+
+  it('rejects unsupported versions and keeps signal receipt keys partitioned', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-schema-unsupported-'))
+    roots.push(home)
+    const context = new Context()
+    await context.plugin(InstanceSqliteService, { home })
+    const storage = await context.doppelgangerInstanceSqlite.open('evolution')
+    migrateEvolutionSchema(storage)
+    storage.exec(`
+      INSERT INTO evolution_signal_receipts(
+        instance_id, actor_id, delivery_id, session_id, turn_id, created_at, expires_at
+      ) VALUES
+        ('mark', 'actor-a', 'delivery-1', 'session-a', 'turn-a', '2026-09-01T00:00:00.000Z', '2026-12-01T00:00:00.000Z'),
+        ('mark', 'actor-b', 'delivery-1', 'session-b', 'turn-b', '2026-09-01T00:00:00.000Z', '2026-12-01T00:00:00.000Z'),
+        ('other', 'actor-a', 'delivery-1', 'session-c', 'turn-c', '2026-09-01T00:00:00.000Z', '2026-12-01T00:00:00.000Z');
+    `)
+    expect(storage.prepare('SELECT COUNT(*) AS count FROM evolution_signal_receipts').get()).toEqual({ count: 3 })
+    storage.exec(`
+      DROP TABLE evolution_schema;
+      CREATE TABLE evolution_schema (version INTEGER NOT NULL);
+      INSERT INTO evolution_schema(version) VALUES (99);
+    `)
+    expect(() => migrateEvolutionSchema(storage)).toThrow('unsupported Evolution schema version')
+    expect(storage.prepare('SELECT version FROM evolution_schema').get()).toEqual({ version: 99 })
+    await context.fiber.dispose()
   })
 })
 

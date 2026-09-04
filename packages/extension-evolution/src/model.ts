@@ -159,6 +159,10 @@ export interface EvolutionDiagnostic {
   readonly path: string
   readonly code: string
   readonly message: string
+  readonly createdAt?: string
+  readonly deliveryId?: string
+  readonly patternKey?: string
+  readonly proposalId?: string
 }
 
 export interface EvolutionListResult {

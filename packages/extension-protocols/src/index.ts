@@ -27,6 +27,17 @@ export {
   type ToolDelivery,
 } from './host-capabilities.ts'
 export {
+  STRUCTURED_INFERENCE_SERVICE,
+  StructuredInferenceError,
+  createStructuredInference,
+  type StructuredInference,
+  type StructuredInferenceErrorCode,
+  type StructuredInferenceProvider,
+  type StructuredInferenceRequest,
+  type StructuredInferenceResult,
+  type StructuredInferenceUsage,
+} from './inference.ts'
+export {
   createRuntimeHostPlugin,
   type HostContextRequest,
   type RuntimeHostBinding,

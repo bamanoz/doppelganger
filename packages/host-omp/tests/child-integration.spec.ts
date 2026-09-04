@@ -5,7 +5,11 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
-import { digestToolInput } from '@doppelganger/doppelganger-protocols'
+import {
+  LIFECYCLE_PROTOCOL_VERSION,
+  digestToolInput,
+  serializeLifecycleValue,
+} from '@doppelganger/doppelganger-protocols'
 import { RuntimePresetRoster } from '@doppelganger/doppelganger-runtime-presets'
 import { OMP_RPC_PROTOCOL_VERSION, OMP_RUNTIME_HOST_CAPABILITIES } from '../src/contracts.ts'
 import { OmpAdapterSession } from '../src/adapter.ts'
@@ -119,7 +123,7 @@ async function waitForReloadState(peer: FramedJsonRpcPeer, state: string): Promi
   throw new Error(`runtime reload state ${state} timed out`)
 }
 
-function activation(root: string, patches: readonly object[] = [], actorId?: string) {
+function activation(root: string, patches: readonly object[] = [], actorId?: string, sessionId = 'omp-session') {
   return {
     protocolVersion: OMP_RPC_PROTOCOL_VERSION,
     capabilities: OMP_RUNTIME_HOST_CAPABILITIES,
@@ -129,7 +133,7 @@ function activation(root: string, patches: readonly object[] = [], actorId?: str
       loaderPath: join(root, 'runtime.cordis.yml'),
       patches,
     },
-    sessionId: 'omp-session',
+    sessionId,
     workspaceRoot: root,
     hostKind: 'omp' as const,
     watch: true,
@@ -296,6 +300,61 @@ async function writeEvolutionPreset(root: string): Promise<void> {
       '',
     ].join('\n')),
   ])
+}
+
+async function writeEvolutionSignalPreset(root: string): Promise<void> {
+  await writeEvolutionPreset(root)
+  const protocols = JSON.stringify(new URL('../../extension-protocols/src/index.ts', import.meta.url).href)
+  await writeFile(join(root, 'inference.mjs'), [
+    `import { createStructuredInference } from ${protocols}`,
+    'let calls = 0',
+    'export default {',
+    "  name: 'deterministic-signal-inference',",
+    "  provide: 'doppelgangerInference',",
+    "  inject: ['doppelgangerTools'],",
+    '  apply(ctx) {',
+    '    ctx.provide(\'doppelgangerInference\', createStructuredInference({',
+    '      async infer(request) {',
+    '        calls += 1',
+    '        const material = JSON.parse(request.input).committedTurn',
+    '        return { value: { hypotheses: [{',
+    "          kind: 'capability', scope: 'global', patternKey: 'tool.read.failed.enoent',",
+    "          title: 'Improve repeated read failure handling',",
+    "          rationale: 'Independent committed turns repeatedly encounter the same read failure.',",
+    "          summary: 'The read tool repeatedly failed with ENOENT.',",
+    "          tags: ['capability', 'tool-failure', 'read'], severity: 'medium', reuseValue: 'medium',",
+    '          provenance: [material.deliveryId, material.turnId],',
+    '        }] } }',
+    '      },',
+    '    }))',
+    '    ctx.doppelgangerTools.register({',
+    "      name: 'signal-test.inference-calls', description: 'Return deterministic signal inference calls',",
+    "      inputSchema: { type: 'object', properties: {}, additionalProperties: false },",
+    '      invoke: () => ({ calls }),',
+    '    })',
+    '  },',
+    '}',
+    '',
+  ].join('\n'))
+  const source = await readFile(join(root, 'runtime.cordis.yml'), 'utf8')
+  const inferenceRow = [
+    '- id: inference',
+    '  name: ./inference.mjs',
+    '  inject: [doppelgangerTools]',
+    '  isolate:',
+    '    doppelgangerTools: session',
+    '    doppelgangerInference: session',
+  ].join('\n')
+  const withInference = source.replace('- id: evolution', `${inferenceRow}\n- id: evolution`)
+    .replace(
+      '  inject: [doppelgangerRuntimeSession, doppelgangerActor, doppelgangerPersona, doppelgangerInstanceSqlite, doppelgangerContext, doppelgangerTools]',
+      '  inject: [doppelgangerRuntimeSession, doppelgangerActor, doppelgangerPersona, doppelgangerInstanceSqlite, doppelgangerContext, doppelgangerTools, doppelgangerInference]',
+    )
+    .replace(
+      '    doppelgangerEvolution: session\n',
+      '    doppelgangerEvolution: session\n    doppelgangerInference: session\n  config:\n    signalInferenceEnabled: true\n',
+    )
+  await writeFile(join(root, 'runtime.cordis.yml'), withInference)
 }
 
 async function invokeEvolution(
@@ -850,6 +909,90 @@ describe('Node OMP runtime child', () => {
     }
     expect(harness.child.exitCode).toBe(0)
   }, 15_000)
+
+  it('promotes lifecycle evidence through generic OMP events while preserving every consent gate', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-signals-child-'))
+    temporaryRoots.push(root)
+    await writeEvolutionSignalPreset(root)
+    const harnesses = await Promise.all([childHarness(), childHarness(), childHarness()])
+    const sessionIds = ['omp-signal-session-one', 'omp-signal-session-two', 'omp-signal-session-three']
+    try {
+      await Promise.all(harnesses.map((harness, index) => harness.peer.request(
+        'session.activate',
+        activation(root, [], 'actor-one', sessionIds[index]!),
+      )))
+      await Promise.all(harnesses.map(async (harness, index) => {
+        const sessionId = sessionIds[index]!
+        const turnId = `${sessionId}:turn-one`
+        const toolEvent = {
+          protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+          type: 'tool-completed' as const,
+          deliveryId: `${sessionId}:tool-delivery`,
+          sessionId,
+          turnId,
+          callId: `${sessionId}:call-one`,
+          name: 'read',
+          outcome: 'failed' as const,
+          error: { code: 'ENOENT', message: 'Missing file.' },
+          timestamp: Date.parse(`2026-09-04T00:0${index}:00.000Z`),
+        }
+        const turnEvent = {
+          protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+          type: 'turn-committed' as const,
+          deliveryId: `${sessionId}:turn-delivery`,
+          sessionId,
+          turnId,
+          principalInput: serializeLifecycleValue('Read the missing file.'),
+          assistantOutput: serializeLifecycleValue('The read operation failed.'),
+          outcome: 'completed' as const,
+          timestamp: Date.parse(`2026-09-04T00:0${index}:30.000Z`),
+        }
+        await expect(harness.peer.request('event.publish', toolEvent)).resolves.toBeNull()
+        await expect(harness.peer.request('event.publish', turnEvent)).resolves.toBeNull()
+      }))
+
+      let listed: Record<string, unknown> | undefined
+      const deadline = Date.now() + 5_000
+      while (Date.now() < deadline) {
+        listed = await invokeEvolution(harnesses[0]!.peer, 'evolution.list', {})
+        if (Array.isArray(listed.proposals) && listed.proposals.length === 1) break
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      expect(listed?.proposals).toEqual([expect.objectContaining({
+        kind: 'capability',
+        scope: 'global',
+        status: 'proposed',
+        revision: 1,
+        evidence: expect.arrayContaining(sessionIds.map(sessionId => expect.objectContaining({
+          sourceId: `lifecycle:${sessionId}:turn-delivery`,
+        }))),
+      })])
+      const proposal = (listed!.proposals as Array<Record<string, unknown>>)[0]!
+      const inspected = await invokeEvolution(harnesses[0]!.peer, 'evolution.inspect', { id: proposal.id })
+      expect(inspected).toMatchObject({
+        proposal: {
+          id: proposal.id,
+          status: 'proposed',
+          revision: 1,
+          history: [{ toStatus: 'proposed' }],
+        },
+      })
+      expect(inspected.proposal).not.toHaveProperty('reviewSummary')
+      expect(inspected.proposal).not.toHaveProperty('researchQuestion')
+      expect(inspected.proposal).not.toHaveProperty('planReference')
+      expect(inspected.proposal).not.toHaveProperty('implementationReference')
+      await Promise.all(harnesses.map(harness => expect(
+        invokeTool(harness.peer, 'signal-test.inference-calls', {}),
+      ).resolves.toEqual({ ok: true, value: { calls: 1 } })))
+    } catch (cause) {
+      for (const harness of harnesses) harness.child.kill()
+      const message = cause instanceof Error ? cause.stack ?? cause.message : String(cause)
+      throw new Error(`${message}\n${harnesses.map(harness => Buffer.concat(harness.stderr).toString('utf8')).join('\n')}`)
+    } finally {
+      await Promise.all(harnesses.map(dispose))
+    }
+    expect(harnesses.map(harness => harness.child.exitCode)).toEqual([0, 0, 0])
+  }, 20_000)
 
   it('keeps a Persona proposal inert until review and completes it only after separately confirmed activation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'doppelganger-persona-evolution-vertical-'))

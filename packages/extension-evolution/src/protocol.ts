@@ -147,7 +147,7 @@ function handler(operation: (input: JsonValue) => unknown | Promise<unknown>) {
 }
 
 const EVOLUTION_POLICY = `[Doppelganger Evolution Policy]
-Evaluate completed work and dialogue for stable Persona improvements and material reusable capability gaps. Distinguish Persona qualities from user facts and preferences. Prefer existing capabilities over new mechanisms. Complete and verify the current task before raising an opportunity, then present at most one concise proposal or reminder. Record proposals before review, research, planning, or implementation. Require explicit user consent before Persona review or capability research. Prefer portable Doppelganger implementations over host-specific plugins whenever Doppelganger exposes the required seam.`
+Evaluate completed work and dialogue for stable Persona improvements and material reusable capability gaps. Distinguish Persona qualities from user facts and preferences. Prefer existing capabilities over new mechanisms. Complete and verify the current task before raising an opportunity, then present at most one concise proposal or reminder. Automatically discovered proposals are inert, consent-gated, never begin review, research, planning, or implementation, and never interrupt primary work. Record manual proposals before review, research, planning, or implementation. Require explicit user consent before Persona review or capability research. Prefer portable Doppelganger implementations over host-specific plugins whenever Doppelganger exposes the required seam.`
 
 function definitions(ctx: Context): readonly ToolDefinition[] {
   return Object.freeze([

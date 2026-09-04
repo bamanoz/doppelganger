@@ -1,0 +1,33 @@
+{
+  "name": "@doppelganger/doppelganger-inference-pi",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.1",
+    "@doppelganger/doppelganger-protocols": "0.0.0",
+    "@earendil-works/pi-ai": "0.84.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@types/node": "26.4.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

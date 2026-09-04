@@ -2,7 +2,7 @@
 
 ## Current status
 
-Doppelganger is experimental and private. The generic OMP Runtime Preset vertical slice, authoritative Runtime Preset roster, actor-neutral shared Runtime Host API and conformance suite, private local `@doppelganger/doppelganger-omp` install package, typed OMP-native event provider, opt-in Persona Authoring, Dynamic Runtime Plugins, Evolution, CodeGraph code intelligence, and independent background MCP tool import are implemented. OMP uses one child and framed transport for shared and OMP-specific protected providers. Actor Identity is a separate optional session plugin with absent, unbound, and bound states; the Runtime Host capability profile contains only context delivery, tool delivery, required approval, cancellation, and declared lifecycle availability.
+Doppelganger is experimental and private. The generic OMP Runtime Preset vertical slice, authoritative Runtime Preset roster, actor-neutral shared Runtime Host API and conformance suite, private local `@doppelganger/doppelganger-omp` install package, typed OMP-native event provider, provider-neutral structured inference with an optional Pi SDK adapter, opt-in Persona Authoring, Dynamic Runtime Plugins, Evolution with bounded proactive lifecycle signals, CodeGraph code intelligence, and independent background MCP tool import are implemented. OMP uses one child and framed transport for shared and OMP-specific protected providers. Actor Identity is a separate optional session plugin with absent, unbound, and bound states; the Runtime Host capability profile contains only context delivery, tool delivery, required approval, cancellation, and declared lifecycle availability…
 
 The native DeepSeek Harness host is the next integration milestone. Its reconciled active change consumes the shared bridge directly in-process, the closed capability profile, revisioned catalog and invocation contracts, one-shot approval revalidation, cancellation, declared lifecycle availability, separate Actor Identity, typed host-specific extension convention, and the same transport-independent conformance suite. DSH's existing project Agent Skill loader already discovers installed repository skills from `.agents/skills`; compatible runtime services and tools still require the deferred adapter. Public npm release, marketplace distribution, compatibility policy, actor onboarding/authentication, persistent generated-plugin promotion, automatic dependency installation, and hostile-code containment remain deferred.
 
@@ -46,6 +46,8 @@ The implemented cutover is accepted when:
 34. an opt-in MCP row validates configuration synchronously, publishes one independent background slot per enabled server, atomically commits complete discovered tool sets, contains external startup failure per server, and keeps shipped `standard` neutral;
 35. MCP startup uses a bounded per-server deadline with sanitized stage diagnostics, exact operator-owned commands/endpoints, no installer, retry, version selection, or fallback, and exhaustive generation/session cleanup;
 36. valid MCP reload retires changed generations before background replacement, retains unchanged generations, rejects stale late callbacks, and OMP receives late additions and withdrawals only through the generic dynamic catalog path without MCP-specific production code or UI.
+37. one explicitly composed session-scoped structured-inference provider validates bounded portable requests and results, supports substitution and cancellation, exposes no host model loop, and remains absent from shipped `standard` and provider-omitting presets;
+38. composed Evolution defaults to non-blocking deterministic completed-turn signal capture, calls a model only under explicit same-realm opt-in, retains bounded actor/Persona-partitioned evidence, promotes only independently recurring hypotheses into ordinary inert `proposed` records, and preserves every existing consent and executor boundary.
 
 ## Deferred scope
 
@@ -54,6 +56,7 @@ The current milestone excludes:
 - automatic Runtime Preset package installation, dependency solving, lockfiles, and distribution;
 - persistent promotion of generated Packages into Runtime Presets, patches, repository files, or installable packages;
 - native DSH host implementation;
+- native OpenCode host implementation until the public OpenCode 2.0 plugin API stabilizes scoped dynamic tool replacement, startup readiness, exact-call required approval, and committed session and turn lifecycle seams; no Doppelganger kernel or `extension-mcp` workaround is planned;
 - marketplace and package distribution;
 - security containment for hostile generated code beyond the current guarded API and explicit trust warning;
 - daemon, HTTP, or MCP as the primary architecture;

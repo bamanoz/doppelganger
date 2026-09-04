@@ -6,12 +6,17 @@ import { createRuntimeSessionMetadataPlugin } from '@doppelganger/doppelganger-c
 import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
 import {
   ContextProtocol,
+  LIFECYCLE_PROTOCOL_VERSION,
   createActorIdentityPlugin,
+  createStructuredInference,
+  publishLifecycleEvent,
+  serializeLifecycleValue,
+  STRUCTURED_INFERENCE_SERVICE,
   ToolRegistry,
   type JsonValue,
 } from '@doppelganger/doppelganger-protocols'
 import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EvolutionPlugin, EvolutionService, type EvolutionPluginConfig } from '../src/index.ts'
 import { EvolutionProtocolPlugin } from '../src/protocol.ts'
 
@@ -161,6 +166,121 @@ describe('Evolution protocol', () => {
       turn: { input: 'improve release search' }, tokenBudget: 1000,
     })
     expect(resolved.contributions.map(item => item.source)).toEqual(['evolution.policy'])
+    await context.fiber.dispose()
+  })
+
+  it('captures deterministic committed evidence by default and deduplicates lifecycle retries', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-signal-default-'))
+    roots.push(home)
+    const context = await base(home)
+    await context.plugin(EvolutionPlugin, {
+      capabilityPromotionMinTurns: 3,
+      signalPromotionScore: 6,
+    })
+    for (let index = 0; index < 3; index += 1) {
+      const toolEvent = {
+        protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+        type: 'tool-completed' as const,
+        deliveryId: `tool-delivery-${index}`,
+        sessionId: 'session-a',
+        turnId: `turn-${index}`,
+        callId: `call-${index}`,
+        name: 'read',
+        outcome: 'failed' as const,
+        error: { code: 'ENOENT', message: 'Missing file.' },
+        timestamp: Date.parse(`2026-09-04T00:0${index}:00.000Z`),
+      }
+      const turnEvent = {
+        protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+        type: 'turn-committed' as const,
+        deliveryId: `turn-delivery-${index}`,
+        sessionId: 'session-a',
+        turnId: `turn-${index}`,
+        outcome: 'completed' as const,
+        principalInput: serializeLifecycleValue('Read the missing file.'),
+        assistantOutput: serializeLifecycleValue('The read operation failed.'),
+        timestamp: Date.parse(`2026-09-04T00:0${index}:30.000Z`),
+      }
+      await publishLifecycleEvent(context, toolEvent)
+      await publishLifecycleEvent(context, toolEvent)
+      await publishLifecycleEvent(context, turnEvent)
+      await publishLifecycleEvent(context, turnEvent)
+    }
+
+    await vi.waitFor(async () => {
+      expect((await context.doppelgangerEvolution.list()).proposals).toHaveLength(1)
+    })
+    const result = await context.doppelgangerEvolution.list()
+    expect(result.proposals[0]).toMatchObject({
+      kind: 'capability',
+      scope: 'global',
+      status: 'proposed',
+    })
+    expect(result.proposals[0]?.evidence.map(item => item.sourceId).sort()).toEqual([
+      'lifecycle:turn-delivery-0',
+      'lifecycle:turn-delivery-1',
+      'lifecycle:turn-delivery-2',
+    ])
+    await context.fiber.dispose()
+  })
+
+  it('preserves proposal-only behavior when proactive capture is disabled', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-signal-disabled-'))
+    roots.push(home)
+    const context = await base(home)
+    let inferenceCalls = 0
+    await context.plugin({
+      provide: STRUCTURED_INFERENCE_SERVICE,
+      apply(ctx) {
+        ctx.provide(STRUCTURED_INFERENCE_SERVICE, createStructuredInference({
+          async infer() {
+            inferenceCalls += 1
+            return { value: { hypotheses: [] } }
+          },
+        }))
+      },
+    })
+    await context.plugin(EvolutionPlugin, { proactiveSignalsEnabled: false, signalInferenceEnabled: false })
+    await publishLifecycleEvent(context, {
+      protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+      type: 'turn-committed',
+      deliveryId: 'disabled-turn',
+      sessionId: 'session-a',
+      turnId: 'turn-disabled',
+      outcome: 'completed',
+      principalInput: serializeLifecycleValue('Нет, я просил другое.'),
+      assistantOutput: serializeLifecycleValue('Я не могу выполнить это.'),
+      timestamp: Date.parse('2026-09-04T01:00:00.000Z'),
+    })
+    await Promise.resolve()
+
+    expect(inferenceCalls).toBe(0)
+    expect((await context.doppelgangerEvolution.list()).proposals).toEqual([])
+    expect(context.doppelgangerTools.snapshot().tools).toHaveLength(7)
+    await context.fiber.dispose()
+  })
+
+
+  it('rejects unsafe signal configuration before registering listeners', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-signal-config-'))
+    roots.push(home)
+    const context = await base(home)
+    const plugin = context.plugin(EvolutionPlugin, { capabilityPromotionMinTurns: 2 })
+
+    await expect(plugin.await()).rejects.toThrow('capabilityPromotionMinTurns')
+    expect(context.doppelgangerTools.snapshot().tools).toEqual([])
+    await publishLifecycleEvent(context, {
+      protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+      type: 'turn-committed',
+      deliveryId: 'invalid-config-turn',
+      sessionId: 'session-a',
+      turnId: 'turn-invalid',
+      outcome: 'completed',
+      principalInput: serializeLifecycleValue('ignored'),
+      assistantOutput: serializeLifecycleValue('ignored'),
+      timestamp: Date.parse('2026-09-04T01:00:00.000Z'),
+    })
+    expect(context.get('doppelgangerEvolution')).toBeUndefined()
     await context.fiber.dispose()
   })
 

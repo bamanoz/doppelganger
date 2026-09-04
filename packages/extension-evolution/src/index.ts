@@ -28,6 +28,35 @@ export {
   type EvolutionTransitionRequest,
 } from './service.ts'
 export {
+  EVOLUTION_SIGNAL_INFERENCE_SCHEMA,
+  EVOLUTION_SIGNAL_INFERENCE_SYSTEM,
+  createSignalOccurrence,
+  normalizeSignalHypothesis,
+  normalizeSignalMaterial,
+  normalizeSignalPatternKey,
+  normalizeToolOutcomeMaterial,
+  signalFactorValue,
+  type EvolutionSignalAggregate,
+  type EvolutionSignalDiagnostic,
+  type EvolutionSignalFactor,
+  type EvolutionSignalHypothesis,
+  type EvolutionSignalMaterial,
+  type EvolutionSignalMaterialLimits,
+  type EvolutionSignalOccurrence,
+  type EvolutionSignalPolicy,
+  type EvolutionSignalPromotionStatus,
+  type EvolutionSignalSource,
+  type EvolutionToolOutcomeMaterial,
+} from './signal-model.ts'
+export {
+  EVOLUTION_SIGNAL_POLICY_VERSION,
+  evaluateSignalPromotion,
+  signalPromotionOperationId,
+  signalProposalDedupeKey,
+  signalPromotionRequest,
+  type EvolutionSignalPromotionEvaluation,
+} from './signal-policy.ts'
+export {
   EVOLUTION_PROJECT_DOCUMENT_VERSION,
   EVOLUTION_SCHEMA_VERSION,
   migrateEvolutionSchema,

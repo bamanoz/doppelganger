@@ -86,6 +86,22 @@ async function dispose(harness: Harness): Promise<void> {
   await harness.ctx.fiber.dispose()
 }
 
+function invokePortable(tools: ToolRegistryService, name: string, input: Parameters<ToolRegistryService['invoke']>[0]['input']) {
+  const descriptor = tools.snapshot().tools.find(tool => tool.name === name)
+  if (descriptor === undefined) {
+    return Promise.resolve({
+      ok: false as const,
+      error: { code: 'TOOL_NOT_FOUND', message: `tool "${name}" is not registered` },
+    })
+  }
+  return tools.invoke({
+    callId: crypto.randomUUID(),
+    name,
+    toolRevision: descriptor.revision,
+    input,
+  }, 'test-session')
+}
+
 async function commandLog(path: string): Promise<readonly Record<string, unknown>[]> {
   try {
     return (await readFile(path, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
@@ -151,19 +167,19 @@ describe('CodeGraph portable extension', () => {
   it('leaves a runtime unchanged when CodeGraph is omitted', async () => {
     const ctx = new Context()
     await ctx.plugin(ToolRegistry)
-    expect(ctx.doppelgangerTools.list()).toEqual([])
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
     await ctx.fiber.dispose()
   })
 
   it('registers the bounded CodeGraph tool surface only when composed', async () => {
     const harness = await setup()
-    expect(harness.ctx.doppelgangerTools.list()).toEqual([
+    expect(harness.ctx.doppelgangerTools.snapshot().tools).toEqual([
       expect.objectContaining({ name: 'codegraph.explore', available: true }),
       expect.objectContaining({ name: 'codegraph.status', available: true }),
     ])
-    expect(harness.ctx.doppelgangerTools.list().every(tool => tool.approval === undefined)).toBe(true)
+    expect(harness.ctx.doppelgangerTools.snapshot().tools.every(tool => tool.approval === undefined)).toBe(true)
     await dispose(harness)
-    expect(harness.tools.list()).toEqual([])
+    expect(harness.tools.snapshot().tools).toEqual([])
   })
 
   it('normalizes strict bounded configuration and rejects unsupported values', () => {
@@ -196,7 +212,7 @@ describe('CodeGraph portable extension', () => {
     }))
     await ctx.plugin(ToolRegistry)
     const plugin = await ctx.plugin(CodeGraphPlugin, {})
-    expect(ctx.doppelgangerTools.list().map(tool => tool.name)).toEqual([
+    expect(ctx.doppelgangerTools.snapshot().tools.map(tool => tool.name)).toEqual([
       'codegraph.explore',
       'codegraph.status',
     ])
@@ -206,8 +222,8 @@ describe('CodeGraph portable extension', () => {
 
   it('accepts the tested standalone CodeGraph compatibility line', async () => {
     const harness = await setup()
-    const first = await harness.ctx.doppelgangerTools.invoke('codegraph.status', {})
-    const second = await harness.ctx.doppelgangerTools.invoke('codegraph.status', {})
+    const first = await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.status', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.status')!.revision, input: {} }, 'test-session')
+    const second = await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.status', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.status')!.revision, input: {} }, 'test-session')
     expect(first).toMatchObject({ ok: true, value: { binary: { available: true, version: '1.6.0', compatible: true } } })
     expect(second).toMatchObject({ ok: true })
     const log = await commandLog(harness.logPath)
@@ -217,11 +233,11 @@ describe('CodeGraph portable extension', () => {
 
   it('diagnoses absent malformed and unsupported CodeGraph binaries without installation', async () => {
     const absent = await setup({ executable: join(tmpdir(), 'missing-codegraph') })
-    expect(await absent.ctx.doppelgangerTools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await absent.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.status', toolRevision: absent.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.status')!.revision, input: {} }, 'test-session')).toMatchObject({
       ok: true,
       value: { binary: { available: false }, diagnosticCode: 'binary-unavailable' },
     })
-    expect(await absent.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'x' })).toMatchObject({
+    expect(await absent.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: absent.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'x' } }, 'test-session')).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_BINARY_UNAVAILABLE' },
     })
@@ -229,11 +245,11 @@ describe('CodeGraph portable extension', () => {
 
     vi.stubEnv('CODEGRAPH_FIXTURE_VERSION', '2.0.0')
     const unsupported = await setup()
-    expect(await unsupported.ctx.doppelgangerTools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await unsupported.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.status', toolRevision: unsupported.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.status')!.revision, input: {} }, 'test-session')).toMatchObject({
       ok: true,
       value: { binary: { version: '2.0.0', compatible: false }, diagnosticCode: 'binary-incompatible' },
     })
-    expect(await unsupported.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'x' })).toMatchObject({
+    expect(await unsupported.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: unsupported.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'x' } }, 'test-session')).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_BINARY_INCOMPATIBLE' },
     })
@@ -241,7 +257,7 @@ describe('CodeGraph portable extension', () => {
 
     vi.stubEnv('CODEGRAPH_FIXTURE_VERSION', 'not-a-version')
     const malformed = await setup()
-    expect(await malformed.ctx.doppelgangerTools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await malformed.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.status', toolRevision: malformed.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.status')!.revision, input: {} }, 'test-session')).toMatchObject({
       ok: true,
       value: { binary: { available: true, version: 'not-a-version', compatible: false }, diagnosticCode: 'binary-incompatible' },
     })
@@ -252,18 +268,18 @@ describe('CodeGraph portable extension', () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_FAIL_COMMAND', 'version')
     vi.stubEnv('CODEGRAPH_FIXTURE_STDERR', 'version unavailable')
     const harness = await setup()
-    expect(await harness.tools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await invokePortable(harness.tools, 'codegraph.status', {})).toMatchObject({
       ok: true,
       value: { binary: { available: false }, diagnosticCode: 'binary-unavailable' },
     })
     vi.stubEnv('CODEGRAPH_FIXTURE_FAIL_COMMAND', '')
-    expect(await harness.tools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await invokePortable(harness.tools, 'codegraph.status', {})).toMatchObject({
       ok: true,
       value: { binary: { available: true, compatible: true }, explorationSafe: true },
     })
     vi.stubEnv('CODEGRAPH_FIXTURE_FAIL_COMMAND', 'explore')
     vi.stubEnv('CODEGRAPH_FIXTURE_STDERR', 'query failed locally')
-    expect(await harness.tools.invoke('codegraph.explore', { query: 'failure' })).toMatchObject({
+    expect(await invokePortable(harness.tools, 'codegraph.explore', { query: 'failure' })).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_QUERY_FAILED', data: { stderr: 'query failed locally' } },
     })
@@ -274,8 +290,8 @@ describe('CodeGraph portable extension', () => {
 
   it('binds every CodeGraph command to Runtime Session workspace metadata', async () => {
     const harness = await setup()
-    await harness.ctx.doppelgangerTools.invoke('codegraph.status', {})
-    await harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: '--path /tmp/escape', maxFiles: 3 })
+    await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.status', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.status')!.revision, input: {} }, 'test-session')
+    await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: '--path /tmp/escape', maxFiles: 3 } }, 'test-session')
     const log = await commandLog(harness.logPath)
     for (const entry of log) expect(entry.cwd).toBe(harness.workspace)
     expect(log.map(entry => entry.args)).toEqual([
@@ -289,11 +305,11 @@ describe('CodeGraph portable extension', () => {
 
   it('rejects exploration without host-owned workspace metadata', async () => {
     const harness = await setup({}, false)
-    expect(await harness.ctx.doppelgangerTools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.status', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.status')!.revision, input: {} }, 'test-session')).toMatchObject({
       ok: true,
       value: { workspaceAvailable: false, diagnosticCode: 'workspace-unavailable' },
     })
-    expect(await harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'memory flow' })).toMatchObject({
+    expect(await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'memory flow' } }, 'test-session')).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_WORKSPACE_REQUIRED' },
     })
@@ -306,7 +322,7 @@ describe('CodeGraph portable extension', () => {
     const status = healthyStatus(harness.workspace)
     status.futureField = { ignored: true }
     await writeFile(harness.statusPath, JSON.stringify(status))
-    expect(await harness.ctx.doppelgangerTools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.status', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.status')!.revision, input: {} }, 'test-session')).toMatchObject({
       ok: true,
       value: {
         workspaceAvailable: true,
@@ -321,7 +337,7 @@ describe('CodeGraph portable extension', () => {
   it('rejects invalid or oversized CodeGraph status output', async () => {
     const invalid = await setup()
     await writeFile(invalid.statusPath, '{not json')
-    expect(await invalid.tools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await invokePortable(invalid.tools, 'codegraph.status', {})).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_STATUS_INVALID' },
     })
@@ -330,7 +346,7 @@ describe('CodeGraph portable extension', () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_FLOOD_COMMAND', 'status')
     vi.stubEnv('CODEGRAPH_FIXTURE_FLOOD_BYTES', String(CODEGRAPH_LIMITS.statusOutputBytes + 1))
     const oversized = await setup()
-    expect(await oversized.tools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await invokePortable(oversized.tools, 'codegraph.status', {})).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_OUTPUT_LIMIT' },
     })
@@ -341,7 +357,7 @@ describe('CodeGraph portable extension', () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_FAIL_COMMAND', 'status')
     vi.stubEnv('CODEGRAPH_FIXTURE_STDERR', 'status failed')
     const unsuccessful = await setup()
-    expect(await unsuccessful.tools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await invokePortable(unsuccessful.tools, 'codegraph.status', {})).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_STATUS_INVALID', data: { stderr: 'status failed' } },
     })
@@ -351,7 +367,7 @@ describe('CodeGraph portable extension', () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_COMMAND', 'status')
     vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_MS', '250')
     const timedOut = await setup({ statusTimeoutMs: 100, shutdownTimeoutMs: 20 })
-    expect(await timedOut.tools.invoke('codegraph.status', {})).toMatchObject({
+    expect(await invokePortable(timedOut.tools, 'codegraph.status', {})).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_TIMEOUT' },
     })
@@ -376,7 +392,7 @@ describe('CodeGraph portable extension', () => {
       const status = healthyStatus(harness.workspace)
       mutate(status)
       await writeFile(harness.statusPath, JSON.stringify(status))
-      const result = await harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'unsafe' })
+      const result = await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'unsafe' } }, 'test-session')
       expect(result).toMatchObject({ ok: false })
     }
     expect((await commandLog(harness.logPath)).every(entry => (entry.args as string[])[0] !== 'init' && (entry.args as string[])[0] !== 'index')).toBe(true)
@@ -388,7 +404,7 @@ describe('CodeGraph portable extension', () => {
     const status = healthyStatus(harness.workspace)
     status.pendingChanges = { added: 1, modified: 2, removed: 0 }
     await writeFile(harness.statusPath, JSON.stringify(status))
-    expect(await harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'capture path' })).toMatchObject({
+    expect(await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'capture path' } }, 'test-session')).toMatchObject({
       ok: true,
       value: { workspaceRoot: harness.workspace, maxFiles: 8, content: 'graph context' },
     })
@@ -410,8 +426,8 @@ describe('CodeGraph portable extension', () => {
     status.pendingChanges = { added: 0, modified: 1, removed: 0 }
     await writeFile(harness.statusPath, JSON.stringify(status))
     const [first, second] = await Promise.all([
-      harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'one' }),
-      harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'two' }),
+      harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'one' } }, 'test-session'),
+      harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'two' } }, 'test-session'),
     ])
     expect(first).toMatchObject({ ok: true })
     expect(second).toMatchObject({ ok: true })
@@ -426,15 +442,15 @@ describe('CodeGraph portable extension', () => {
   it('returns bounded graph-ranked source and call-path context', async () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_EXPLORE', '# Symbol\nsource\n\nCalls: a -> b\n')
     const harness = await setup()
-    expect(await harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: '  memory write path  ', maxFiles: 4 })).toEqual({
+    expect(await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: '  memory write path  ', maxFiles: 4 } }, 'test-session')).toEqual({
       ok: true,
       value: { workspaceRoot: harness.workspace, maxFiles: 4, content: '# Symbol\nsource\n\nCalls: a -> b' },
     })
-    expect(await harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: '' })).toMatchObject({
+    expect(await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: '' } }, 'test-session')).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_INVALID_INPUT' },
     })
-    expect(await harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'x', path: '/tmp' })).toMatchObject({
+    expect(await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'x', path: '/tmp' } }, 'test-session')).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_INVALID_INPUT' },
     })
@@ -445,7 +461,7 @@ describe('CodeGraph portable extension', () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_COMMAND', 'explore')
     vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_MS', '100')
     const timeout = await setup({ exploreTimeoutMs: 10, shutdownTimeoutMs: 10 })
-    expect(await timeout.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'slow' })).toMatchObject({
+    expect(await timeout.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: timeout.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'slow' } }, 'test-session')).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_TIMEOUT' },
     })
@@ -455,7 +471,7 @@ describe('CodeGraph portable extension', () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_FLOOD_COMMAND', 'explore')
     vi.stubEnv('CODEGRAPH_FIXTURE_FLOOD_BYTES', '2048')
     const output = await setup({ maximumExploreOutputBytes: 1024 })
-    expect(await output.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'large' })).toMatchObject({
+    expect(await output.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: output.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'large' } }, 'test-session')).toMatchObject({
       ok: false,
       error: { code: 'CODEGRAPH_OUTPUT_LIMIT' },
     })
@@ -464,7 +480,7 @@ describe('CodeGraph portable extension', () => {
 
   it('spawns CodeGraph without a shell telemetry or caller-controlled arguments', async () => {
     const harness = await setup()
-    await harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: '$(touch /tmp/never)', maxFiles: 2 })
+    await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: '$(touch /tmp/never)', maxFiles: 2 } }, 'test-session')
     const log = await commandLog(harness.logPath)
     expect(log).not.toEqual([])
     for (const entry of log) {
@@ -518,10 +534,10 @@ describe('CodeGraph portable extension', () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_COMMAND', 'explore')
     vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_MS', '100')
     const harness = await setup({ maximumConcurrentExplorations: 1, maximumQueuedExplorations: 1 })
-    const first = harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'one' })
+    const first = harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'one' } }, 'test-session')
     await new Promise(resolve => setTimeout(resolve, 25))
-    const second = harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'two' })
-    const third = await harness.ctx.doppelgangerTools.invoke('codegraph.explore', { query: 'three' })
+    const second = harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'two' } }, 'test-session')
+    const third = await harness.ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: harness.ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: { query: 'three' } }, 'test-session')
     expect(third).toMatchObject({ ok: false, error: { code: 'CODEGRAPH_QUERY_FAILED' } })
     expect(await first).toMatchObject({ ok: true })
     expect(await second).toMatchObject({ ok: true })
@@ -533,17 +549,17 @@ describe('CodeGraph portable extension', () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_MS', '10000')
     vi.stubEnv('CODEGRAPH_FIXTURE_IGNORE_SIGTERM', '1')
     const harness = await setup({ shutdownTimeoutMs: 20, maximumConcurrentExplorations: 1, maximumQueuedExplorations: 1 })
-    const invocation = harness.tools.invoke('codegraph.explore', { query: 'long running' })
+    const invocation = invokePortable(harness.tools, 'codegraph.explore', { query: 'long running' })
     await vi.waitFor(async () => {
       const log = await commandLog(harness.logPath)
       expect(log.some(entry => (entry.args as string[] | undefined)?.[0] === 'explore')).toBe(true)
     })
-    const queued = harness.tools.invoke('codegraph.explore', { query: 'queued' })
+    const queued = invokePortable(harness.tools, 'codegraph.explore', { query: 'queued' })
     await harness.plugin.dispose()
     expect(await invocation).toMatchObject({ ok: false, error: { code: 'CODEGRAPH_DISPOSED' } })
     expect(await queued).toMatchObject({ ok: false, error: { code: 'CODEGRAPH_DISPOSED' } })
-    expect(await harness.tools.invoke('codegraph.status', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
-    expect(harness.tools.list()).toEqual([])
+    expect(await invokePortable(harness.tools, 'codegraph.status', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
+    expect(harness.tools.snapshot().tools).toEqual([])
     const log = await commandLog(harness.logPath)
     expect(log.filter(entry => (entry.args as string[] | undefined)?.[0] === 'explore')).toHaveLength(1)
     expect(log.some(entry => entry.signal === 'SIGTERM' && entry.command === 'explore')).toBe(true)
@@ -583,19 +599,19 @@ describe('CodeGraph portable extension', () => {
       runtimePlugins: { host },
     })
     if (tools === undefined) throw new Error('host tools did not activate')
-    expect(await tools.invoke('codegraph.explore', { query: 'before' })).toMatchObject({ ok: true, value: { maxFiles: 3 } })
+    expect(await invokePortable(tools, 'codegraph.explore', { query: 'before' })).toMatchObject({ ok: true, value: { maxFiles: 3 } })
 
     const committed = reloads.next('valid CodeGraph replacement')
     await writeFile(loaderPath, codeGraphLoader(fixtureExecutable, 5))
     const valid = await committed
-    expect(await tools.invoke('codegraph.explore', { query: 'after' })).toMatchObject({ ok: true, value: { maxFiles: 5 } })
+    expect(await invokePortable(tools, 'codegraph.explore', { query: 'after' })).toMatchObject({ ok: true, value: { maxFiles: 5 } })
 
     const rejected = failures.next('invalid CodeGraph replacement')
     await writeFile(loaderPath, codeGraphLoader(fixtureExecutable, 0))
     const invalid = await rejected
     expect(invalid.compositionRevision).toBe(valid.compositionRevision)
     expect(invalid.diagnostics.reload).toMatchObject({ state: 'failed', error: expect.stringContaining('defaultMaxFiles') })
-    expect(await tools.invoke('codegraph.explore', { query: 'retained' })).toMatchObject({ ok: true, value: { maxFiles: 5 } })
+    expect(await invokePortable(tools, 'codegraph.explore', { query: 'retained' })).toMatchObject({ ok: true, value: { maxFiles: 5 } })
 
     const removed = reloads.next('CodeGraph removal')
     await writeFile(loaderPath, JSON.stringify([{
@@ -604,8 +620,8 @@ describe('CodeGraph portable extension', () => {
       isolate: { doppelgangerTools: 'session' },
     }]))
     await removed
-    expect(tools.list()).toEqual([])
-    expect(await tools.invoke('codegraph.status', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
+    expect(tools.snapshot().tools).toEqual([])
+    expect(await invokePortable(tools, 'codegraph.status', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
     await session.dispose()
     await runtime.dispose()
   })
@@ -623,7 +639,7 @@ describe('CodeGraph portable extension', () => {
     const observer: Plugin = {
       name: 'codegraph-test-observer',
       inject: ['doppelgangerTools'],
-      apply(child) { projected = child.doppelgangerTools.list().map(tool => tool.name) },
+      apply(child) { projected = child.doppelgangerTools.snapshot().tools.map(tool => tool.name) },
     }
     ctx.loader.builtins.metadata = metadata
     ctx.loader.builtins.tools = ToolRegistry

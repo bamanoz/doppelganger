@@ -44,7 +44,7 @@ describe('Evolution protocol', () => {
     const context = await base(home)
     await context.plugin(EvolutionService, { id: () => crypto.randomUUID() })
     const protocol = await context.plugin(EvolutionProtocolPlugin)
-    const tools = context.doppelgangerTools.list()
+    const tools = context.doppelgangerTools.snapshot().tools
     expect(tools.map(tool => tool.name)).toEqual([
       'evolution.inspect',
       'evolution.list',
@@ -62,30 +62,30 @@ describe('Evolution protocol', () => {
       additionalProperties: false,
     })
     expect(transition?.inputSchema).not.toHaveProperty('oneOf')
-    const invalid = await context.doppelgangerTools.invoke('evolution.propose', {
+    const invalid = await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'evolution.propose', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'evolution.propose')!.revision, input: {
       operationId: 'invalid', kind: 'capability', scope: 'global', dedupeKey: 'capability.invalid',
       title: 'Invalid override', rationale: 'Actor override must be rejected.', actorId: 'other',
-    })
+    } }, 'test-session')
     expect(invalid).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
-    const proposed = await context.doppelgangerTools.invoke('evolution.propose', {
+    const proposed = await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'evolution.propose', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'evolution.propose')!.revision, input: {
       operationId: 'proposal', kind: 'capability', scope: 'global', dedupeKey: 'capability.search',
       title: 'Semantic search', rationale: 'Repeated repository searches need semantic retrieval.', tags: ['search'],
-    })
+    } }, 'test-session')
     expect(proposed.ok).toBe(true)
     const proposal = object(proposed.ok ? proposed.value : null)
     if (typeof proposal.id !== 'string') throw new Error('expected proposal id')
-    const irrelevant = await context.doppelgangerTools.invoke('evolution.transition', {
+    const irrelevant = await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'evolution.transition', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'evolution.transition')!.revision, input: {
       operationId: 'irrelevant', id: proposal.id, expectedRevision: 1,
       target: 'researching', researchQuestion: 'Which option?', reviewSummary: 'Wrong target metadata.',
-    })
+    } }, 'test-session')
     expect(irrelevant).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
-    const stale = await context.doppelgangerTools.invoke('evolution.transition', {
+    const stale = await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'evolution.transition', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'evolution.transition')!.revision, input: {
       operationId: 'stale', id: proposal.id, expectedRevision: 2,
       target: 'researching', researchQuestion: 'Which option?',
-    })
+    } }, 'test-session')
     expect(stale).toMatchObject({ ok: false, error: { code: 'REVISION_CONFLICT' } })
     await protocol.dispose()
-    expect(context.doppelgangerTools.list()).toEqual([])
+    expect(context.doppelgangerTools.snapshot().tools).toEqual([])
     expect((await context.doppelgangerContext.resolve({ turn: { input: 'semantic search' }, tokenBudget: 1000 })).contributions).toEqual([])
     await context.fiber.dispose()
   })
@@ -170,12 +170,12 @@ describe('Evolution protocol', () => {
     const context = await base(home)
     const unsupported = context.plugin(EvolutionPlugin, { unsupported: true } as unknown as EvolutionPluginConfig)
     await expect(unsupported.await()).rejects.toThrow('evolution.unsupported is not supported')
-    expect(context.doppelgangerTools.list()).toEqual([])
+    expect(context.doppelgangerTools.snapshot().tools).toEqual([])
     await context.fiber.dispose()
     const unbound = await base(home, null)
     const plugin = unbound.plugin(EvolutionPlugin, {})
     await expect(plugin.await()).rejects.toThrow('Evolution requires a bound host actor')
-    expect(unbound.doppelgangerTools.list()).toEqual([])
+    expect(unbound.doppelgangerTools.snapshot().tools).toEqual([])
     await unbound.fiber.dispose()
   })
 })

@@ -117,7 +117,7 @@ describe('packed Evolution package', () => {
       'await ctx.plugin(SqlitePlugin, { home }).await()',
       'await ctx.plugin(EvolutionPlugin, { remindersEnabled: false }).await()',
       "const serviceActive = ctx.get('doppelgangerEvolution') !== undefined",
-      'const tools = ctx.doppelgangerTools.list().map(tool => tool.name)',
+      'const tools = ctx.doppelgangerTools.snapshot().tools.map(tool => tool.name)',
       'await ctx.fiber.dispose()',
       'process.stdout.write(JSON.stringify({ inactiveBeforeComposition, serviceActive, tools }))',
       '',

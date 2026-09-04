@@ -43,7 +43,10 @@ function toolView(descriptor: ToolDescriptor): JsonValue {
     inputSchema: descriptor.inputSchema,
     available: descriptor.available,
     ...(descriptor.approval === undefined ? {} : {
-      approval: { policy: descriptor.approval.policy, reason: descriptor.approval.reason },
+      approval: {
+        policy: descriptor.approval.policy,
+        ...(descriptor.approval.reason === undefined ? {} : { reason: descriptor.approval.reason }),
+      },
     }),
   }))
 }
@@ -87,7 +90,7 @@ export function inspectQuery(
       referencedTypes,
     })
   } else {
-    const tools = ctx.doppelgangerTools.list()
+    const tools = ctx.doppelgangerTools.snapshot().tools
     const descriptor = tools.find(candidate => candidate.name === name)
     if (descriptor === undefined) throw new RuntimePluginError('INSPECT_NOT_FOUND', `tool "${name}" is not currently registered`)
     result = toolView(descriptor)

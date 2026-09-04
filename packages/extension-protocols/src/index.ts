@@ -18,20 +18,44 @@ export {
   type ContextTurn,
 } from './context.ts'
 export {
+  HOST_CAPABILITIES_SERVICE,
+  RUNTIME_HOST_PROTOCOL_VERSION,
+  defineRuntimeHostCapabilities,
+  provideRuntimeHostCapabilities,
+  type ContextDelivery,
+  type RuntimeHostCapabilities,
+  type ToolDelivery,
+} from './host-capabilities.ts'
+export {
+  createRuntimeHostPlugin,
+  type HostContextRequest,
+  type RuntimeHostBinding,
+  type RuntimeHostBridge,
+} from './runtime-host.ts'
+export {
   ToolInvocationError,
   ToolRegistry,
+  digestToolInput,
   type JsonPrimitive,
-  type ToolApprovalRequirement,
   type JsonValue,
+  type ToolApprovalGrant,
+  type ToolApprovalRequirement,
+  type ToolCancellationRequest,
+  type ToolCancellationResult,
+  type ToolCatalogSnapshot,
   type ToolDefinition,
   type ToolDescriptor,
+  type ToolInvocationContext,
   type ToolInvocationErrorData,
+  type ToolInvocationRequest,
   type ToolInvocationResult,
   type ToolRegistration,
+  type ToolSetRegistration,
 } from './tools.ts'
 export {
   LIFECYCLE_PROTOCOL_VERSION,
   normalizeLifecycleEvent,
+  isLifecycleEventType,
   publishLifecycleEvent,
   serializeLifecycleValue,
   type BoundedLifecycleValue,

@@ -55,14 +55,14 @@ smoke('CodeGraph standalone smoke', () => {
     await ctx.plugin(ToolRegistry)
     const plugin = await ctx.plugin(CodeGraphPlugin, {})
     try {
-      expect(await ctx.doppelgangerTools.invoke('codegraph.status', {})).toMatchObject({
+      expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.status', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.status')!.revision, input: {} }, 'test-session')).toMatchObject({
         ok: true,
         value: { workspaceAvailable: true, workspaceRoot: workspace, explorationSafe: true },
       })
-      expect(await ctx.doppelgangerTools.invoke('codegraph.explore', {
+      expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'codegraph.explore', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'codegraph.explore')!.revision, input: {
         query: 'Where is the greeting assembled and called?',
         maxFiles: 2,
-      })).toMatchObject({
+      } }, 'test-session')).toMatchObject({
         ok: true,
         value: { workspaceRoot: workspace, maxFiles: 2, content: expect.any(String) },
       })

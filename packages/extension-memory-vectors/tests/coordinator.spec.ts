@@ -256,18 +256,18 @@ describe('memory vector coordinator', () => {
       retryBaseMs: 2,
       operationTimeoutMs: 100,
     })
-    expect(context.doppelgangerTools.list().map(tool => tool.name)).toEqual([
+    expect(context.doppelgangerTools.snapshot().tools.map(tool => tool.name)).toEqual([
       'memory.semantic.maintenance',
       'memory.semantic.rebuild',
       'memory.semantic.rollback',
       'memory.semantic.status',
     ])
-    const status = await context.doppelgangerTools.invoke('memory.semantic.status', {})
+    const status = await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'memory.semantic.status', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.semantic.status')!.revision, input: {} }, 'test-session')
     expect(status).toMatchObject({ ok: true, value: { active: true, backend: 'sqlite_exact' } })
     expect(JSON.stringify(status)).not.toMatch(/content|password|secret/iu)
-    expect(await context.doppelgangerTools.invoke('memory.semantic.maintenance', { kind: 'compact' }))
+    expect(await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'memory.semantic.maintenance', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.semantic.maintenance')!.revision, input: { kind: 'compact' } }, 'test-session'))
       .toMatchObject({ ok: true, value: { kind: 'compact', outcome: 'noop' } })
-    expect(await context.doppelgangerTools.invoke('memory.semantic.rollback', { generationId: 'unknown' }))
+    expect(await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'memory.semantic.rollback', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.semantic.rollback')!.revision, input: { generationId: 'unknown' } }, 'test-session'))
       .toMatchObject({ ok: false, error: { code: 'SEMANTIC_OPERATION_FAILED' } })
   })
 })

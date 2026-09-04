@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,14 +12,22 @@ import {
 import {
   LIFECYCLE_PROTOCOL_VERSION,
   createActorIdentity,
+  digestToolInput,
   serializeLifecycleValue,
   type JsonValue,
   type LifecycleError,
   type LifecycleEvent,
+  type ToolCatalogSnapshot,
   type ToolDescriptor,
 } from '@doppelganger/doppelganger-protocols'
 import { OmpAdapterSession, discoverOmpProject, type OmpChildFactory } from './adapter.ts'
-import { defineSerializedOmpActivation, type SerializedOmpActivation } from './contracts.ts'
+import {
+  defineSerializedOmpActivation,
+  defineToolCancellationResult,
+  defineToolInvocationResult,
+  type SerializedOmpActivation,
+} from './contracts.ts'
+import { OMP_HOST_EVENT_PROTOCOL_VERSION } from './omp-host-events.ts'
 import { NodeOmpChildFactory } from './process.ts'
 
 const INITIALIZE_TOOL = 'doppelganger_initialize'
@@ -153,9 +162,32 @@ function validateToolJsonSchema(schema: unknown, path = '$'): void {
   }
 }
 
+function validationOnlyJsonSchema(schema: unknown): unknown {
+  const normalized = structuredClone(schema)
+  const stripDefaults = (candidate: unknown): void => {
+    if (typeof candidate === 'boolean') return
+    const node = schemaObject(candidate, '$')
+    delete node.default
+
+    for (const keyword of ['properties', '$defs', 'definitions'] as const) {
+      if (node[keyword] === undefined) continue
+      for (const child of Object.values(schemaObject(node[keyword], '$'))) stripDefaults(child)
+    }
+    for (const keyword of ['allOf', 'anyOf', 'prefixItems'] as const) {
+      if (node[keyword] === undefined) continue
+      for (const child of schemaArray(node[keyword], '$', true)) stripDefaults(child)
+    }
+    for (const keyword of ['additionalProperties', 'items', 'not'] as const) {
+      if (node[keyword] !== undefined && typeof node[keyword] !== 'boolean') stripDefaults(node[keyword])
+    }
+  }
+  stripDefaults(normalized)
+  return normalized
+}
+
 export function ompToolParametersFromJsonSchema(schema: unknown) {
   validateToolJsonSchema(schema)
-  return fromJsonSchema(schema)
+  return fromJsonSchema(validationOnlyJsonSchema(schema))
 }
 
 export interface OmpActivationRequest {
@@ -235,6 +267,9 @@ interface OmpRuntimeBinding {
   readonly activeDescriptors: Map<string, ToolDescriptor>
   readonly registeredProxyNames: Map<string, string>
   committed: boolean
+  projectedCatalogRevision: string | undefined
+  contextRequestOrdinal: number
+  ompEventOrdinal: number
   turn: ActiveTurn | undefined
   turnOrdinal: number
   preCompactionOrdinal: number
@@ -375,11 +410,11 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
 
     const setProjectedTools = async (
       binding: OmpRuntimeBinding,
-      tools: readonly ToolDescriptor[],
+      catalog: ToolCatalogSnapshot,
       ctx: ExtensionContext,
     ) => {
-      if (!isCurrent(binding)) return
-      const available = tools.filter(tool => tool.available)
+      if (!isCurrent(binding) || binding.projectedCatalogRevision === catalog.revision) return
+      const available = catalog.tools.filter(tool => tool.available)
       const candidates: Array<{ readonly descriptor: ToolDescriptor; readonly name: string }> = []
       const candidateNames = new Map<string, Set<string>>()
       const seenPortableNames = new Set<string>()
@@ -428,40 +463,69 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
         }
 
         try {
+          const capturedRevision = descriptor.revision
           const projected = {
             name,
-            label: `Doppelganger: ${descriptor.name}`,
+            label: `Doppelganger: ${descriptor.label}`,
             description: descriptor.description,
             parameters: ompToolParametersFromJsonSchema(descriptor.inputSchema),
             loadMode: descriptor.approval === undefined ? 'discoverable' as const : 'essential' as const,
             approval: () => {
-              const approval = isCurrent(binding)
-                ? binding.activeDescriptors.get(descriptor.name)?.approval
-                : undefined
+              const active = isCurrent(binding) ? binding.activeDescriptors.get(descriptor.name) : undefined
+              const approval = active?.revision === capturedRevision ? active.approval : undefined
               return approval === undefined
                 ? 'exec' as const
-                : { tier: 'write', policy: 'prompt', reason: approval.reason } as const
+                : {
+                    tier: 'write' as const,
+                    policy: 'prompt' as const,
+                    ...(approval.reason === undefined ? {} : { reason: approval.reason }),
+                  }
             },
+
             formatApprovalDetails: (params: unknown) => {
               const active = isCurrent(binding) ? binding.activeDescriptors.get(descriptor.name) : undefined
-              if (active?.approval === undefined) return
+              if (active?.revision !== capturedRevision || active.approval === undefined) return
               return [
                 `Portable tool: ${active.name}`,
                 `Arguments: ${boundedApprovalArguments(params)}`,
               ]
             },
-            async execute(_callId: string, params: unknown) {
+            async execute(callId: string, params: unknown, signal?: AbortSignal) {
               const active = isCurrent(binding) ? binding.activeDescriptors.get(descriptor.name) : undefined
               const connection = binding.adapter.connection()
-              if (active === undefined || connection === undefined
+              if (active?.revision !== capturedRevision || connection === undefined
                 || binding.registeredProxyNames.get(name) !== descriptor.name) {
                 return textResult({ code: 'RUNTIME_UNAVAILABLE', message: 'runtime tool is inactive' }, true)
               }
+              if (signal?.aborted) return textResult({ code: 'TOOL_CANCELLED', message: 'tool invocation was cancelled' }, true)
+              const input = jsonValue(params)
+              const turnId = binding.turn?.id
+              const cancel = () => {
+                const reason = typeof signal?.reason === 'string' && signal.reason.trim().length > 0
+                  ? signal.reason
+                  : 'OMP tool invocation cancelled'
+                void connection.request('tools.cancel', { callId, reason })
+                  .then(defineToolCancellationResult)
+                  .catch(() => undefined)
+              }
+              signal?.addEventListener('abort', cancel, { once: true })
               try {
-                const result = await connection.request('tools.invoke', {
+                const result = defineToolInvocationResult(await connection.request('tools.invoke', {
+                  callId,
+                  ...(turnId === undefined ? {} : { turnId }),
                   name: active.name,
-                  input: jsonValue(params),
-                }) as { ok: boolean; value?: unknown; error?: unknown }
+                  toolRevision: capturedRevision,
+                  input,
+                  ...(active.approval === undefined ? {} : {
+                    approval: {
+                      kind: 'one-shot',
+                      grantId: randomUUID(),
+                      callId,
+                      toolRevision: capturedRevision,
+                      inputDigest: digestToolInput(input),
+                    },
+                  }),
+                }))
                 if (!isCurrent(binding)) {
                   return textResult({ code: 'RUNTIME_UNAVAILABLE', message: 'runtime tool is inactive' }, true)
                 }
@@ -474,6 +538,8 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
                   })
                 }
                 return textResult({ code: 'TOOL_PROXY_FAILED', message: cause instanceof Error ? cause.message : String(cause) }, true)
+              } finally {
+                signal?.removeEventListener('abort', cancel)
               }
             },
           }
@@ -491,12 +557,15 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       if (!isCurrent(binding)) return
       binding.activeDescriptors.clear()
       for (const [name, descriptor] of next) binding.activeDescriptors.set(name, descriptor)
+      binding.projectedCatalogRevision = catalog.revision
       const initialize = binding.adapter.snapshot().initializationAvailable ? [INITIALIZE_TOOL] : []
       await pi.setActiveTools([...nativeActiveTools(), ...projectedNames, ...initialize])
     }
 
     const publish = async (binding: OmpRuntimeBinding, event: LifecycleEvent) => {
       if (!isCurrent(binding)) return
+      const snapshot = binding.adapter.snapshot()
+      if (!snapshot.capabilities?.lifecycle.events.includes(event.type)) return
       const connection = binding.adapter.connection()
       if (connection === undefined) return
       try {
@@ -584,10 +653,10 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       const adapter = new OmpAdapterSession({
         ...(activation === undefined ? {} : { activation }),
         childFactory,
-        onToolsChanged: tools => {
+        onCatalogChanged: catalog => {
           if (!candidate.committed) return
           void serialize(async () => {
-            if (isCurrent(candidate)) await setProjectedTools(candidate, tools, ctx)
+            if (isCurrent(candidate)) await setProjectedTools(candidate, catalog, ctx)
           })
         },
         notifyDiagnostic: problem => {
@@ -602,7 +671,10 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
         activeDescriptors: new Map(),
         registeredProxyNames: new Map(),
         committed: false,
+        projectedCatalogRevision: undefined,
+        contextRequestOrdinal: 0,
         turnOrdinal: 0,
+        ompEventOrdinal: 0,
         preCompactionOrdinal: 0,
         turn: undefined,
       }
@@ -625,7 +697,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
 
       candidate.committed = true
       current = candidate
-      await setProjectedTools(candidate, snapshot.tools, ctx)
+      await setProjectedTools(candidate, snapshot.catalog, ctx)
       await publish(candidate, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'session-started',
@@ -688,6 +760,35 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       },
     })
 
+    pi.on('todo_reminder', async (event) => {
+      const binding = current
+      if (binding === undefined || !isCurrent(binding)) return
+      const connection = binding.adapter.connection()
+      if (connection === undefined) return
+      try {
+        await connection.request('omp.todo-reminder', {
+          protocolVersion: OMP_HOST_EVENT_PROTOCOL_VERSION,
+          type: 'todo-reminder',
+          deliveryId: deliveryId(binding.sessionId, 'omp-todo-reminder', String(++binding.ompEventOrdinal)),
+          sessionId: binding.sessionId,
+          timestamp: Date.now(),
+          todos: event.todos.map(todo => ({
+            content: todo.content,
+            status: todo.status,
+            ...(todo.blocker === undefined ? {} : { blocker: todo.blocker }),
+          })),
+          attempt: event.attempt,
+          maxAttempts: event.maxAttempts,
+        })
+      } catch (cause) {
+        if (isCurrent(binding)) {
+          await binding.adapter.fail({
+            code: 'OMP_HOST_EVENT_FORWARD_FAILED',
+            message: cause instanceof Error ? cause.message : String(cause),
+          })
+        }
+      }
+    })
     pi.on('session_start', async (_event, ctx) => { await requestBinding(ctx) })
     pi.on('session_switch', async (_event, ctx) => { await requestBinding(ctx) })
     pi.on('session_branch', async (_event, ctx) => { await requestBinding(ctx) })
@@ -695,35 +796,24 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
     pi.on('before_agent_start', async (event, ctx) => {
       const binding = await requestBinding(ctx)
       if (binding === undefined || !isCurrent(binding)) return
-      binding.turn = {
+      const activeTurn = {
         id: `${binding.sessionId}:turn:${++binding.turnOrdinal}`,
         principalInput: event.prompt,
         started: false,
       }
-    })
-    pi.on('context', async (event) => {
-      const binding = current
-      const activeTurn = binding?.turn
-      if (binding === undefined || activeTurn === undefined || !isCurrent(binding)) return
+      binding.turn = activeTurn
       try {
         const connection = binding.adapter.connection()
         if (connection === undefined) return
         const assembled = await connection.request('context.resolve', {
-          input: activeTurn.principalInput,
-          turnId: activeTurn.id,
+          requestId: `${binding.sessionId}:context:${++binding.contextRequestOrdinal}`,
+          turn: { input: activeTurn.principalInput, turnId: activeTurn.id },
           tokenBudget: options.tokenBudget ?? 4000,
         }) as { content: string }
         if (!isCurrent(binding) || binding.turn !== activeTurn || assembled.content.length === 0) return
-        return {
-          messages: [...event.messages, {
-            role: 'developer' as const,
-            content: [{ type: 'text' as const, text: assembled.content }],
-            attribution: 'agent' as const,
-            timestamp: Date.now(),
-          }],
-        }
+        return { systemPrompt: [...event.systemPrompt, assembled.content] }
       } catch (cause) {
-        if (isCurrent(binding)) {
+        if (isCurrent(binding) && binding.turn === activeTurn) {
           await binding.adapter.fail({
             code: 'CONTEXT_PROJECTION_FAILED',
             message: cause instanceof Error ? cause.message : String(cause),

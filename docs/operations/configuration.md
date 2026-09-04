@@ -34,7 +34,28 @@ The default roster searches roots in this order:
 
 Hosts may disable either derived root and may configure no deployment default. IDs are lowercase kebab-case directory names. The first root containing an ID wins; a broken winner remains visible and blocks lower copies rather than silently falling through. `system` and `user` are authoring trust labels, not security sandboxes: all activated plugins are trusted process code and can exceed any product-level writable policy. Persona Authoring's logical targets constrain that specific plugin; they do not sandbox a malicious Runtime Preset.
 
-The `runtime-presets` package exposes this roster directly through `RuntimePresetRoster` and as the Cordis `doppelgangerRuntimePresets` service. The Cordis plugin defaults `defaultRuntimePreset` to `standard`; pass `null` to make the deployment explicitly defaultless. A compatible host may accept actor identity as a host/session option outside this runtime home. For OMP, the neutral `@doppelganger/doppelganger-omp` entrypoint reads a non-empty `DOPPELGANGER_ACTOR_ID` and passes it to `createDoppelgangerOmpExtension`; the repository-local extension only re-exports that entrypoint. Neither `config.yaml`, project manifests, Runtime Presets, nor patches may select or override the actor binding.
+The `runtime-presets` package exposes this roster directly through `RuntimePresetRoster` and as the Cordis `doppelgangerRuntimePresets` service. The Cordis plugin defaults `defaultRuntimePreset` to `standard`; pass `null` to make the deployment explicitly defaultless. A compatible host may mount Actor Identity as a separate protected session plugin outside this runtime home and the shared Runtime Host API. For OMP, the neutral `@doppelganger/doppelganger-omp` entrypoint reads a non-empty `DOPPELGANGER_ACTOR_ID` and passes it to `createDoppelgangerOmpExtension`; the repository-local extension only re-exports that entrypoint. Neither `config.yaml`, project manifests, Runtime Presets, patches, Persona, nor the shared bridge may select or override the actor binding.
+
+## OMP loading mode selection
+
+OMP plugin enablement belongs to the active OMP profile. Choose one Doppelganger loading mode for each invocation and use the same profile when changing plugin state and launching OMP. For the default profile, omit `--profile <name>` from these examples.
+
+Linked-plugin mode is for workspaces that do not expose the repository-local Doppelganger extension:
+
+```bash
+omp --profile <name> plugin link ./packages/omp
+omp --profile <name> plugin enable @doppelganger/doppelganger-omp
+DOPPELGANGER_HOME=/absolute/path/to/home omp --profile <name> --cwd /absolute/path/outside/doppelganger
+```
+
+Project-local dogfood mode uses `.omp/extensions/doppelganger.ts` and requires the linked package to be disabled in that profile:
+
+```bash
+omp --profile <name> plugin disable @doppelganger/doppelganger-omp
+DOPPELGANGER_HOME=/absolute/path/to/home DOPPELGANGER_ACTOR_ID=my-actor omp --profile <name> --cwd /absolute/path/to/doppelganger
+```
+
+Disabling the plugin changes only OMP's profile-owned plugin state. It does not remove the project extension, change `DOPPELGANGER_HOME`, or alter Runtime Preset selection. OMP discovers project extensions and installed plugin entrypoints independently and deduplicates only identical resolved absolute paths; enabling both distinct paths binds two adapters that may each start a child runtime. Doppelganger does not arbitrate those adapters with a singleton or lease and does not restrict separate OMP processes from opening the same session.
 
 ## Copy-only authoring
 
@@ -77,6 +98,10 @@ Evolution is opt-in Loader configuration. The row uses `@doppelganger/doppelgang
 Global Evolution state is plugin-owned SQLite. Project capability opportunities are canonical Git-visible YAML under `<workspaceRoot>/.doppelganger/evolution/opportunities/`; no directory is created before the first project mutation. Malformed documents produce diagnostics and are never rewritten automatically. Removing the Loader row and starting a new Runtime Session removes active Evolution behavior but preserves both stores. See [Evolution](../features/evolution.md) for the exact row and storage contract.
 CodeGraph is opt-in Loader configuration. The row uses `@doppelganger/doppelganger-codegraph/loader`, requires `doppelgangerRuntimeSession` and `doppelgangerTools`, and isolates both services in the session realm. It accepts only an optional absolute `executable` plus bounded status, sync, exploration, shutdown, output, concurrency, queue, and default-file-limit values. Omission resolves `codegraph` from the process environment. Unknown keys, relative executables, and out-of-range values fail activation. The tool surface cannot override the executable, workspace, environment, index path, or upstream command. Installation alone is inert; shipped `standard` omits the row. See [CodeGraph](../features/codegraph.md) for the exact configuration ceilings and trust boundary.
 
+MCP tool import is opt-in Loader configuration. The row uses `@doppelganger/doppelganger-extension-mcp/loader`, requires session-isolated `doppelgangerTools`, and provides session-isolated `doppelgangerMcp` diagnostics. Its required `servers` object maps stable lowercase-kebab IDs to enabled stdio or stateless Streamable HTTP transports. Each server optionally accepts `startupTimeoutMs`, a safe integer from 1 through 600000 milliseconds that defaults to 60000 and bounds its complete initial connection, discovery, validation, and commit sequence. Stdio entries accept the exact command, bounded string arguments, optional absolute `cwd`, and target environment variables resolved only from `{ env: "SOURCE_NAME" }` references. HTTP entries accept the exact absolute credential-free HTTP or HTTPS URL and referenced header values. Per-server exact case-sensitive tool policies may disable a tool, assign a lowercase-kebab alias, or add `approval: { policy: "required", reason }`. Unknown keys and invalid values reject activation or reload synchronously.
+
+Each configured MCP executable, package-manager command, or endpoint is a trusted operator-owned external dependency with the Runtime Session user's effective authority. Doppelganger does not install, download, upgrade, pin, rewrite, substitute, retry, or choose a fallback server. Valid configuration publishes a feature-local `connecting` slot and returns from Loader activation/update before external readiness; missing credentials, unavailable commands/endpoints, protocol failures, and discovery failures become per-server operational `failed` state without invalidating the Runtime Session. Credential values remain in process environment and transport construction; they are not persisted by the plugin, projected into portable descriptors, or returned in snapshots. Removing the row or ending the Runtime Session cancels startup and active calls, withdraws imported tool sets, observes background settlements, and closes owned processes and transports without editing Runtime Presets or native host MCP configuration.
+
 The user owns standalone CodeGraph installation and runs `codegraph init` in each intended workspace. The resulting `.codegraph/` directory is derived project state. Doppelganger never creates, rebuilds, deletes, watches, serves, or globally configures it; `codegraph.explore` may run only bounded `sync --quiet` maintenance when an existing index is incrementally stale. Removing the Loader row or ending the Runtime Session preserves the index.
 
 Persona Authoring is opt-in Loader configuration. `writableTargets` accepts only selected logical trait identities such as `trait:evolving-profile`; identity, filesystem paths, globs, absent traits, and model-selected policy are rejected. The plugin serializes same-session mutations, uses a bounded adjacent interprocess lock and exact-byte compare-and-swap, and performs no autonomous work. Its transaction rollback is not persistent history: user-owned preset backup or version control remains the durable recovery mechanism, including the crash window after atomic replacement but before HMR confirmation.
@@ -92,7 +117,7 @@ selected runtime.cordis.yml
 $DOPPELGANGER_HOME/runtime.cordis.patch.yml
 <project>/.doppelganger/runtime.cordis.patch.yml
 explicit host/session patches
-protected runtime-owned host bridge
+protected runtime-owned plugins (session metadata, shared Runtime Host, optional Actor Identity, typed host extensions)
 ```
 
 Missing optional patches are no-ops. Valid changes reload the active session; invalid changes retain the previous audited generation. No normalized Loader input is written back to authored files.

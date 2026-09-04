@@ -14,7 +14,7 @@ const declarations = await readCatalogSources(repositoryRoot)
 const requiredDeclarations = [
   ['packages/extension-protocols/src/context.ts', /export class ContextProtocol[\s\S]*?register\(provider: ContextProvider\): \(\) => void/],
   ['packages/extension-protocols/src/tools.ts', /export class ToolRegistry[\s\S]*?register\(definition: ToolDefinition\): ToolRegistration/],
-  ['packages/extension-protocols/src/tools.ts', /list\(\): readonly ToolDescriptor\[\]/],
+  ['packages/extension-protocols/src/tools.ts', /snapshot\(\): ToolCatalogSnapshot/],
   ['packages/extension-protocols/src/lifecycle.ts', /'pre-compaction': 'doppelganger\/pre-compaction'/],
   ['packages/extension-dynamic-runtime-plugins/src/catalog-contracts.ts', /export interface DynamicRuntimeHttpService[\s\S]*?request\(input: DynamicRuntimeHttpRequest\): Promise<DynamicRuntimeHttpResponse>/],
   ['node_modules/@deepseek-ai/cordis-plugin-timer/src/index.ts', /timeout\(callback: \(\) => void, delay: number\): \(\) => void/],
@@ -47,11 +47,11 @@ const catalog = {
     },
     {
       name: 'doppelgangerTools',
-      purpose: 'List source-free portable tool descriptors and register lifecycle-owned tools.',
+      purpose: 'Read a source-free revisioned portable tool catalog and register lifecycle-owned tools.',
       source: 'packages/extension-protocols/src/tools.ts#ToolRegistry',
-      methods: ['list(): readonly ToolDescriptor[]', 'register(definition: ToolDefinition): () => void'],
+      methods: ['snapshot(): ToolCatalogSnapshot', 'register(definition: ToolDefinition): () => void'],
       properties: [],
-      referencedTypes: ['ToolDefinition', 'ToolDescriptor'],
+      referencedTypes: ['ToolDefinition', 'ToolCatalogSnapshot', 'ToolDescriptor'],
     },
     {
       name: 'timer',
@@ -84,8 +84,9 @@ const catalog = {
   referencedTypes: {
     ContextContribution: { source: 'packages/extension-protocols/src/context.ts', shape: '{ source: string; content: string; priority: number; authority: "instruction" | "data"; truncate?: boolean }' },
     ContextResolveRequest: { source: 'packages/extension-protocols/src/context.ts', shape: '{ turn: { input: string; turnId?: string }; tokenBudget: number }' },
-    ToolDefinition: { source: 'packages/extension-protocols/src/tools.ts', shape: '{ name: string; description: string; inputSchema: JSON Schema; approval?: { policy: "required"; reason: string }; available?: boolean; invoke(input): JsonValue | Promise<JsonValue> }' },
-    ToolDescriptor: { source: 'packages/extension-protocols/src/tools.ts', shape: '{ name: string; description: string; inputSchema: JSON Schema; approval?: ToolApprovalRequirement; available: boolean }' },
+    ToolDefinition: { source: 'packages/extension-protocols/src/tools.ts', shape: '{ name: string; description: string; inputSchema: JSON Schema; approval?: { policy: "required"; reason?: string }; available?: boolean; invoke(input): JsonValue | Promise<JsonValue> }' },
+    ToolCatalogSnapshot: { source: 'packages/extension-protocols/src/tools.ts', shape: '{ revision: string; tools: readonly ToolDescriptor[] }' },
+    ToolDescriptor: { source: 'packages/extension-protocols/src/tools.ts', shape: '{ name: string; label: string; description: string; inputSchema: JSON Schema; revision: string; approval?: ToolApprovalRequirement; available: boolean }' },
     ToolRegistration: { source: 'packages/extension-protocols/src/tools.ts', shape: 'Withheld from generated code; registration returns only an owned disposer function.' },
     DynamicRuntimeHttpRequest: { source: 'packages/extension-dynamic-runtime-plugins/src/catalog-contracts.ts', shape: '{ url: string; method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }' },
     DynamicRuntimeHttpResponse: { source: 'packages/extension-dynamic-runtime-plugins/src/catalog-contracts.ts', shape: '{ status: number; headers: Record<string, string>; body: string }' },

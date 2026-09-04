@@ -12,6 +12,7 @@ import {
 } from '@doppelganger/doppelganger-persona'
 import { ToolRegistry } from '@doppelganger/doppelganger-protocols'
 import { PersonaAuthoringPlugin } from '../src/index.ts'
+import { invokeTool } from './support.ts'
 
 const temporaryRoots: string[] = []
 
@@ -61,7 +62,7 @@ async function setup(options: { readonly hmrTimeoutMs?: number } = {}) {
 }
 
 async function inspectRevision(ctx: Context): Promise<PersonaAssetRevision> {
-  const result = await ctx.doppelgangerTools.invoke('persona.inspect', { target: 'trait:evolving-profile' })
+  const result = await invokeTool(ctx, 'persona.inspect', { target: 'trait:evolving-profile' })
   if (!result.ok) throw new Error('inspection failed')
   const value = result.value
   if (value === null || Array.isArray(value) || typeof value !== 'object') throw new Error('inspection failed')
@@ -76,7 +77,7 @@ function revise(
   replacement: string,
   input: Record<string, unknown> = {},
 ) {
-  return ctx.doppelgangerTools.invoke('persona.revise', {
+  return invokeTool(ctx, 'persona.revise', {
     target: 'trait:evolving-profile',
     expectedRevision,
     replacement,
@@ -121,13 +122,13 @@ describe('Persona mutation engine', () => {
     const { ctx, authoring, writable } = await setup()
     const expected = await inspectRevision(ctx)
 
-    await expect(ctx.doppelgangerTools.invoke('persona.revise', {
+    await expect(invokeTool(ctx, 'persona.revise', {
       target: 'identity',
       expectedRevision: expected,
       replacement: 'Changed identity.\n',
       rationale: 'Not allowed.',
     })).resolves.toMatchObject({ ok: false, error: { code: 'PERSONA_TARGET_READ_ONLY' } })
-    await expect(ctx.doppelgangerTools.invoke('persona.revise', {
+    await expect(invokeTool(ctx, 'persona.revise', {
       target: 'trait:engineer',
       expectedRevision: expected,
       replacement: 'Changed engineer.\n',
@@ -235,7 +236,7 @@ describe('Persona mutation engine', () => {
     emit(ctx, { url: writableUrl, outcome: 'success', revision: revision(replacement) })
     await expect(operation).resolves.toMatchObject({ ok: true, value: { status: 'applied' } })
     await disposal
-    expect(ctx.doppelgangerTools.list()).toEqual([])
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
     await ctx.fiber.dispose()
   })
 })

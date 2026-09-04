@@ -90,6 +90,6 @@ The runtime SHALL treat `runtime.cordis.yml` and every `runtime.cordis.patch.yml
 
 #### Scenario: Plugin state is not written into patches
 - **ID**: `runtime.patch.persistence.state.not.serialized`
-- **EVIDENCE**: `packages/composition-runtime/tests/serialized-activation.spec.ts::describes only generic layered runtime inputs`
+- **EVIDENCE**: `packages/composition-runtime/tests/canonicalization.spec.ts::exports host-neutral canonicalization with immutable optional-field omission`
 - **WHEN** a plugin mutates runtime-local or durable state
 - **THEN** Doppelganger does not serialize that state into any composition or patch input

@@ -5,19 +5,25 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
+import { digestToolInput } from '@doppelganger/doppelganger-protocols'
 import { RuntimePresetRoster } from '@doppelganger/doppelganger-runtime-presets'
-import { OMP_RPC_PROTOCOL_VERSION } from '../src/contracts.ts'
+import { OMP_RPC_PROTOCOL_VERSION, OMP_RUNTIME_HOST_CAPABILITIES } from '../src/contracts.ts'
 import { OmpAdapterSession } from '../src/adapter.ts'
 import { resolveOmpActivation } from '../src/extension.ts'
 import { NodeOmpChildFactory } from '../src/process.ts'
 import { FramedJsonRpcPeer } from '../src/protocol.ts'
 
 const temporaryRoots: string[] = []
+let rpcOrdinal = 0
 
 interface ChildHarness {
   readonly child: ChildProcessWithoutNullStreams
   readonly peer: FramedJsonRpcPeer
   readonly stderr: Buffer[]
+}
+
+interface RpcRequester {
+  request(method: string, params?: unknown): Promise<unknown>
 }
 
 afterEach(async () => {
@@ -39,9 +45,84 @@ function notification(peer: FramedJsonRpcPeer, method: string): Promise<unknown>
   return promise
 }
 
+async function resolveContext(peer: RpcRequester, input: string, tokenBudget = 1000): Promise<unknown> {
+  return peer.request('context.resolve', {
+    requestId: `child-context:${++rpcOrdinal}`,
+    turn: { input, turnId: `child-turn:${rpcOrdinal}` },
+    tokenBudget,
+  })
+}
+
+async function toolCatalog(peer: RpcRequester) {
+  return peer.request('tools.snapshot') as Promise<{
+    revision: string
+    tools: Array<{ name: string; revision: string; approval?: unknown }>
+  }>
+}
+
+async function invokeTool(
+  peer: RpcRequester,
+  name: string,
+  input: Record<string, unknown>,
+  options: { readonly callId?: string; readonly toolRevision?: string; readonly grantId?: string } = {},
+): Promise<unknown> {
+  const current = await toolCatalog(peer)
+  const descriptor = current.tools.find(tool => tool.name === name)
+  const callId = options.callId ?? `child-call:${++rpcOrdinal}`
+  const toolRevision = options.toolRevision ?? descriptor?.revision ?? 'tool:missing'
+  return peer.request('tools.invoke', {
+    callId,
+    name,
+    toolRevision,
+    input,
+    ...(descriptor?.approval === undefined ? {} : {
+      approval: {
+        kind: 'one-shot',
+        grantId: options.grantId ?? `child-grant:${rpcOrdinal}`,
+        callId,
+        toolRevision,
+        inputDigest: digestToolInput(input as never),
+      },
+    }),
+  })
+}
+
+async function changedCatalog(peer: FramedJsonRpcPeer, operation: () => Promise<void>): Promise<{
+  revision: string
+  tools: Array<{ name: string; description: string; approval?: unknown; revision: string }>
+}> {
+  const before = await toolCatalog(peer)
+  const changed = notification(peer, 'toolCatalog.changed')
+  await operation()
+  await timeout(changed, 'tool catalog change') as { revision: string }
+  const catalog = await toolCatalog(peer)
+  expect(catalog.revision).not.toBe(before.revision)
+  return catalog as never
+}
+
+interface ChildRuntimeDiagnostics {
+  readonly runtimeRevision: string
+  readonly diagnostics: { readonly reload?: { readonly state?: string; readonly error?: string } }
+}
+
+async function runtimeDiagnostics(peer: FramedJsonRpcPeer): Promise<ChildRuntimeDiagnostics> {
+  return peer.request('runtime.diagnostics') as Promise<ChildRuntimeDiagnostics>
+}
+
+async function waitForReloadState(peer: FramedJsonRpcPeer, state: string): Promise<ChildRuntimeDiagnostics> {
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline) {
+    const current = await runtimeDiagnostics(peer)
+    if (current.diagnostics?.reload?.state === state) return current
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`runtime reload state ${state} timed out`)
+}
+
 function activation(root: string, patches: readonly object[] = [], actorId?: string) {
   return {
     protocolVersion: OMP_RPC_PROTOCOL_VERSION,
+    capabilities: OMP_RUNTIME_HOST_CAPABILITIES,
     composition: {
       id: 'generic-child',
       revision: 'authored-one',
@@ -130,6 +211,41 @@ async function writeProtocolPreset(root: string): Promise<void> {
   ])
 }
 
+async function writeOmpEventPreset(root: string): Promise<void> {
+  const protocolPackage = JSON.stringify(new URL('../../extension-protocols/src/index.ts', import.meta.url).href)
+  await Promise.all([
+    writeFile(join(root, 'tools.mjs'), `export { ToolRegistry as default } from ${protocolPackage}\n`),
+    writeFile(join(root, 'omp-events.mjs'), [
+      'let lastEvent = null',
+      'export default {',
+      "  name: 'omp-event-observer',",
+      "  inject: ['doppelgangerTools'],",
+      '  apply(ctx) {',
+      "    ctx.on('doppelganger/host/omp/todo-reminder', event => { lastEvent = event })",
+      '    ctx.doppelgangerTools.register({',
+      "      name: 'omp.todo.last', description: 'Return the last OMP todo reminder',",
+      "      inputSchema: { type: 'object', properties: {}, additionalProperties: false },",
+      '      invoke: () => lastEvent,',
+      '    })',
+      '  },',
+      '}',
+      '',
+    ].join('\n')),
+    writeFile(join(root, 'runtime.cordis.yml'), [
+      '- id: tools',
+      '  name: ./tools.mjs',
+      '  isolate:',
+      '    doppelgangerTools: session',
+      '- id: omp-events',
+      '  name: ./omp-events.mjs',
+      '  inject: [doppelgangerTools]',
+      '  isolate:',
+      '    doppelgangerTools: session',
+      '',
+    ].join('\n')),
+  ])
+}
+
 async function writeEvolutionPreset(root: string): Promise<void> {
   const modules = {
     context: JSON.stringify(new URL('../../extension-protocols/src/context-plugin.ts', import.meta.url).href),
@@ -187,7 +303,7 @@ async function invokeEvolution(
   name: string,
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const result = await peer.request('tools.invoke', { name, input })
+  const result = await invokeTool(peer, name, input)
   if (result === null || typeof result !== 'object' || !('ok' in result) || result.ok !== true
     || !('value' in result) || result.value === null || typeof result.value !== 'object') {
     throw new Error(`${name} failed: ${JSON.stringify(result)}`)
@@ -304,7 +420,7 @@ function featurePatch(
   content: string,
   description: string,
   toolName = 'generic.echo',
-  approval?: { readonly policy: string; readonly reason: string },
+  approval?: { readonly policy: string; readonly reason?: string },
 ): string {
   return [
     '- id: feature',
@@ -315,7 +431,7 @@ function featurePatch(
     ...(approval === undefined ? [] : [
       '    approval:',
       `      policy: ${approval.policy}`,
-      `      reason: ${approval.reason}`,
+      ...(approval.reason === undefined ? [] : [`      reason: ${approval.reason}`]),
     ]),
     '',
   ].join('\n')
@@ -331,19 +447,68 @@ describe('Node OMP runtime child', () => {
       const activated = await timeout(harness.peer.request('session.activate', activation(root)), 'empty activation')
       expect(activated).toMatchObject({
         protocolVersion: OMP_RPC_PROTOCOL_VERSION,
+        capabilities: OMP_RUNTIME_HOST_CAPABILITIES,
         runtimeRevision: expect.any(String),
-        tools: [],
+        catalog: { revision: 'catalog:0', tools: [] },
       })
-      await expect(harness.peer.request('context.resolve', {
-        input: 'Current task', tokenBudget: 1000,
-      })).resolves.toEqual({ content: '', contributions: [], omittedSources: [], tokenCount: 0 })
-      await expect(harness.peer.request('tools.invoke', { name: 'generic.missing', input: {} })).resolves.toEqual({
+      await expect(resolveContext(harness.peer, 'Current task')).resolves.toEqual({
+        content: '', contributions: [], omittedSources: [], tokenCount: 0,
+      })
+      await expect(invokeTool(harness.peer, 'generic.missing', {})).resolves.toEqual({
         ok: false,
         error: {
           code: 'TOOL_PROTOCOL_UNAVAILABLE',
           message: 'the active Runtime Preset does not provide the tools protocol',
         },
       })
+    } catch (cause) {
+      throw childError(harness, cause)
+    } finally {
+      await dispose(harness)
+    }
+  })
+
+  it('routes validated OMP todo reminders through the child runtime plugin', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-omp-events-child-'))
+    temporaryRoots.push(root)
+    await writeOmpEventPreset(root)
+    const harness = await childHarness()
+    try {
+      await harness.peer.request('session.activate', activation(root))
+      await expect(harness.peer.request('omp.todo-reminder', {
+        protocolVersion: 1,
+        type: 'todo-reminder',
+        deliveryId: 'omp-session:todo-reminder:1',
+        sessionId: 'omp-session',
+        timestamp: 1,
+        todos: [
+          { content: 'Finish host event transport', status: 'in_progress' },
+          { content: 'Wait for review', status: 'blocked', blocker: 'review pending' },
+        ],
+        attempt: 1,
+        maxAttempts: 3,
+      })).resolves.toBeNull()
+      await expect(invokeTool(harness.peer, 'omp.todo.last', {})).resolves.toMatchObject({
+        ok: true,
+        value: {
+          type: 'todo-reminder',
+          deliveryId: 'omp-session:todo-reminder:1',
+          todos: [
+            { content: 'Finish host event transport', status: 'in_progress' },
+            { content: 'Wait for review', status: 'blocked', blocker: 'review pending' },
+          ],
+        },
+      })
+      await expect(harness.peer.request('omp.todo-reminder', {
+        protocolVersion: 1,
+        type: 'todo-reminder',
+        deliveryId: 'invalid',
+        sessionId: 'omp-session',
+        timestamp: 1,
+        todos: [{ content: 'Invalid status', status: 'unknown' }],
+        attempt: 1,
+        maxAttempts: 3,
+      })).rejects.toThrow('status is unsupported')
     } catch (cause) {
       throw childError(harness, cause)
     } finally {
@@ -367,11 +532,10 @@ describe('Node OMP runtime child', () => {
       }),
     })
     try {
-      await expect(adapter.start()).resolves.toMatchObject({ state: 'active', tools: [] })
-      const context = await adapter.connection()!.request('context.resolve', {
-        input: 'Current task',
-        tokenBudget: 2000,
-      }) as { content: string }
+      await expect(adapter.start()).resolves.toMatchObject({ state: 'active', catalog: { tools: [] } })
+      const connection = adapter.connection()
+      if (connection === undefined) throw new Error('standard adapter connection is inactive')
+      const context = await resolveContext(connection, 'Current task', 2000) as { content: string }
       expect(context.content).toContain("You are the user's durable personal and technical assistant.")
     } finally {
       await adapter.dispose()
@@ -468,10 +632,10 @@ describe('Node OMP runtime child', () => {
     })
     expect(await adapter.start()).toMatchObject({
       state: 'active',
-      tools: [{
+      catalog: { tools: [{
         name: 'generic.echo',
         approval: { policy: 'required', reason: 'Review this exact generic invocation.' },
-      }],
+      }] },
     })
     await adapter.dispose()
 
@@ -511,104 +675,92 @@ describe('Node OMP runtime child', () => {
       ])
       const activated = await timeout(harness.peer.request('session.activate', params), 'generic activation') as {
         runtimeRevision: string
-        tools: Array<{ name: string; description: string }>
+        catalog: { tools: Array<{ name: string; description: string }> }
       }
-      expect(activated.tools).toMatchObject([{ name: 'generic.echo', description: 'Project echo' }])
-      await expect(harness.peer.request('context.resolve', {
-        input: 'Current task', tokenBudget: 1000,
-      })).resolves.toMatchObject({ content: 'Project runtime context.' })
-
-      const projectRemoved = notification(harness.peer, 'runtime.changed')
-      await unlink(projectPatch)
-      await expect(timeout(projectRemoved, 'project patch removal')).resolves.toMatchObject({
-        tools: [{ name: 'generic.echo', description: 'User echo' }],
+      expect(activated.catalog.tools).toMatchObject([{ name: 'generic.echo', description: 'Project echo' }])
+      await expect(resolveContext(harness.peer, 'Current task')).resolves.toMatchObject({
+        content: 'Project runtime context.',
       })
-      await expect(harness.peer.request('context.resolve', {
-        input: 'User layer', tokenBudget: 1000,
-      })).resolves.toMatchObject({ content: 'User runtime context.' })
 
-      const userRemoved = notification(harness.peer, 'runtime.changed')
-      await unlink(userPatch)
-      await expect(timeout(userRemoved, 'user patch removal')).resolves.toMatchObject({
-        tools: [{
-          name: 'generic.echo',
-          description: 'Echo one',
-          approval: { policy: 'required', reason: 'Review this exact generic invocation.' },
-        }],
-      })
-      await expect(harness.peer.request('context.resolve', {
-        input: 'Base layer', tokenBudget: 1000,
-      })).resolves.toMatchObject({ content: 'Generic runtime context one.' })
+      const afterProjectRemoval = await changedCatalog(harness.peer, async () => { await unlink(projectPatch) })
+      expect(afterProjectRemoval.tools).toMatchObject([{ name: 'generic.echo', description: 'User echo' }])
+      await expect(resolveContext(harness.peer, 'User layer')).resolves.toMatchObject({ content: 'User runtime context.' })
 
-      const projectAppeared = notification(harness.peer, 'runtime.changed')
-      await writeFile(projectPatch, featurePatch('Reloaded project context.', 'Reloaded echo', 'generic.reloaded'))
-      const reloaded = await timeout(projectAppeared, 'project patch appearance') as {
-        runtimeRevision: string
-        diagnostics: unknown
-        tools: Array<{ name: string; description: string; approval?: unknown }>
-      }
-      expect(reloaded).toMatchObject({
-        diagnostics: { compositionId: 'generic-child' },
-        tools: [{ name: 'generic.reloaded', description: 'Reloaded echo' }],
+      const baseCatalog = await changedCatalog(harness.peer, async () => { await unlink(userPatch) })
+      expect(baseCatalog.tools).toMatchObject([{
+        name: 'generic.echo',
+        description: 'Echo one',
+        approval: { policy: 'required', reason: 'Review this exact generic invocation.' },
+      }])
+      await expect(resolveContext(harness.peer, 'Base layer')).resolves.toMatchObject({
+        content: 'Generic runtime context one.',
       })
+
+      const reloaded = await changedCatalog(harness.peer, async () => {
+        await writeFile(projectPatch, featurePatch('Reloaded project context.', 'Reloaded echo', 'generic.reloaded'))
+      })
+      expect(reloaded.tools).toMatchObject([{ name: 'generic.reloaded', description: 'Reloaded echo' }])
       expect(reloaded.tools[0]).not.toHaveProperty('approval')
-      await expect(harness.peer.request('tools.invoke', {
-        name: 'generic.reloaded', input: { value: 'hello' },
-      })).resolves.toEqual({ ok: true, value: { echoed: 'hello', generation: 'Reloaded project context.' } })
-      await expect(harness.peer.request('tools.invoke', {
-        name: 'generic.echo', input: { value: 'stale' },
-      })).resolves.toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
-
-      const approvalAdded = notification(harness.peer, 'runtime.changed')
-      await writeFile(projectPatch, featurePatch(
-        'Approval project context.',
-        'Approval echo',
-        'generic.reloaded',
-        { policy: 'required', reason: 'Review the reloaded invocation.' },
-      ))
-      await expect(timeout(approvalAdded, 'approval addition')).resolves.toMatchObject({
-        tools: [{
-          name: 'generic.reloaded',
-          approval: { policy: 'required', reason: 'Review the reloaded invocation.' },
-        }],
+      await expect(invokeTool(harness.peer, 'generic.reloaded', { value: 'hello' })).resolves.toEqual({
+        ok: true, value: { echoed: 'hello', generation: 'Reloaded project context.' },
       })
+      await expect(invokeTool(harness.peer, 'generic.echo', { value: 'stale' }))
+        .resolves.toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
 
-      const approvalRemoved = notification(harness.peer, 'runtime.changed')
+      const withApproval = await changedCatalog(harness.peer, async () => {
+        await writeFile(projectPatch, featurePatch(
+          'Approval project context.',
+          'Approval echo',
+          'generic.reloaded',
+          { policy: 'required', reason: 'Review the reloaded invocation.' },
+        ))
+      })
+      expect(withApproval.tools).toMatchObject([{
+        name: 'generic.reloaded',
+        approval: { policy: 'required', reason: 'Review the reloaded invocation.' },
+      }])
+
       await new Promise(resolve => setTimeout(resolve, 100))
-      await writeFile(projectPatch, featurePatch('Reloaded project context.', 'Reloaded echo', 'generic.reloaded'))
-      const withoutApproval = await timeout(approvalRemoved, 'approval removal') as {
-        runtimeRevision: string
-        tools: Array<{ approval?: unknown }>
-      }
+      const withoutApproval = await changedCatalog(harness.peer, async () => {
+        await writeFile(projectPatch, featurePatch('Reloaded project context.', 'Reloaded echo', 'generic.reloaded'))
+      })
       expect(withoutApproval.tools[0]).not.toHaveProperty('approval')
       await new Promise(resolve => setTimeout(resolve, 100))
 
-      const malformedApproval = notification(harness.peer, 'runtime.changed')
       await writeFile(projectPatch, featurePatch(
         'Invalid approval context.',
         'Invalid approval echo',
         'generic.reloaded',
         { policy: 'sometimes', reason: 'Invalid policy.' },
       ))
-      const malformed = await timeout(malformedApproval, 'malformed approval rollback')
-      expect(malformed).toMatchObject({
-        runtimeRevision: withoutApproval.runtimeRevision,
-        diagnostics: { reload: { state: 'failed', error: expect.stringContaining('approval policy') } },
-        tools: [{ name: 'generic.reloaded', description: 'Reloaded echo' }],
-      })
+      const malformed = await waitForReloadState(harness.peer, 'failed')
+      expect(malformed.diagnostics.reload?.error).toContain('approval policy')
+      expect((await toolCatalog(harness.peer)).tools).toMatchObject([{
+        name: 'generic.reloaded', description: 'Reloaded echo', available: true,
+      }])
+      await new Promise(resolve => setTimeout(resolve, 100))
 
-      const failedReload = notification(harness.peer, 'runtime.changed')
       await writeFile(projectPatch, '- id: absent\n  config: {}\n')
-      await expect(timeout(failedReload, 'invalid project patch')).resolves.toMatchObject({
-        runtimeRevision: reloaded.runtimeRevision,
-        diagnostics: {
-          reload: { state: 'failed', error: expect.stringContaining('project patch') },
-        },
-        tools: [{ name: 'generic.reloaded', description: 'Reloaded echo' }],
+      const deadline = Date.now() + 5000
+      let failed: ChildRuntimeDiagnostics | undefined
+      while (Date.now() < deadline) {
+        const current = await runtimeDiagnostics(harness.peer)
+        if (current.diagnostics.reload?.error?.includes('project patch')) {
+          failed = current
+          break
+        }
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      expect(failed?.diagnostics.reload).toMatchObject({ state: 'failed', error: expect.stringContaining('project patch') })
+      expect((await toolCatalog(harness.peer)).tools).toMatchObject([{
+        name: 'generic.reloaded', description: 'Reloaded echo', available: true,
+      }])
+      await expect(invokeTool(harness.peer, 'generic.reloaded', { value: 'retained' })).resolves.toEqual({
+        ok: true, value: { echoed: 'retained', generation: 'Reloaded project context.' },
       })
-      await expect(harness.peer.request('context.resolve', {
-        input: 'Still active', tokenBudget: 1000,
-      })).resolves.toMatchObject({ content: 'Reloaded project context.' })
+      await expect(resolveContext(harness.peer, 'Still active')).resolves.toMatchObject({
+        content: 'Reloaded project context.',
+      })
     } catch (cause) {
       throw childError(harness, cause)
     } finally {
@@ -623,15 +775,15 @@ describe('Node OMP runtime child', () => {
     const harness = await childHarness()
     try {
       const activated = await timeout(harness.peer.request('session.activate', activation(root, [], 'actor-one')), 'Evolution activation') as {
-        tools: Array<{ name: string }>
+        catalog: { tools: Array<{ name: string }> }
       }
-      expect(activated.tools.map(tool => tool.name)).toEqual([
+      expect(activated.catalog.tools.map(tool => tool.name)).toEqual([
         'evolution.inspect', 'evolution.list', 'evolution.propose', 'evolution.reject',
         'evolution.reminder.record', 'evolution.snooze', 'evolution.transition',
       ])
-      await expect(harness.peer.request('context.resolve', {
-        input: 'Improve reusable capability planning.', tokenBudget: 1000,
-      })).resolves.toMatchObject({ content: expect.stringContaining('[Doppelganger Evolution Policy]') })
+      await expect(resolveContext(harness.peer, 'Improve reusable capability planning.')).resolves.toMatchObject({
+        content: expect.stringContaining('[Doppelganger Evolution Policy]'),
+      })
 
       const persona = await invokeEvolution(harness.peer, 'evolution.propose', {
         operationId: 'global-persona-propose', kind: 'persona', scope: 'global',
@@ -684,11 +836,12 @@ describe('Node OMP runtime child', () => {
       expect(proposalFiles).toHaveLength(1)
       expect(await readFile(join(projectDirectory, proposalFiles[0]!), 'utf8')).toContain('status: done')
 
-      const changed = notification(harness.peer, 'runtime.changed')
       const source = await readFile(join(root, 'runtime.cordis.yml'), 'utf8')
-      await writeFile(join(root, 'runtime.cordis.yml'), source.slice(0, source.indexOf('- id: evolution')))
-      await expect(timeout(changed, 'Evolution removal')).resolves.toMatchObject({ tools: [] })
-      await expect(harness.peer.request('tools.invoke', { name: 'evolution.list', input: {} }))
+      const removed = await changedCatalog(harness.peer, async () => {
+        await writeFile(join(root, 'runtime.cordis.yml'), source.slice(0, source.indexOf('- id: evolution')))
+      })
+      expect(removed.tools).toEqual([])
+      await expect(invokeTool(harness.peer, 'evolution.list', {}))
         .resolves.toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
     } catch (cause) {
       throw childError(harness, cause)
@@ -718,24 +871,19 @@ describe('Node OMP runtime child', () => {
         target: 'reviewing', reviewSummary: 'The user explicitly chose to review this proposal.',
       })
       expect(await readFile(traitPath, 'utf8')).toBe(original)
-      const inspected = await harness.peer.request('tools.invoke', {
-        name: 'persona.inspect', input: { target: 'trait:evolving-profile' },
-      })
+      const inspected = await invokeTool(harness.peer, 'persona.inspect', { target: 'trait:evolving-profile' })
       if (inspected === null || typeof inspected !== 'object' || !('ok' in inspected) || inspected.ok !== true
         || !('value' in inspected) || inspected.value === null || typeof inspected.value !== 'object'
         || !('revision' in inspected.value) || typeof inspected.value.revision !== 'string') {
         throw new Error('persona.inspect returned an invalid result')
       }
       const replacement = 'Prefer reversible changes with observed verification.\n'
-      await expect(harness.peer.request('tools.invoke', {
-        name: 'persona.revise',
-        input: {
-          target: 'trait:evolving-profile',
-          expectedRevision: inspected.value.revision,
-          replacement,
-          rationale: 'Apply the explicitly reviewed stable Persona quality.',
-          evidenceIds: ['evolution:persona-vertical'],
-        },
+      await expect(invokeTool(harness.peer, 'persona.revise', {
+        target: 'trait:evolving-profile',
+        expectedRevision: inspected.value.revision,
+        replacement,
+        rationale: 'Apply the explicitly reviewed stable Persona quality.',
+        evidenceIds: ['evolution:persona-vertical'],
       })).resolves.toMatchObject({ ok: true, value: { status: 'applied' } })
       expect(await readFile(traitPath, 'utf8')).toBe(replacement)
       const completed = await invokeEvolution(harness.peer, 'evolution.transition', {
@@ -757,34 +905,27 @@ describe('Node OMP runtime child', () => {
     const harness = await childHarness()
     try {
       await harness.peer.request('session.activate', activation(root))
-      await expect(harness.peer.request('context.resolve', {
-        input: 'Review this implementation.', tokenBudget: 1000,
-      })).resolves.toMatchObject({ content: expect.stringContaining('Prefer careful iteration.') })
-
-      const inspected = await harness.peer.request('tools.invoke', {
-        name: 'persona.inspect', input: { target: 'trait:evolving-profile' },
+      await expect(resolveContext(harness.peer, 'Review this implementation.')).resolves.toMatchObject({
+        content: expect.stringContaining('Prefer careful iteration.'),
       })
+
+      const inspected = await invokeTool(harness.peer, 'persona.inspect', { target: 'trait:evolving-profile' })
       if (inspected === null || typeof inspected !== 'object' || !('ok' in inspected) || inspected.ok !== true
         || !('value' in inspected) || inspected.value === null || typeof inspected.value !== 'object'
         || !('revision' in inspected.value) || typeof inspected.value.revision !== 'string') {
         throw new Error('persona.inspect returned an invalid result')
       }
       const replacement = 'Prefer verified, reversible evolution.\n'
-      await expect(harness.peer.request('tools.invoke', {
-        name: 'persona.revise',
-        input: {
-          target: 'trait:evolving-profile',
-          expectedRevision: inspected.value.revision,
-          replacement,
-          rationale: 'Prefer confirmed runtime changes.',
-        },
+      await expect(invokeTool(harness.peer, 'persona.revise', {
+        target: 'trait:evolving-profile',
+        expectedRevision: inspected.value.revision,
+        replacement,
+        rationale: 'Prefer confirmed runtime changes.',
       })).resolves.toMatchObject({
         ok: true,
         value: { status: 'applied', target: 'trait:evolving-profile' },
       })
-      await expect(harness.peer.request('context.resolve', {
-        input: 'Review this implementation.', tokenBudget: 1000,
-      })).resolves.toMatchObject({
+      await expect(resolveContext(harness.peer, 'Review this implementation.')).resolves.toMatchObject({
         content: expect.stringContaining('Prefer verified, reversible evolution.'),
       })
     } catch (cause) {
@@ -808,9 +949,7 @@ describe('Node OMP runtime child', () => {
         harnesses[1]!.peer.request('session.activate', activation(roots[1]!, [], 'actor-two')),
         harnesses[2]!.peer.request('session.activate', activation(roots[2]!)),
       ])
-      const inspect = (harness: ChildHarness) => harness.peer.request('tools.invoke', {
-        name: 'actor.inspect', input: {},
-      })
+      const inspect = (harness: ChildHarness) => invokeTool(harness.peer, 'actor.inspect', {})
       await expect(inspect(harnesses[0]!)).resolves.toEqual({
         ok: true, value: { actor: { state: 'bound', actorId: 'actor-one' }, authoredActorId: 'authored' },
       })
@@ -821,9 +960,9 @@ describe('Node OMP runtime child', () => {
         ok: true, value: { actor: { state: 'unbound' }, authoredActorId: 'authored' },
       })
 
-      const changed = notification(harnesses[0]!.peer, 'runtime.changed')
-      await writeFile(join(roots[0]!, 'runtime.cordis.yml'), actorPresetDefinition('forged-actor'))
-      await timeout(changed, 'actor preset reload')
+      await changedCatalog(harnesses[0]!.peer, async () => {
+        await writeFile(join(roots[0]!, 'runtime.cordis.yml'), actorPresetDefinition('forged-actor'))
+      })
       await expect(inspect(harnesses[0]!)).resolves.toEqual({
         ok: true, value: { actor: { state: 'bound', actorId: 'actor-one' }, authoredActorId: 'forged-actor' },
       })

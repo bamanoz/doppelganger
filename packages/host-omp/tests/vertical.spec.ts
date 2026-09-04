@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { formatApprovalPrompt, resolveApproval } from '@oh-my-pi/pi-coding-agent/tools/approval'
 import {
   LIFECYCLE_PROTOCOL_VERSION,
+  digestToolInput,
   serializeLifecycleValue,
 } from '@doppelganger/doppelganger-protocols'
 import { OmpAdapterSession, type OmpChildConnection } from '../src/adapter.ts'
@@ -18,6 +19,7 @@ import {
 import { NodeOmpChildFactory } from '../src/process.ts'
 
 const semanticEmbedderPath = fileURLToPath(new URL('./fixtures/deterministic-embedder.ts', import.meta.url))
+const mcpFixturePath = fileURLToPath(new URL('../../extension-mcp/tests/fixtures/stdio-server.mjs', import.meta.url))
 let homePath = ''
 let workspacePath = ''
 let presetPath = ''
@@ -128,6 +130,29 @@ function semanticRows(storage: string): string[] {
     '    operationTimeoutMs: 1000',
   ]
 }
+
+function delayedMcpRows(): string[] {
+  return [
+    '- id: doppelganger-mcp',
+    '  name: "@doppelganger/doppelganger-extension-mcp/loader"',
+    '  inject: [doppelgangerTools]',
+    '  isolate:',
+    '    doppelgangerTools: session',
+    '    doppelgangerMcp: session',
+    '  config:',
+    '    servers:',
+    '      delayed:',
+    '        startupTimeoutMs: 10000',
+    '        transport:',
+    '          type: stdio',
+    `          command: ${JSON.stringify(process.execPath)}`,
+    '          args:',
+    `            - ${JSON.stringify(mcpFixturePath)}`,
+    '          environment:',
+    '            MCP_INITIALIZE_DELAY_MS:',
+    '              env: OMP_TEST_MCP_INITIALIZE_DELAY',
+  ]
+}
 beforeEach(async () => {
   mutationOrdinal = 0
   const root = await mkdtemp(join(tmpdir(), 'doppelganger-vertical-instance-'))
@@ -157,6 +182,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await Promise.all(activeAdapters.splice(0).map(adapter => adapter.dispose()))
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+  delete process.env.OMP_TEST_MCP_INITIALIZE_DELAY
 })
 
 async function realSession(
@@ -200,7 +226,28 @@ async function invoke(connection: OmpChildConnection, name: string, input: Recor
     if (relationship) normalized.scope = 'relationship'
   }
   if (name === 'memory.candidates.corroborate') normalized.turnId ??= `turn:${ordinal}`
-  const result = await connection.request('tools.invoke', { name, input: normalized })
+  const catalog = await connection.request('tools.snapshot') as {
+    revision: string
+    tools: Array<{ name: string; revision: string; approval?: unknown }>
+  }
+  const descriptor = catalog.tools.find(tool => tool.name === name)
+  if (descriptor === undefined) throw new Error(`${name} is not present in the current catalog`)
+  const callId = `vertical-call:${ordinal}`
+  const result = await connection.request('tools.invoke', {
+    callId,
+    name,
+    toolRevision: descriptor.revision,
+    input: normalized,
+    ...(descriptor.approval === undefined ? {} : {
+      approval: {
+        kind: 'one-shot',
+        grantId: `vertical-grant:${ordinal}`,
+        callId,
+        toolRevision: descriptor.revision,
+        inputDigest: digestToolInput(normalized as never),
+      },
+    }),
+  })
   if (result === null || typeof result !== 'object' || !('ok' in result)) {
     throw new Error(`${name} returned an invalid result`)
   }
@@ -217,8 +264,8 @@ async function invoke(connection: OmpChildConnection, name: string, input: Recor
 }
 async function resolveContext(connection: OmpChildConnection): Promise<string> {
   const raw = await connection.request('context.resolve', {
-    input: 'Review this implementation.',
-    turnId: 'turn-one',
+    requestId: 'vertical-context-request',
+    turn: { input: 'Review this implementation.', turnId: 'turn-one' },
     tokenBudget: 2000,
   })
   if (raw === null || typeof raw !== 'object' || !('content' in raw) || typeof raw.content !== 'string') {
@@ -329,13 +376,15 @@ describe('full-stack test Runtime Preset vertical', () => {
     expect(content).toContain('Approach software work as a production engineer.')
     expect(content).toContain('Communicate conclusions first.')
     expect(content).toContain('Preserve deliberate collaboration evolution.')
-    await expect(connection.request('tools.list')).resolves.toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: 'persona.inspect' }),
-      expect.objectContaining({
-        name: 'persona.revise',
-        approval: { policy: 'required', reason: 'This changes active Persona instructions.' },
-      }),
-    ]))
+    await expect(connection.request('tools.snapshot')).resolves.toMatchObject({
+      tools: expect.arrayContaining([
+        expect.objectContaining({ name: 'persona.inspect' }),
+        expect.objectContaining({
+          name: 'persona.revise',
+          approval: { policy: 'required', reason: 'This changes active Persona instructions.' },
+        }),
+      ]),
+    })
     await expect(invoke(connection, 'persona.inspect', { target: 'identity' })).resolves.toMatchObject({ writable: false })
     await expect(invoke(connection, 'persona.inspect', { target: 'trait:engineer' })).resolves.toMatchObject({ writable: false })
     await expect(invoke(connection, 'persona.inspect', { target: 'trait:concise' })).resolves.toMatchObject({ writable: false })
@@ -384,14 +433,10 @@ describe('full-stack test Runtime Preset vertical', () => {
       expect(revised.isError).not.toBe(true)
       expect(revised.details).toMatchObject({ status: 'applied', target: 'trait:evolving-profile' })
 
-      await fixture.handlers.get('before_agent_start')!({
+      const next = await fixture.handlers.get('before_agent_start')!({
         type: 'before_agent_start', prompt: 'Use the revised trait.', systemPrompt: [],
-      }, fixture.context)
-      const next = await fixture.handlers.get('context')!({
-        type: 'context',
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'Use the revised trait.' }], timestamp: 1 }],
-      }, fixture.context) as { messages: Array<{ content?: Array<{ text?: string }> }> }
-      expect(next.messages.at(-1)?.content?.map(part => part.text).join('\n'))
+      }, fixture.context) as { systemPrompt?: string[] }
+      expect(next.systemPrompt?.at(-1))
         .toContain('Prefer explicit verification before durable behavioral change.')
     } finally {
       await fixture.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, fixture.context)
@@ -664,6 +709,22 @@ describe('full-stack test Runtime Preset vertical', () => {
     await enabled.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, enabled.context)
   })
 
+
+  it('projects a delayed MCP tool through the generic catalog change path after session activation', async () => {
+    process.env.OMP_TEST_MCP_INITIALIZE_DELAY = '3000'
+    await writeFile(presetPath, `${presetSource.trimEnd()}\n${delayedMcpRows().join('\n')}\n`)
+
+    const session = await realSession('delayed-mcp-catalog')
+    expect(session.adapter.snapshot().catalog.tools.map(tool => tool.name)).not.toContain('mcp-delayed.echo-value')
+    await waitUntil(
+      () => session.adapter.snapshot().catalog.tools.some(tool => tool.name === 'mcp-delayed.echo-value'),
+      'delayed MCP tool projection',
+    )
+    expect(await invoke(session.connection, 'mcp-delayed.echo-value', { value: 'projected' })).toEqual({
+      content: [{ type: 'text', text: 'projected' }],
+      structuredContent: { echoed: 'projected' },
+    })
+  })
   it('applies valid preset updates, rolls invalid changes back, and preserves state across reload', async () => {
     const originalPreset = presetSource
     const session = await realSession('live-reload')
@@ -672,21 +733,25 @@ describe('full-stack test Runtime Preset vertical', () => {
     })
 
     try {
-      const initialRevision = session.adapter.snapshot().runtimeRevision
+      const runtimeRevision = async () => {
+        const result = await session.connection.request('runtime.diagnostics') as { runtimeRevision: string }
+        return result.runtimeRevision
+      }
+      const initialRevision = await runtimeRevision()
       await writeFile(presetPath, `${originalPreset.trimEnd()}\n${captureRow().join('\n')}\n`)
-      await waitUntil(() => session.adapter.snapshot().runtimeRevision !== initialRevision, 'valid preset reload')
-      expect(session.adapter.snapshot().tools.map(tool => tool.name)).toContain('memory.search')
+      await waitUntil(async () => await runtimeRevision() !== initialRevision, 'valid preset reload')
+      expect(session.adapter.snapshot().catalog.tools.map(tool => tool.name)).toContain('memory.search')
 
-      const validRevision = session.adapter.snapshot().runtimeRevision
+      const validRevision = await runtimeRevision()
       await writeFile(presetPath, originalPreset.replace(
         '  name: "@doppelganger/doppelganger-memory"',
         '  name: ./missing-plugin.mjs',
       ))
       await new Promise(resolve => setTimeout(resolve, 300))
-      expect(session.adapter.snapshot().tools.map(tool => tool.name)).toContain('memory.search')
+      expect(session.adapter.snapshot().catalog.tools.map(tool => tool.name)).toContain('memory.search')
 
       await writeFile(presetPath, originalPreset)
-      await waitUntil(() => session.adapter.snapshot().runtimeRevision !== validRevision, 'preset restoration')
+      await waitUntil(async () => await runtimeRevision() !== validRevision, 'preset restoration')
       expect(searchContents(await invoke(session.connection, 'memory.search', {
         query: 'heliotrope 731',
       }))).toContain('Persistent reload sentinel uses heliotrope-731.')

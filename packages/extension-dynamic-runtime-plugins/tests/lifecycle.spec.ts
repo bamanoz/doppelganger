@@ -3,6 +3,7 @@ import Timer from '@deepseek-ai/cordis-plugin-timer'
 import { describe, expect, it } from 'vitest'
 import { ToolRegistry, type JsonValue } from '@doppelganger/doppelganger-protocols'
 import { DynamicRuntimePluginsPlugin } from '../src/index.ts'
+import { invokeTool } from './support.ts'
 
 async function setup() {
   const ctx = new Context()
@@ -26,19 +27,19 @@ function field(value: JsonValue, name: string): JsonValue {
 }
 
 async function define(ctx: Context, source: string, prefix: string, pluginId?: JsonValue) {
-  const result = await ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+  const result = await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
     ...(pluginId === undefined ? { idPrefix: prefix } : { pluginId }),
     name: `${prefix} name`,
     purpose: `${prefix} purpose`,
     source,
-  })
+  } }, 'test-session')
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
   return result.value
 }
 
 async function run(ctx: Context, definition: JsonValue, mode: 'run' | 'update') {
   const record = objectValue(definition)
-  return ctx.doppelgangerTools.invoke('runtime-plugin.run', {
+  return invokeTool(ctx, 'runtime-plugin.run', {
     pluginId: record.pluginId ?? null,
     packageId: record.packageId ?? null,
     mode,
@@ -49,7 +50,7 @@ async function run(ctx: Context, definition: JsonValue, mode: 'run' | 'update') 
 }
 
 async function inspect(ctx: Context, pluginId: JsonValue) {
-  const result = await ctx.doppelgangerTools.invoke('runtime-plugin.inspect-self', { pluginId })
+  const result = await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-self', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-self')!.revision, input: { pluginId } }, 'test-session')
   if (!result.ok) throw new Error(result.error.message)
   return result.value
 }

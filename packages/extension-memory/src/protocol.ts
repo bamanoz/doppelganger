@@ -3,6 +3,7 @@ import {
   ToolInvocationError,
   type ContextContribution,
   type JsonValue,
+  type ToolInvocationContext,
 } from '@doppelganger/doppelganger-protocols'
 import {
   MemoryError,
@@ -83,7 +84,7 @@ function json(value: unknown): JsonValue {
 }
 
 function toolHandler(operation: (input: Readonly<Record<string, JsonValue>>) => unknown | Promise<unknown>) {
-  return async (value: JsonValue): Promise<JsonValue> => {
+  return async (value: JsonValue, _context: ToolInvocationContext): Promise<JsonValue> => {
     try {
       return json(await operation(objectInput(value)))
     } catch (cause) {

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
 import { formatApprovalPrompt, resolveApproval } from '@oh-my-pi/pi-coding-agent/tools/approval'
-import { OMP_RPC_PROTOCOL_VERSION } from '../src/contracts.ts'
+import { OMP_RPC_PROTOCOL_VERSION, OMP_RUNTIME_HOST_CAPABILITIES } from '../src/contracts.ts'
 import {
   createDoppelgangerOmpExtension,
   ompToolParametersFromJsonSchema,
@@ -24,8 +24,17 @@ function runtimeTool(
   name: string,
   description = name,
   inputSchema: Record<string, unknown> = { type: 'object', properties: {}, additionalProperties: false },
+  approval?: { readonly policy: 'required'; readonly reason?: string },
 ) {
-  return { name, description, inputSchema, available: true }
+  return {
+    name,
+    label: description,
+    description,
+    inputSchema,
+    available: true,
+    revision: `revision:${name}:${description}:${approval === undefined ? 'none' : approval.reason ?? 'required'}`,
+    ...(approval === undefined ? {} : { approval }),
+  }
 }
 
 function deferred() {
@@ -54,22 +63,31 @@ class ExtensionConnection implements OmpChildConnection {
   disposal: OmpChildDisposal = { outcome: 'graceful', sessionDisposeAcknowledged: true }
   private readonly events: string[]
   private readonly index: number
+  private catalogOrdinal = 1
 
   constructor(events: string[] = [], index = 0) {
     this.events = events
     this.index = index
   }
-  activationTools: unknown[] = [{
-    name: 'memory.search',
-    description: 'Search memory',
-    inputSchema: {
-      type: 'object',
-      properties: { query: { type: 'string' } },
-      required: ['query'],
-      additionalProperties: false,
-    },
-    available: true,
-  }]
+  activationTools: Array<ReturnType<typeof runtimeTool>> = [runtimeTool('memory.search', 'Search memory', {
+    type: 'object',
+    properties: { query: { type: 'string' } },
+    required: ['query'],
+    additionalProperties: false,
+  })]
+
+  replaceTools(tools: Array<ReturnType<typeof runtimeTool>>): void {
+    this.activationTools = tools
+    const revision = `catalog:${++this.catalogOrdinal}`
+    this.notifications.get('toolCatalog.changed')?.({ revision })
+  }
+
+  private catalog() {
+    return {
+      revision: `catalog:${this.catalogOrdinal}`,
+      tools: [...this.activationTools].sort((left, right) => left.name.localeCompare(right.name)),
+    }
+  }
 
   async request(method: string, params?: unknown): Promise<unknown> {
     this.requests.push({ method, params })
@@ -79,10 +97,17 @@ class ExtensionConnection implements OmpChildConnection {
       if (this.activationError !== undefined) throw this.activationError
       return {
         protocolVersion: OMP_RPC_PROTOCOL_VERSION,
+        capabilities: OMP_RUNTIME_HOST_CAPABILITIES,
         diagnostics: { compositionRevision: 'effective-one' },
         runtimeRevision: 'effective-one',
-        tools: this.activationTools,
+        catalog: this.catalog(),
       }
+    }
+    if (method === 'tools.snapshot') {
+      return this.catalog()
+    }
+    if (method === 'runtime.diagnostics') {
+      return { runtimeRevision: 'effective-one', diagnostics: { compositionRevision: 'effective-one' } }
     }
     if (method === 'context.resolve') {
       await this.contextGate
@@ -255,6 +280,20 @@ describe('OMP JSON Schema translation', () => {
       .toBeGreaterThan(0)
   })
 
+  it('treats mutable JSON Schema defaults as annotations without materializing shared values', () => {
+    const parameters = ompToolParametersFromJsonSchema({
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        excludePatterns: { type: 'array', items: { type: 'string' }, default: [] },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    }) as (value: unknown) => unknown
+
+    expect(parameters({ path: '/workspace' })).toEqual({ path: '/workspace' })
+  })
+
   it('rejects unsupported constructs at their schema path instead of widening validation', () => {
     expect(() => ompToolParametersFromJsonSchema({
       type: 'object',
@@ -288,26 +327,44 @@ describe('Doppelganger OMP extension', () => {
       type: 'before_agent_start',
       prompt: 'Current user turn',
       systemPrompt: ['Existing OMP instructions.'],
-    }, ctx)).resolves.toBeUndefined()
-    const outboundMessages = [{
-      role: 'user', content: [{ type: 'text', text: 'Current user turn' }], timestamp: 1,
-    }]
-    const projected = await pi.handlers.get('context')!({
-      type: 'context', messages: outboundMessages,
-    }, ctx) as { messages: unknown[] }
-    expect(projected.messages).toEqual([
-      ...outboundMessages,
-      {
-        role: 'developer',
-        content: [{ type: 'text', text: 'Persona context.' }],
-        attribution: 'agent',
+    }, ctx)).resolves.toEqual({
+      systemPrompt: ['Existing OMP instructions.', 'Persona context.'],
+    })
+    expect(pi.handlers.has('context')).toBe(false)
+
+    await pi.handlers.get('todo_reminder')!({
+      type: 'todo_reminder',
+      todos: [
+        { content: 'Finish transport', status: 'in_progress' },
+        { content: 'Wait for review', status: 'blocked', blocker: 'review pending' },
+      ],
+      attempt: 2,
+      maxAttempts: 3,
+    }, ctx)
+    expect(factory.connection.requests).toContainEqual({
+      method: 'omp.todo-reminder',
+      params: {
+        protocolVersion: 1,
+        type: 'todo-reminder',
+        deliveryId: 'omp-session:omp-todo-reminder:1',
+        sessionId: 'omp-session',
         timestamp: expect.any(Number),
+        todos: [
+          { content: 'Finish transport', status: 'in_progress' },
+          { content: 'Wait for review', status: 'blocked', blocker: 'review pending' },
+        ],
+        attempt: 2,
+        maxAttempts: 3,
       },
-    ])
-    expect(outboundMessages).toHaveLength(1)
+    })
+    expect(pi.handlers.has('context')).toBe(false)
     expect(factory.connection.requests).toContainEqual({
       method: 'context.resolve',
-      params: expect.objectContaining({ input: 'Current user turn', tokenBudget: 321 }),
+      params: expect.objectContaining({
+        requestId: expect.any(String),
+        turn: { input: 'Current user turn', turnId: 'omp-session:turn:1' },
+        tokenBudget: 321,
+      }),
     })
 
     const search = pi.tools.get('doppelganger_memory_search')!
@@ -317,61 +374,38 @@ describe('Doppelganger OMP extension', () => {
     const proxyResult = await search.execute('call', { query: 'Cordis' }, undefined, undefined, ctx)
     expect(proxyResult.content[0]?.text).toContain('"found": 1')
 
-    factory.connection.notifications.get('tools.changed')?.([{
-      name: 'memory.remember',
-      description: 'Remember',
-      inputSchema: {
-        type: 'object',
-        properties: { content: { type: 'string', minLength: 1 } },
-        required: ['content'],
-        additionalProperties: false,
-      },
-      available: true,
-    }])
+    factory.connection.replaceTools([runtimeTool('memory.remember', 'Remember', {
+      type: 'object',
+      properties: { content: { type: 'string', minLength: 1 } },
+      required: ['content'],
+      additionalProperties: false,
+    })])
     await vi.waitFor(() => expect(pi.activeTools()).toEqual(['read', 'bash', 'doppelganger_memory_remember']))
     expect((await search.execute('call', { query: 'stale' }, undefined, undefined, ctx)).isError).toBe(true)
     const remember = pi.tools.get('doppelganger_memory_remember')!
     const firstSchema = remember.parameters
-    factory.connection.notifications.get('tools.changed')?.([{
-      name: 'memory.remember',
-      description: 'Remember updated',
-      inputSchema: {
-        type: 'object',
-        properties: { content: { type: 'string' }, operationId: { type: 'string' } },
-        required: ['content', 'operationId'],
-        additionalProperties: false,
-      },
-      available: true,
-    }])
+    factory.connection.replaceTools([runtimeTool('memory.remember', 'Remember updated', {
+      type: 'object',
+      properties: { content: { type: 'string' }, operationId: { type: 'string' } },
+      required: ['content', 'operationId'],
+      additionalProperties: false,
+    })])
     await vi.waitFor(() => expect(pi.tools.get('doppelganger_memory_remember')?.description).toContain('updated'))
     expect(pi.tools.get('doppelganger_memory_remember')?.parameters).not.toBe(firstSchema)
 
     factory.connection.contextContent = 'Reloaded runtime context.'
-    factory.connection.notifications.get('runtime.changed')?.({
-      runtimeRevision: 'two',
-      diagnostics: { compositionRevision: 'two' },
-      tools: [{
-        name: 'memory.remember',
-        description: 'Remember updated',
-        inputSchema: {
-          type: 'object',
-          properties: { content: { type: 'string' }, operationId: { type: 'string' } },
-          required: ['content', 'operationId'],
-          additionalProperties: false,
-        },
-        available: true,
-      }],
-    })
+    factory.connection.replaceTools([runtimeTool('memory.remember', 'Remember updated', {
+      type: 'object',
+      properties: { content: { type: 'string' }, operationId: { type: 'string' } },
+      required: ['content', 'operationId'],
+      additionalProperties: false,
+    })])
     await expect(pi.handlers.get('before_agent_start')!({
       type: 'before_agent_start',
       prompt: 'Next turn',
       systemPrompt: ['Existing OMP instructions.'],
-    }, ctx)).resolves.toBeUndefined()
-    const afterReload = await pi.handlers.get('context')!({
-      type: 'context', messages: outboundMessages,
-    }, ctx) as { messages: Array<{ role?: string; content?: Array<{ text?: string }> }> }
-    expect(afterReload.messages.at(-1)).toMatchObject({
-      role: 'developer', content: [{ type: 'text', text: 'Reloaded runtime context.' }],
+    }, ctx)).resolves.toEqual({
+      systemPrompt: ['Existing OMP instructions.', 'Reloaded runtime context.'],
     })
 
     await pi.handlers.get('turn_start')!({ type: 'turn_start', turnIndex: 0, timestamp: 10 }, ctx)
@@ -439,49 +473,55 @@ describe('Doppelganger OMP extension', () => {
 
     expect(published(factory.connection).at(-1)).not.toHaveProperty('toolOutcomes')
 
-    factory.connection.notifications.get('tools.changed')?.([])
+    factory.connection.replaceTools([])
     await vi.waitFor(() => expect(pi.activeTools()).toEqual(['read', 'bash']))
     await pi.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, ctx)
     await vi.waitFor(() => expect(published(factory.connection).at(-1)?.type).toBe('session-disposed'))
     await vi.waitFor(() => expect(factory.connection.disposed).toBe(true))
     expect(pi.api.logger.error).not.toHaveBeenCalled()
   })
-  it('resolves fresh runtime context before every model request in one agent run', async () => {
+  it('resolves runtime context once per agent run and keeps one snapshot through tool continuations', async () => {
     const { root, home } = await projectFixture()
     const factory = new ExtensionFactory()
     const pi = fakePi()
     createDoppelgangerOmpExtension({ home, childFactory: factory, tokenBudget: 222 })(pi.api)
     const ctx = extensionContext(root)
-    const messages = [{ role: 'user', content: [{ type: 'text', text: 'Remember this' }], timestamp: 1 }]
 
     await pi.handlers.get('session_start')!({ type: 'session_start' }, ctx)
-    await pi.handlers.get('before_agent_start')!({
+    factory.connection.contextContent = 'First turn context.'
+    await expect(pi.handlers.get('before_agent_start')!({
       type: 'before_agent_start', prompt: 'Remember this', systemPrompt: ['Host prompt'],
+    }, ctx)).resolves.toEqual({ systemPrompt: ['Host prompt', 'First turn context.'] })
+    expect(pi.handlers.has('context')).toBe(false)
+
+    await pi.handlers.get('turn_start')!({ type: 'turn_start', turnIndex: 0, timestamp: 1 }, ctx)
+    factory.connection.contextContent = 'Changed after tool.'
+    await pi.handlers.get('tool_execution_start')!({
+      type: 'tool_execution_start', toolCallId: 'call-one', toolName: 'read', args: {},
     }, ctx)
-
-    factory.connection.contextContent = 'First context.'
-    const first = await pi.handlers.get('context')!({ type: 'context', messages }, ctx) as { messages: unknown[] }
-    factory.connection.contextContent = 'Second context.'
-    const second = await pi.handlers.get('context')!({ type: 'context', messages }, ctx) as { messages: unknown[] }
-
-    expect(messages).toHaveLength(1)
-    expect(first.messages).toHaveLength(2)
-    expect(second.messages).toHaveLength(2)
-    expect(first.messages.at(-1)).toMatchObject({
-      role: 'developer', content: [{ type: 'text', text: 'First context.' }], attribution: 'agent',
-    })
-    expect(second.messages.at(-1)).toMatchObject({
-      role: 'developer', content: [{ type: 'text', text: 'Second context.' }], attribution: 'agent',
-    })
+    await pi.handlers.get('tool_execution_end')!({
+      type: 'tool_execution_end', toolCallId: 'call-one', toolName: 'read', result: {}, isError: false,
+    }, ctx)
+    await pi.handlers.get('turn_end')!({
+      type: 'turn_end', turnIndex: 0,
+      message: { role: 'assistant', content: [{ type: 'toolCall', id: 'call-one', name: 'read', arguments: {} }], stopReason: 'toolUse' },
+      toolResults: [],
+    }, ctx)
     expect(factory.connection.requests.filter(request => request.method === 'context.resolve')).toEqual([
-      { method: 'context.resolve', params: { input: 'Remember this', turnId: 'omp-session:turn:1', tokenBudget: 222 } },
-      { method: 'context.resolve', params: { input: 'Remember this', turnId: 'omp-session:turn:1', tokenBudget: 222 } },
+      { method: 'context.resolve', params: {
+        requestId: 'omp-session:context:1', turn: { input: 'Remember this', turnId: 'omp-session:turn:1' }, tokenBudget: 222,
+      } },
     ])
 
+    await expect(pi.handlers.get('before_agent_start')!({
+      type: 'before_agent_start', prompt: 'Next question', systemPrompt: ['Host prompt'],
+    }, ctx)).resolves.toEqual({ systemPrompt: ['Host prompt', 'Changed after tool.'] })
+    expect(factory.connection.requests.filter(request => request.method === 'context.resolve')).toHaveLength(2)
+
     factory.connection.contextError = new Error('context failed')
-    const failed = await pi.handlers.get('context')!({ type: 'context', messages }, ctx)
-    expect(failed).toBeUndefined()
-    expect(messages).toHaveLength(1)
+    await expect(pi.handlers.get('before_agent_start')!({
+      type: 'before_agent_start', prompt: 'Failing question', systemPrompt: ['Host prompt'],
+    }, ctx)).resolves.toBeUndefined()
     await vi.waitFor(() => expect(pi.activeTools()).toEqual(['read', 'bash']))
   })
   it('rebinds new resumed forked and branched sessions while retaining same-session tree navigation', async () => {
@@ -596,16 +636,13 @@ describe('Doppelganger OMP extension', () => {
     const session = mutableExtensionContext(root, 'session-one')
 
     await pi.handlers.get('session_start')!({ type: 'session_start' }, session.ctx)
-    await pi.handlers.get('before_agent_start')!({
-      type: 'before_agent_start', prompt: 'Old prompt', systemPrompt: [],
-    }, session.ctx)
     const oldTool = pi.tools.get('doppelganger_memory_old')!
-    const oldToolsChanged = factory.connection.notifications.get('tools.changed')!
+    const oldToolsChanged = factory.connection.notifications.get('toolCatalog.changed')!
     const oldRuntimeFailed = factory.connection.notifications.get('runtime.failed')!
     const contextGate = deferred()
     factory.connection.contextGate = contextGate.promise
-    const lateContext = pi.handlers.get('context')!({
-      type: 'context', messages: [{ role: 'user', content: 'Old prompt', timestamp: 1 }],
+    const lateContext = pi.handlers.get('before_agent_start')!({
+      type: 'before_agent_start', prompt: 'Old prompt', systemPrompt: ['Host prompt'],
     }, session.ctx)
     await vi.waitFor(() => expect(factory.connection.requests.some(request => request.method === 'context.resolve')).toBe(true))
 
@@ -617,7 +654,7 @@ describe('Doppelganger OMP extension', () => {
     contextGate.resolve()
 
     expect(await lateContext).toBeUndefined()
-    oldToolsChanged([runtimeTool('memory.stale')])
+    oldToolsChanged({ revision: 'catalog:stale' })
     oldRuntimeFailed({ message: 'stale runtime failure' })
     await Promise.resolve()
     expect(pi.activeTools()).toEqual(['read', 'bash', 'doppelganger_memory_new'])
@@ -667,21 +704,22 @@ describe('Doppelganger OMP extension', () => {
     expect(pi.activeTools()).toEqual([
       'read',
       'bash',
+      'doppelganger_memory_candidates_list',
       'doppelganger_persona_revise',
       'doppelganger_runtime-plugin_inspect-list',
-      'doppelganger_memory_candidates_list',
     ])
-
     const candidates = pi.tools.get('doppelganger_memory_candidates_list')!
     await candidates.execute('canonical', {}, undefined, undefined, ctx)
     expect(factory.connection.requests).toContainEqual({
       method: 'tools.invoke',
-      params: { name: 'memory.candidates.list', input: {} },
+      params: expect.objectContaining({
+        callId: 'canonical', name: 'memory.candidates.list', toolRevision: 'revision:memory.candidates.list:memory.candidates.list:none', input: {},
+      }),
     })
 
     const stale = pi.tools.get('doppelganger_persona_revise')!
     const invocationCount = factory.connection.requests.filter(request => request.method === 'tools.invoke').length
-    factory.connection.notifications.get('tools.changed')?.([runtimeTool('memory.next')])
+    factory.connection.replaceTools([runtimeTool('memory.next')])
     await vi.waitFor(() => expect(pi.activeTools()).toEqual(['read', 'bash', 'doppelganger_memory_next']))
     expect((await stale.execute('stale', {}, undefined, undefined, ctx)).details).toEqual({
       code: 'RUNTIME_UNAVAILABLE',
@@ -719,13 +757,13 @@ describe('Doppelganger OMP extension', () => {
       `portable tool "${overlongPortableName}" maps to a 65-character OMP proxy; limit is 64`,
     ))
     expect(pi.api.logger.error).toHaveBeenCalledWith(expect.stringContaining(
-      'runtime tools "one.two" and "one_two" map to the same OMP proxy "doppelganger_one_two"',
+      'runtime tools "one_two" and "one.two" map to the same OMP proxy "doppelganger_one_two"',
     ))
 
     await pi.tools.get(maximumProxyName)!.execute('maximum', {}, undefined, undefined, ctx)
     expect(factory.connection.requests).toContainEqual({
       method: 'tools.invoke',
-      params: { name: maximumPortableName, input: {} },
+      params: expect.objectContaining({ callId: 'maximum', name: maximumPortableName, input: {} }),
     })
   })
   it('enforces required approval once per exact call in yolo and follows current reload metadata', async () => {
@@ -736,21 +774,15 @@ describe('Doppelganger OMP extension', () => {
     const ctx = extensionContext(root)
     await pi.handlers.get('session_start')!({ type: 'session_start' }, ctx)
     expect(pi.tools.get('doppelganger_memory_search')?.loadMode).toBe('discoverable')
-    factory.connection.notifications.get('tools.changed')?.([{
-      name: 'persona.revise',
-      description: 'Revise Persona',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          target: { type: 'string' },
-          replacement: { type: 'string' },
-        },
-        required: ['target', 'replacement'],
-        additionalProperties: false,
+    factory.connection.replaceTools([runtimeTool('persona.revise', 'Revise Persona', {
+      type: 'object',
+      properties: {
+        target: { type: 'string' },
+        replacement: { type: 'string' },
       },
-      approval: { policy: 'required', reason: 'This changes active Persona instructions.' },
-      available: true,
-    }])
+      required: ['target', 'replacement'],
+      additionalProperties: false,
+    }, { policy: 'required', reason: 'This changes active Persona instructions.' })])
     await vi.waitFor(() => expect(pi.tools.has('doppelganger_persona_revise')).toBe(true))
     const tool = pi.tools.get('doppelganger_persona_revise')!
     expect(tool.loadMode).toBe('essential')
@@ -781,38 +813,44 @@ describe('Doppelganger OMP extension', () => {
       .rejects.toThrow('requires approval but no interactive UI available')
     expect(factory.connection.requests.filter(request => request.method === 'tools.invoke')).toHaveLength(2)
 
-    factory.connection.notifications.get('tools.changed')?.([{
-      name: 'persona.revise',
-      description: 'Revise Persona',
-      inputSchema: {
-        type: 'object',
-        properties: { target: { type: 'string' }, replacement: { type: 'string' } },
-        required: ['target', 'replacement'],
-        additionalProperties: false,
-      },
-      available: true,
-    }])
+    factory.connection.replaceTools([runtimeTool('persona.revise', 'Revise Persona', {
+      type: 'object',
+      properties: { target: { type: 'string' }, replacement: { type: 'string' } },
+      required: ['target', 'replacement'],
+      additionalProperties: false,
+    })])
     await vi.waitFor(() => expect(pi.tools.get('doppelganger_persona_revise')?.loadMode).toBe('discoverable'))
-    await vi.waitFor(() => expect((tool.approval as () => unknown)()).toBe('exec'))
-    expect(tool.formatApprovalDetails?.(args)).toBeUndefined()
+    const unapprovedTool = pi.tools.get('doppelganger_persona_revise')!
+    expect((unapprovedTool.approval as () => unknown)()).toBe('exec')
+    expect(unapprovedTool.formatApprovalDetails?.(args)).toBeUndefined()
 
-    factory.connection.notifications.get('tools.changed')?.([{
-      name: 'persona.revise',
-      description: 'Revise Persona',
-      inputSchema: {
-        type: 'object',
-        properties: { target: { type: 'string' }, replacement: { type: 'string' } },
-        required: ['target', 'replacement'],
-        additionalProperties: false,
-      },
-      approval: { policy: 'required', reason: 'Review the updated revision.' },
-      available: true,
-    }])
+    factory.connection.replaceTools([runtimeTool('persona.revise', 'Revise Persona', {
+      type: 'object',
+      properties: { target: { type: 'string' }, replacement: { type: 'string' } },
+      required: ['target', 'replacement'],
+      additionalProperties: false,
+    }, { policy: 'required' })])
     await vi.waitFor(() => expect(pi.tools.get('doppelganger_persona_revise')?.loadMode).toBe('essential'))
-    await vi.waitFor(() => expect((tool.approval as () => unknown)()).toEqual({
+    const reasonlessTool = pi.tools.get('doppelganger_persona_revise')!
+    expect((reasonlessTool.approval as () => unknown)()).toEqual({ tier: 'write', policy: 'prompt' })
+    expect(reasonlessTool.formatApprovalDetails?.(args)).toEqual([
+      'Portable tool: persona.revise',
+      'Arguments: {\n  "replacement": "Updated.\\n",\n  "target": "trait:evolving-profile"\n}',
+    ])
+
+    factory.connection.replaceTools([runtimeTool('persona.revise', 'Revise Persona', {
+      type: 'object',
+      properties: { target: { type: 'string' }, replacement: { type: 'string' } },
+      required: ['target', 'replacement'],
+      additionalProperties: false,
+    }, { policy: 'required', reason: 'Review the updated revision.' })])
+    await vi.waitFor(() => expect((pi.tools.get('doppelganger_persona_revise')?.approval as (() => { reason?: string }) | undefined)?.().reason)
+      .toBe('Review the updated revision.'))
+    const updatedTool = pi.tools.get('doppelganger_persona_revise')!
+    expect((updatedTool.approval as () => unknown)()).toEqual({
       tier: 'write', policy: 'prompt', reason: 'Review the updated revision.',
-    }))
-    const bounded = tool.formatApprovalDetails?.({ replacement: 'x'.repeat(4_000), target: 'trait:evolving-profile' })
+    })
+    const bounded = updatedTool.formatApprovalDetails?.({ replacement: 'x'.repeat(4_000), target: 'trait:evolving-profile' })
     expect(Array.isArray(bounded) ? bounded.join('\n').length : 0).toBeLessThan(2_100)
   })
 

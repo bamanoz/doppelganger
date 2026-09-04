@@ -12,7 +12,7 @@ async function setup(config: object = {}) {
 }
 
 async function invoke(ctx: Context, name: string, input: JsonValue) {
-  const result = await ctx.doppelgangerTools.invoke(name, input)
+  const result = await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: name, toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === name)!.revision, input: input }, 'test-session')
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
   return result.value
 }
@@ -35,7 +35,7 @@ describe('generated runtime inspection catalog', () => {
     expect(service).toMatchObject({
       name: 'doppelgangerTools',
       available: true,
-      methods: expect.arrayContaining(['list(): readonly ToolDescriptor[]']),
+      methods: expect.arrayContaining(['snapshot(): ToolCatalogSnapshot']),
       referencedTypes: { ToolDescriptor: expect.any(Object) },
     })
     expect(await invoke(ctx, 'runtime-plugin.inspect-query', {
@@ -68,21 +68,21 @@ describe('generated runtime inspection catalog', () => {
 
   it('rejects uncatalogued providers, methods, names, and oversized output', async () => {
     const ctx = await setup()
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.inspect-query', {
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-query', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-query')!.revision, input: {
       provider: 'Private', method: 'get', name: 'registry',
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INSPECT_NOT_FOUND' } })
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.inspect-query', {
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'INSPECT_NOT_FOUND' } })
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-query', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-query')!.revision, input: {
       provider: 'Service', method: 'invoke', name: 'doppelgangerTools',
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INSPECT_NOT_FOUND' } })
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.inspect-query', {
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'INSPECT_NOT_FOUND' } })
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-query', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-query')!.revision, input: {
       provider: 'Service', method: 'get', name: 'loader',
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INSPECT_NOT_FOUND' } })
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'INSPECT_NOT_FOUND' } })
     await ctx.fiber.dispose()
 
     const bounded = await setup({ maximumInspectionBytes: 256 })
-    await expect(bounded.doppelgangerTools.invoke('runtime-plugin.inspect-query', {
+    await expect(bounded.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-query', toolRevision: bounded.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-query')!.revision, input: {
       provider: 'Service', method: 'get', name: 'doppelgangerTools',
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INSPECTION_LIMIT_EXCEEDED' } })
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'INSPECTION_LIMIT_EXCEEDED' } })
     await bounded.fiber.dispose()
   })
 })

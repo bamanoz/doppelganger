@@ -76,46 +76,58 @@ The adapter SHALL serialize initial activation, committed OMP session rebinding,
 - **THEN** the previous binding remains disposed, Doppelganger stays unavailable for the new session with an actionable diagnostic, and ordinary OMP behavior remains usable
 
 ### Requirement: Runtime context projection
-Before each OMP model request, the adapter SHALL request current assembled context from the active binding using the stable principal input and turn identity established for that agent run. It SHALL append non-empty context only to the outbound message copy without discarding host instructions or persisting the synthetic contribution into OMP session history. Every model request in the same agent run SHALL resolve context again so committed runtime reloads and plugin-owned state changes are visible immediately.
+Before each user-initiated OMP agent run, the adapter SHALL request current assembled context exactly once from the active binding using the direct principal input and a newly established stable turn identity. It SHALL append non-empty context to the existing OMP system prompt for that run without discarding host instructions or persisting synthetic conversation history. Every model continuation after tool calls in the same run SHALL use the same resolved snapshot and SHALL NOT trigger another context request.
 
-#### Scenario: Runtime context changes during session
+#### Scenario: Runtime context changes between user turns
 - **ID**: `runtime.context.reload`
 - **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::rebuilds ordered user/project layers and rejects stale tools after committed reload`
 - **WHEN** a valid composition or asset update reloads successfully
-- **THEN** the next OMP model request receives the current assembled context
+- **THEN** the next user-initiated OMP agent run receives the current assembled context
 
-#### Scenario: Tool changes runtime context within one agent run
-- **ID**: `runtime.context.same-run-refresh`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::resolves fresh runtime context before every model request in one agent run`
-- **WHEN** OMP makes another model request after a tool or continuation changes active runtime context
-- **THEN** the new request contains exactly one current Doppelganger contribution rather than the context resolved before the agent run
+#### Scenario: Tool continuation reuses turn context
+- **ID**: `runtime.context.same-run-snapshot`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::resolves runtime context once per agent run and keeps one snapshot through tool continuations`
+- **WHEN** one OMP agent run performs additional model requests after tool calls
+- **THEN** those requests retain the system-prompt snapshot resolved for the direct user input and send no additional `context.resolve` request
 
-#### Scenario: Outbound context transformation repeats
-- **ID**: `runtime.context.ephemeral-projection`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::resolves fresh runtime context before every model request in one agent run`
-- **WHEN** the per-request context hook runs multiple times over the same persisted OMP conversation
-- **THEN** each outbound copy receives at most one current synthetic contribution and the stored conversation remains unchanged
+#### Scenario: Existing host instructions are preserved
+- **ID**: `runtime.context.system-prompt-append`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::preserves host prompts, projects exact schemas and tools, and forwards committed lifecycle payloads`
+- **WHEN** a non-empty Doppelganger assembly is resolved before an agent run
+- **THEN** the adapter appends it to the existing OMP system prompt rather than replacing host instructions or adding retained conversation messages
 
-#### Scenario: Context resolution fails before a model request
+#### Scenario: Context resolution fails before an agent run
 - **ID**: `runtime.context.request-failure`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::resolves fresh runtime context before every model request in one agent run`
-- **WHEN** the current child times out, exits, or rejects context resolution
-- **THEN** OMP continues the request with its original messages, the failing binding becomes unavailable, and no stale runtime context is injected
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::resolves runtime context once per agent run and keeps one snapshot through tool continuations`
+- **WHEN** the current child times out, exits, or rejects the once-per-turn context resolution
+- **THEN** OMP continues without a Doppelganger prompt override, the failing binding becomes unavailable, and no stale runtime context is injected
 
 ### Requirement: Runtime tool projection
-The adapter SHALL project active runtime tools into OMP and proxy invocations and results over the session connection without requiring Persona or memory extensions.
+The adapter SHALL project the current immutable shared Runtime Host tool snapshot into OMP and proxy correlated invocations, cancellation, approval grants, and results over the session connection without requiring Persona, memory, or MCP extensions. Projection SHALL commit an exact candidate snapshot atomically, retain descriptor revisions in native closures, ignore stale `toolCatalogChanged` callbacks whose catalog revision precedes the active projection, and treat JSON Schema defaults as validation annotations rather than host-side value factories.
 
 #### Scenario: Runtime tool is added or updated
-- **ID**: `runtime.tool.reload.upsert`
-- **EVIDENCE**: `packages/host-omp/tests/vertical.spec.ts::applies valid preset updates, rolls invalid changes back, and preserves state across reload`
-- **WHEN** hot reload adds a tool or changes its definition
-- **THEN** the OMP session exposes the new active definition without restarting the session
+- **ID**: `host.omp.runtime-tool-is-added-or-updated`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::preserves host prompts, projects exact schemas and tools, and forwards committed lifecycle payloads`
+- **WHEN** a committed catalog revision adds a tool or changes its descriptor revision
+- **THEN** the OMP session atomically exposes the new active definition without restarting and every new closure retains its exact canonical name and tool revision
+
+#### Scenario: Runtime tool declares a mutable default
+- **ID**: `host.omp.runtime-tool-declares-a-mutable-default`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::treats mutable JSON Schema defaults as annotations without materializing shared values`
+- **WHEN** a projected tool schema declares an omitted array or object property with a mutable default
+- **THEN** OMP projects the schema without materializing or sharing that default and forwards only caller-supplied arguments
 
 #### Scenario: Runtime tool is removed
-- **ID**: `runtime.tool.reload.remove`
-- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::rebuilds ordered user/project layers and rejects stale tools after committed reload`
-- **WHEN** hot reload removes a previously exposed tool
-- **THEN** the adapter deactivates that tool for the remainder of the OMP session
+- **ID**: `host.omp.runtime-tool-is-removed`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::preserves host prompts, projects exact schemas and tools, and forwards committed lifecycle payloads`
+- **WHEN** a committed catalog revision removes a previously exposed tool
+- **THEN** the adapter deactivates that native proxy for the remainder of the OMP session and retained closures fail unavailable or stale without dispatch
+
+#### Scenario: Delayed old catalog callback arrives
+- **ID**: `host.omp.delayed-old-catalog-callback-arrives`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::commits only the exact catalog revision named by the callback`
+- **WHEN** the adapter has already projected catalog revision B and later receives `toolCatalogChanged` for revision A
+- **THEN** it keeps revision B and does not restore removed or replaced native tools
 
 ### Requirement: Lifecycle event forwarding
 The adapter SHALL forward normalized session, turn, tool, and compaction observation events through the child connection owned by one immutable OMP session binding. Every forwarded `sessionId`, `turnId`, `callId`, and `deliveryId` SHALL derive from that binding and its active turn rather than mutable OMP session state read after asynchronous work begins. OMP agent-loop settlement SHALL NOT be reported as `session-completed`; replacement and shutdown without terminal outcome evidence SHALL use neutral `session-disposed`.
@@ -195,44 +207,46 @@ The `host-omp` package SHALL expose the ordinary extension/adapter consumer API 
 - **THEN** it receives the supported extension construction and adapter-facing contracts without unrelated child or framed-transport internals
 
 ### Requirement: OMP adapter is composition-neutral
-The generic OMP adapter SHALL accept a fully resolved serialized composition activation and SHALL NOT select a named Runtime Preset, require Persona metadata, or import a specific Runtime Preset. Runtime selection outside the adapter SHALL resolve the winning Runtime Preset and ordered patches.
+The generic OMP adapter SHALL accept and validate its own serialized OMP activation request, reuse Composition Runtime canonicalization for the contained fully resolved composition, and SHALL NOT select a named Runtime Preset, require Persona metadata, or import a specific Runtime Preset. OMP-only host-kind, watch, transport, capability, and optional actor-provider configuration SHALL remain owned by `host-omp`; actor identity SHALL be mounted as a separate protected plugin rather than entering the shared bridge.
 
 #### Scenario: Actor-aware Persona composition is activated
-- **ID**: `activation.composition.neutral.actor-aware`
-- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation without preset assembly`
-- **EVIDENCE**: `packages/host-omp/tests/vertical.spec.ts::activates the host-neutral definition and projects identity plus selected traits`
+- **ID**: `host.omp.actor-aware-persona-composition-is-activated`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
 - **WHEN** generic configuration selects an actor-aware Persona Runtime Preset for an OMP session
-- **THEN** the adapter starts that serialized composition without containing named-preset or Persona-specific selection logic
+- **THEN** the adapter decodes the OMP request, independently supplies the shared bridge and actor plugin, and starts the canonical composition without containing named-preset or Persona-specific selection logic
 
 #### Scenario: Non-persona composition is activated
-- **ID**: `activation.composition.neutral.generic`
-- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::activates an empty Runtime Preset without standard protocols`
-- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation without preset assembly`
-- **WHEN** configuration resolves another valid Runtime Preset with the required host mount
-- **THEN** the same OMP adapter activates it without Persona or memory extensions
+- **ID**: `host.omp.non-persona-composition-is-activated`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** configuration resolves another valid Runtime Preset with no Persona or memory extensions
+- **THEN** the same OMP adapter activates it through the shared bridge and canonical Composition Runtime contract
+
+#### Scenario: Another host consumes Composition Runtime
+- **ID**: `host.omp.another-host-consumes-composition-runtime`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** DSH activates the same canonical composition in process
+- **THEN** it does not import or satisfy the OMP serialized activation schema
 
 ### Requirement: OMP supplies actor identity outside Runtime Presets
-The OMP extension SHALL accept an optional non-empty `actorId` host option, validate it before child activation, transport it across the versioned parent/child activation boundary, and provide it through the protected runtime-side actor service. Runtime Preset files, project manifests, patches, context, and tools SHALL NOT select or override that identifier.
+The OMP extension SHALL accept an optional non-empty `actorId` host option, validate it before child activation, transport it across the versioned parent/child activation boundary, and always provide Actor Identity through a separate protected actor plugin: `bound` when the identifier is resolved and explicit `unbound` otherwise. The shared Runtime Host bridge, capability profile, requests, and tool-catalog callback SHALL contain no `actorId`. Runtime Preset files, Persona configuration, project manifests, patches, context, and tools SHALL NOT select or override that identifier.
 
 #### Scenario: Local OMP actor is configured
-- **ID**: `omp.actor.bound-session`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::preserves host prompts, projects exact schemas and tools, and forwards committed lifecycle payloads`
-- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::isolates bound actors, exposes unbound state, and retains the host binding across reload`
+- **ID**: `host.omp.local-omp-actor-is-configured`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
 - **WHEN** an OMP session activates a Runtime Preset with a valid configured `actorId`
-- **THEN** the child runtime exposes that exact immutable actor binding to actor-aware extensions for the lifetime of the session
+- **THEN** the child mounts a separate actor provider exposing that exact immutable binding to actor-aware extensions for the lifetime of the Runtime Session
 
 #### Scenario: OMP actor identifier is invalid
-- **ID**: `omp.actor.invalid-config`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::rejects invalid actor configuration before starting a child`
+- **ID**: `host.omp.omp-actor-identifier-is-invalid`
 - **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::keeps absent activation inactive and reports malformed or incompatible descriptors`
 - **WHEN** the OMP extension receives an empty or non-string actor identifier
 - **THEN** activation fails visibly before a child Runtime Session becomes active and ordinary OMP behavior remains usable
 
 #### Scenario: OMP has no actor configuration
-- **ID**: `omp.actor.unbound-generic`
-- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::isolates bound actors, exposes unbound state, and retains the host binding across reload`
+- **ID**: `host.omp.omp-has-no-actor-configuration`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
 - **WHEN** OMP activates an actor-independent Runtime Preset without `actorId`
-- **THEN** the generic runtime remains usable with an explicit unbound actor service
+- **THEN** the generic runtime remains usable, the separate OMP actor provider exposes explicit `unbound` rather than an absent service, and the shared bridge remains unchanged
 
 ### Requirement: OMP actor binding is not model-controlled
 The OMP adapter SHALL NOT project actor selection, actor switching, or raw actor identifiers as model-invocable tools. Changing the configured actor SHALL require disposal and activation of a new Runtime Session.
@@ -276,7 +290,7 @@ The OMP transport SHALL support composition activation with an optional host act
 - **THEN** the child notifies the OMP extension and the next model request observes the current context and tool set without changing the actor binding
 
 ### Requirement: Projected OMP tools preserve supported schemas
-For each available runtime tool, the adapter SHALL register an OMP proxy whose validation reflects the supported subset of the tool's JSON Schema, including object properties, required fields, arrays, scalar types, enumerations, descriptions, and additional-property policy. Unsupported schema constructs SHALL fail projection diagnostically rather than silently widening validation.
+For each available runtime tool, the adapter SHALL register an OMP proxy whose validation reflects the supported subset of the tool's JSON Schema, including object properties, required fields, arrays, scalar types, enumerations, descriptions, and additional-property policy. JSON Schema defaults SHALL remain annotations rather than host-side argument transformations; mutable defaults SHALL NOT become shared OMP values. Unsupported schema constructs SHALL fail projection diagnostically rather than silently widening validation.
 
 #### Scenario: Structured memory tool is projected
 - **ID**: `tool.schema.validation`
@@ -284,6 +298,12 @@ For each available runtime tool, the adapter SHALL register an OMP proxy whose v
 - **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::preserves host prompts, projects exact schemas and tools, and forwards committed lifecycle payloads`
 - **WHEN** a runtime tool requires named fields with scalar and enumeration constraints
 - **THEN** OMP validates those fields before sending a transport invocation
+
+#### Scenario: Mutable schema default is projected safely
+- **ID**: `tool.schema.mutable-default.annotation`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::treats mutable JSON Schema defaults as annotations without materializing shared values`
+- **WHEN** a runtime tool declares an omitted array or object property with a mutable JSON Schema default
+- **THEN** OMP validates the supplied arguments without constructing, sharing, or forwarding the omitted default
 
 #### Scenario: Runtime tool schema is unsupported
 - **ID**: `tool.schema.unsupported`
@@ -313,25 +333,25 @@ For every available portable tool whose qualified name satisfies the host-neutra
 - **THEN** the old readable proxy is inactive, the new readable proxy is active, and no legacy alias is active
 
 ### Requirement: OMP proxy invocation uses canonical descriptor identity
-The adapter SHALL retain the exact dotted portable name with each committed projected descriptor and SHALL invoke `tools.invoke` with that canonical name. Dispatch, approval lookup, replacement, and stale-proxy checks SHALL use the committed proxy-to-descriptor association and SHALL NOT decode or otherwise reconstruct the portable name from the OMP proxy string.
+The adapter SHALL retain the exact dotted portable name and opaque tool revision with each committed projected descriptor and SHALL invoke the shared bridge with both values plus stable call and turn identities. Dispatch, approval lookup, replacement, cancellation, and stale-proxy checks SHALL use the committed proxy-to-descriptor association and SHALL NOT decode or reconstruct portable identity from the OMP proxy string.
 
 #### Scenario: Readable proxy invokes dotted portable tool
-- **ID**: `omp.tool-name.canonical-dispatch`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::projects readable proxy names, dispatches canonical names, and rejects stale closures after replacement`
+- **ID**: `host.omp.readable-proxy-invokes-dotted-portable-tool`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::preserves host prompts, projects exact schemas and tools, and forwards committed lifecycle payloads`
 - **WHEN** OMP calls `doppelganger_memory_candidates_list`
-- **THEN** the child receives one `tools.invoke` request whose name is exactly `memory.candidates.list`
+- **THEN** the child receives one invocation request whose name is exactly `memory.candidates.list` and whose tool revision is the one projected into that native closure
 
 #### Scenario: Descriptor is replaced under the same portable name
-- **ID**: `omp.tool-name.current-descriptor-replacement`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::enforces required approval once per exact call in yolo and follows current reload metadata`
+- **ID**: `host.omp.descriptor-is-replaced-under-the-same-portable-name`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
 - **WHEN** reload replaces the descriptor for `persona.revise` while retaining its portable name
-- **THEN** approval and invocation through `doppelganger_persona_revise` use the replacement descriptor rather than stale captured metadata
+- **THEN** the retained old closure fails `TOOL_REVISION_STALE` and a newly projected closure uses the replacement descriptor and approval metadata
 
 #### Scenario: Removed proxy closure is invoked
-- **ID**: `omp.tool-name.stale-closure-rejected`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::projects readable proxy names, dispatches canonical names, and rejects stale closures after replacement`
+- **ID**: `host.omp.removed-proxy-closure-is-invoked`
+- **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::contains the resolvable dependency closure for shipped standard and opt-in Loader plugins`
 - **WHEN** a caller retains an old `doppelganger_persona_revise` closure after `persona.revise` is removed
-- **THEN** the closure returns `RUNTIME_UNAVAILABLE` and does not invoke another portable tool
+- **THEN** the closure returns `RUNTIME_UNAVAILABLE` or `TOOL_REVISION_STALE` and does not invoke another portable tool
 
 ### Requirement: OMP rejects provider-unsafe proxy names before registration
 A projected OMP proxy name SHALL contain no more than 64 ASCII characters, including the `doppelganger_` prefix. If a portable descriptor would exceed that limit or collide with another projected name, the adapter SHALL keep that proxy unavailable and report a diagnostic identifying the portable name and violated constraint rather than registering a truncated, hashed, or ambiguous name. Unrelated valid portable tools SHALL remain projectable.
@@ -359,7 +379,7 @@ A proxy SHALL invoke the qualified runtime tool and return its serializable succ
 
 #### Scenario: Runtime tool rejects input semantically
 - **ID**: `tool.error.structured`
-- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::returns serializable structured domain and execution errors`
+- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::returns structured domain and execution errors`
 - **EVIDENCE**: `packages/host-omp/tests/protocol.spec.ts::round-trips requests and notifications while keeping remote errors structured`
 - **WHEN** the proxied tool returns a structured error
 - **THEN** OMP receives that code and message as an errored tool result while the runtime remains active
@@ -464,7 +484,7 @@ The local OMP plugin package SHALL declare the complete package dependency closu
 
 #### Scenario: Standard resolves from the plugin dependency tree
 - **ID**: `omp.package.standard-dependency-closure`
-- **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::contains the resolvable dependency closure for shipped standard and opt-in dynamic plugins`
+- **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::contains the resolvable dependency closure for shipped standard and opt-in Loader plugins`
 - **WHEN** the OMP plugin package is inspected without relying on undeclared repository imports
 - **THEN** every package referenced by `standard/runtime.cordis.yml` and every required runtime infrastructure peer resolves from the declared plugin dependency tree
 
@@ -492,6 +512,27 @@ The repository's project-local `.omp/extensions/doppelganger.ts` SHALL contain n
 - **WHEN** OMP starts through the delegated repository extension with a generated temporary Runtime Preset and test actor
 - **THEN** the generated preset activates through the same package entrypoint used by local plugin linking and the project extension contains no repository home, actor, child path, or local construction defaults
 
+### Requirement: OMP loading modes are explicit alternatives
+Doppelganger SHALL support both the installed or linked `@doppelganger/doppelganger-omp` entrypoint and the repository-local `.omp/extensions/doppelganger.ts` delegation. Current setup and verification guidance SHALL state that OMP deduplicates extension candidates by resolved absolute path rather than package name or exported factory identity, so the two different paths SHALL be selected as alternatives within one OMP invocation. The guidance SHALL provide concrete plugin enable and disable actions and SHALL NOT claim a Doppelganger singleton, lease, or restriction on opening the same OMP session in multiple processes.
+
+#### Scenario: Developer uses the linked plugin mode
+- **ID**: `omp.package.loading-mode-linked`
+- **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::is discovered through real isolated OMP local plugin linking`
+- **WHEN** the active OMP profile enables the linked package and the workspace does not expose the project-local Doppelganger extension
+- **THEN** OMP loads the package entrypoint and starts its child runtime through the installed package layout
+
+#### Scenario: Developer uses project-local dogfood mode
+- **ID**: `omp.package.loading-mode-project-local`
+- **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::uses the delegated repository extension with a generated test preset`
+- **WHEN** the linked package is absent or disabled for the active OMP profile and OMP discovers the repository-local delegation
+- **THEN** the project-selected Runtime Preset activates through the same neutral package factory without a second Doppelganger adapter
+
+#### Scenario: Both distinct entrypoint paths are enabled
+- **ID**: `omp.package.loading-mode-duplicate-warning`
+- **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::uses the same package entrypoint for project discovery and plugin linking`
+- **WHEN** documentation explains the repository delegation and linked plugin as different OMP extension paths that export the same package factory
+- **THEN** it warns that enabling both makes OMP invoke two adapters and instructs the operator to disable one path rather than relying on runtime arbitration
+
 ### Requirement: Local packaging does not imply public release
 The new OMP plugin package SHALL remain `private: true` at version `0.0.0`. Verification SHALL cover local linking and package contents, but SHALL NOT publish, reserve a registry name, define independent release versioning, or claim marketplace compatibility.
 
@@ -502,52 +543,58 @@ The new OMP plugin package SHALL remain `private: true` at version `0.0.0`. Veri
 - **THEN** the OMP package is usable through local linking while public release remains a separate explicit change
 
 ### Requirement: OMP enforces required portable-tool approval natively
-For every projected runtime tool whose descriptor declares required approval, the OMP adapter SHALL register a native tool approval decision that forces `prompt` for the exact call even in permissive or `yolo` mode. The prompt SHALL identify the portable tool, include its declared reason, and render bounded exact invocation arguments. The adapter SHALL remain generic and SHALL NOT import or special-case Persona Authoring.
+For every projected descriptor declaring required approval, the OMP adapter SHALL register a native decision that forces `prompt` for the exact call even in permissive or `yolo` mode. The prompt SHALL identify the portable tool and render bounded exact invocation arguments. When the descriptor supplies an advisory reason, OMP SHALL preserve it in native approval metadata; absence of a reason SHALL NOT weaken or disable required approval. After explicit approval, the trusted adapter SHALL create one protected grant bound to the call ID, descriptor revision, and canonical input digest; the child bridge SHALL revalidate and consume it before handler dispatch. The adapter SHALL remain generic and SHALL NOT import or special-case Persona Authoring or MCP.
 
 #### Scenario: Required tool is called in yolo mode
-- **ID**: `omp.approval.yolo-prompts`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::enforces required approval once per exact call in yolo and follows current reload metadata`
+- **ID**: `host.omp.required-tool-is-called-in-yolo-mode`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::preserves host prompts, projects exact schemas and tools, and forwards committed lifecycle payloads`
 - **WHEN** OMP runs in `yolo` mode and the model calls a projected runtime tool with required approval
-- **THEN** OMP still presents one native approval prompt and does not send `tools.invoke` before an explicit grant
+- **THEN** OMP presents one native prompt and sends no invocation or grant before an explicit decision
 
 #### Scenario: User approves the call
-- **ID**: `omp.approval.one-shot-grant`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::enforces required approval once per exact call in yolo and follows current reload metadata`
+- **ID**: `host.omp.user-approves-the-call`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
 - **WHEN** the user grants the native prompt for one exact projected invocation
-- **THEN** the adapter invokes the current runtime descriptor once and returns its ordinary portable result
+- **THEN** the adapter sends the exact one-shot grant, the child revalidates it, and the current handler may run once
 
 #### Scenario: User rejects or closes the prompt
-- **ID**: `omp.approval.denied-fails-closed`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::enforces required approval once per exact call in yolo and follows current reload metadata`
-- **WHEN** the approval is rejected, cancelled, or unavailable
-- **THEN** OMP returns its native denied outcome, does not invoke the child runtime handler, and keeps the runtime session usable
+- **ID**: `host.omp.user-rejects-or-closes-the-prompt`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::keeps absent activation inactive and reports malformed or incompatible descriptors`
+- **WHEN** approval is rejected, cancelled, or unavailable
+- **THEN** OMP returns its native denied outcome, sends no usable grant, does not invoke the child handler, and keeps the Runtime Session usable
 
 #### Scenario: Approval prompt renders arguments
-- **ID**: `omp.approval.arguments-bounded`
+- **ID**: `host.omp.approval-prompt-renders-arguments`
 - **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::enforces required approval once per exact call in yolo and follows current reload metadata`
 - **WHEN** a required projected tool receives structured arguments
-- **THEN** the native prompt shows a bounded deterministic representation of those exact arguments together with the portable approval reason
+- **THEN** the native prompt shows a bounded deterministic representation of the exact arguments used to compute the grant digest and includes the portable approval reason only when one was declared
+
+#### Scenario: Grant is replayed or input changes
+- **ID**: `host.omp.grant-is-replayed-or-input-changes`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** a grant is reused or the transported call ID, tool revision, or input digest differs from the approved values
+- **THEN** the child bridge fails closed before the handler or an imported MCP server is invoked
 
 ### Requirement: OMP approval projection follows exact tool replacement
-Required approval metadata SHALL participate in the same candidate validation and exact dynamic replacement as name, description, schema, and availability. A committed reload SHALL replace the native approval declaration; an invalid reload SHALL retain the prior declaration; and a stale proxy SHALL resolve the current committed descriptor before invocation.
+Required approval metadata and tool revision SHALL participate in the same candidate validation and exact dynamic replacement as name, description, schema, and availability. A committed catalog update SHALL replace the native approval declaration and closure revision atomically; an invalid runtime reload or projection candidate SHALL retain the prior declaration; and a stale proxy SHALL never resolve itself to the current descriptor before invocation.
 
 #### Scenario: Reload makes an existing tool approval-required
-- **ID**: `omp.approval.reload-required`
+- **ID**: `host.omp.reload-makes-an-existing-tool-approval-required`
 - **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::enforces required approval once per exact call in yolo and follows current reload metadata`
 - **WHEN** a valid runtime reload changes an existing portable descriptor from host-default approval to required approval
-- **THEN** the next call prompts before transport invocation without restarting the OMP session
+- **THEN** a newly projected closure prompts before invocation while any retained old closure fails stale
 
 #### Scenario: Invalid reload changes approval metadata
-- **ID**: `omp.approval.invalid-reload-retains`
-- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::rebuilds ordered user/project layers and rejects stale tools after committed reload`
-- **WHEN** a candidate reload contains malformed approval metadata or otherwise fails activation/projection
-- **THEN** the previous projected tool and approval behavior remain active while diagnostics report the candidate failure
+- **ID**: `host.omp.invalid-reload-changes-approval-metadata`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::enforces required approval once per exact call in yolo and follows current reload metadata`
+- **WHEN** a candidate reload contains malformed approval metadata or otherwise fails activation or projection
+- **THEN** the previous projected tool, revision, and approval behavior remain active while diagnostics report the candidate failure
 
 #### Scenario: Retained stale proxy is called after removal
-- **ID**: `omp.approval.stale-proxy-removed`
-- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::rebuilds ordered user/project layers and rejects stale tools after committed reload`
+- **ID**: `host.omp.retained-stale-proxy-is-called-after-removal`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::discards stale context notifications lifecycle callbacks and proxy closures after replacement`
 - **WHEN** a caller retains a proxy closure after the runtime removed the portable tool
-- **THEN** the closure returns runtime-unavailable without prompting or invoking the removed handler
+- **THEN** the closure returns runtime-unavailable or stale without prompting, granting, or invoking the removed handler
 
 ### Requirement: OMP projects opt-in Dynamic Runtime Plugins through the ordinary portable path
 When the selected Runtime Preset composes Dynamic Runtime Plugins, OMP SHALL project its qualified control tools through the existing child transport and native tool registry without adding a second transport, host-specific dynamic runner, generic dispatch tool, or implicit generated-code capability. A Runtime Preset that omits the extension SHALL retain its prior OMP behavior.
@@ -566,7 +613,7 @@ When the selected Runtime Preset composes Dynamic Runtime Plugins, OMP SHALL pro
 
 #### Scenario: OMP package resolves an opt-in Loader row
 - **ID**: `omp.dynamic-runtime-plugins.package-resolution`
-- **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::contains the resolvable dependency closure for shipped standard and opt-in dynamic plugins`
+- **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::contains the resolvable dependency closure for shipped standard and opt-in Loader plugins`
 - **WHEN** a user Runtime Preset loaded through the private `@doppelganger/doppelganger-omp` product package imports the Dynamic Runtime Plugins package
 - **THEN** the import resolves from the declared installed dependency closure without adding that product dependency to `host-omp`
 
@@ -592,7 +639,7 @@ Every projected `runtime-plugin.run` call SHALL enter OMP's native required-appr
 - **THEN** the child handler is not invoked, stored source remains unevaluated, and the Runtime Session stays usable
 
 ### Requirement: OMP observes exact generated tool and context lifecycle
-Generated tools and context contributions SHALL use the existing runtime notifications and per-request context resolution. OMP SHALL activate newly registered generated tool proxies, exactly replace them after a successful Package update, remove them after stop, undefine, owner replacement, or session disposal, and SHALL NOT invoke a removed generated handler through a stale proxy closure. Invalid composition reload SHALL retain the prior audited extension instance and projection.
+Generated tools and context contributions SHALL use the existing runtime notifications and per-turn context resolution. OMP SHALL activate newly registered generated tool proxies, exactly replace them after a successful Package update, remove them after stop, undefine, owner replacement, or session disposal, and SHALL NOT invoke a removed generated handler through a stale proxy closure. Generated context changes become visible at the next user-initiated agent run. Invalid composition reload SHALL retain the prior audited extension instance and projection.
 
 #### Scenario: Generated Plugin registers context and a tool
 - **ID**: `omp.dynamic-runtime-plugins.effects.visible`
@@ -653,3 +700,69 @@ OMP session shutdown SHALL request Runtime Session disposal through the existing
 - **EVIDENCE**: `packages/host-omp/tests/dynamic-runtime-plugins.spec.ts::forces bounded child termination when generated cleanup never settles`
 - **WHEN** a generated disposer rejects or exceeds the existing child teardown deadline
 - **THEN** OMP releases its shutdown handler, reports the observed cleanup failure, and escalates owned child termination without claiming graceful completion
+
+### Requirement: OMP declares its Runtime Host capability profile
+The OMP adapter SHALL install the shared Runtime Host plugin with an immutable closed capability profile matching its implemented semantics. OMP SHALL advertise per-turn context, dynamic tool replacement, native required approval, cooperative tool cancellation, and only the standard lifecycle events it can publish faithfully. Its local and transported decoders SHALL reject unknown capability keys and host-native feature names.
+
+#### Scenario: Runtime Session inspects OMP capabilities
+- **ID**: `host.omp.runtime-session-inspects-omp-capabilities`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** an OMP Runtime Session activates successfully
+- **THEN** plugins observe the shared versioned capability service rather than an OMP-named bridge service or raw extension context
+
+#### Scenario: OMP cannot prove terminal session completion
+- **ID**: `host.omp.omp-cannot-prove-terminal-session-completion`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** OMP exposes only resumable settle or shutdown hooks for a session
+- **THEN** the capability profile and publication omit terminal completion semantics that OMP cannot prove
+
+#### Scenario: OMP activation carries an unknown capability
+- **ID**: `host.omp.omp-activation-carries-an-unknown-capability`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** the parent or child receives a profile containing an undeclared key or arbitrary feature string
+- **THEN** activation fails diagnostically before the bridge attaches
+
+### Requirement: OMP forwards native invocation cancellation
+The OMP adapter SHALL mint one stable call ID for each projected runtime invocation and SHALL translate the native execution `AbortSignal` into an explicit child cancellation request for that call. The child SHALL route cancellation through the shared bridge and SHALL keep unrelated requests and the framed transport usable.
+
+#### Scenario: User aborts a running portable tool
+- **ID**: `host.omp.user-aborts-a-running-portable-tool`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::preserves host prompts, projects exact schemas and tools, and forwards committed lifecycle payloads`
+- **WHEN** OMP aborts the native projected tool execution while the child invocation is active
+- **THEN** the adapter sends one correlated cancellation request, the portable handler signal aborts, and the resulting native outcome is cancelled or the handler's actual earlier settlement
+
+#### Scenario: Cancellation races with completion
+- **ID**: `host.omp.cancellation-races-with-completion`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** the portable handler settles before the child processes cancellation
+- **THEN** cancellation is an idempotent no-op and does not alter another call or close the session transport
+
+### Requirement: OMP host-specific providers use protected typed plugins
+OMP MAY add typed OMP-namespaced Cordis services or events beside the shared bridge for native hooks with no proven common semantic equivalent. Such providers SHALL be session-isolated, dispose with the active binding, and reuse the existing OMP extension, per-session child, framed RPC peer, request router, and shutdown path. They SHALL NOT expose the raw OMP `ExtensionContext`, native registries, or unrestricted hook subscription API and SHALL NOT create another host RPC connection, socket, child, sidecar, or session-binding path.
+
+#### Scenario: OMP-bound preset consumes a native hook
+- **ID**: `host.omp.omp-bound-preset-consumes-a-native-hook`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** a Runtime Preset explicitly requires a supported OMP-specific provider
+- **THEN** the OMP adapter supplies it as a protected sibling plugin and stale callbacks cannot publish after session rebinding
+
+#### Scenario: OMP-specific provider crosses the child boundary
+- **ID**: `host.omp.omp-specific-provider-crosses-the-child-boundary`
+- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::activates the shipped standard Runtime Preset from an empty home`
+- **WHEN** the provider must receive a native OMP hook inside the Runtime Session
+- **THEN** `host-omp` adds a validated message to its existing framed protocol and retains sole routing and process ownership
+
+#### Scenario: Provider attempts a private host channel
+- **ID**: `host.omp.provider-attempts-a-private-host-channel`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** an OMP-specific provider proposes its own child, socket, or RPC connection to OMP
+- **THEN** the integration is rejected in favor of the existing adapter transport
+
+### Requirement: OMP passes shared Runtime Host conformance
+The OMP adapter SHALL pass the transport-independent Runtime Host conformance suite without exceptions for its child-process topology, including two-session isolation, closed capabilities, catalog replacement, stale calls, approval replay, cancellation races, lifecycle rejection, all three Actor Identity states, disposal, and late callbacks.
+
+#### Scenario: OMP implementation changes its framed transport
+- **ID**: `host.omp.omp-implementation-changes-its-framed-transport`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
+- **WHEN** an internal OMP transport or projection change is made
+- **THEN** the same shared conformance suite continues to prove the externally visible Runtime Host semantics

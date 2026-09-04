@@ -46,13 +46,13 @@ function registerCoordinatorTools(ctx: Context, coordinator: MemoryVectorCoordin
     name: 'memory.semantic.status',
     description: 'Report sanitized semantic retrieval identity, generation, health, lag, and maintenance capabilities.',
     inputSchema: emptyInputSchema,
-    invoke: async () => await coordinator.status() as unknown as JsonValue,
+    invoke: async (_input, _context) => await coordinator.status() as unknown as JsonValue,
   })
   ctx.doppelgangerTools.register({
     name: 'memory.semantic.rebuild',
     description: 'Rebuild the configured semantic generation and atomically activate it after verification.',
     inputSchema: emptyInputSchema,
-    invoke: async () => {
+    invoke: async (_input, _context) => {
       try { await coordinator.rebuild() } catch { throw operationFailure() }
       return await coordinator.status() as unknown as JsonValue
     },
@@ -66,7 +66,7 @@ function registerCoordinatorTools(ctx: Context, coordinator: MemoryVectorCoordin
       required: Object.freeze(['generationId']),
       additionalProperties: false,
     }),
-    invoke: async input => {
+    invoke: async (input, _context) => {
       const generationId = inputRecord(input).generationId
       if (typeof generationId !== 'string' || generationId.length === 0 || generationId.length > 256) {
         throw new ToolInvocationError('INVALID_INPUT', 'generationId must be a bounded string')
@@ -84,7 +84,7 @@ function registerCoordinatorTools(ctx: Context, coordinator: MemoryVectorCoordin
       required: Object.freeze(['kind']),
       additionalProperties: false,
     }),
-    invoke: async input => {
+    invoke: async (input, _context) => {
       const kind = inputRecord(input).kind
       if (typeof kind !== 'string' || !maintenanceKinds.includes(kind as typeof maintenanceKinds[number])) {
         throw new ToolInvocationError('INVALID_INPUT', 'kind is not a supported semantic maintenance operation')

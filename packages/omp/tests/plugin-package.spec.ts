@@ -569,11 +569,12 @@ function activatedToolNames(run: LinkedOmpRun): string[] {
   const request = run.input.find(message => message.method === 'session.activate')
   if (request?.id === undefined) throw new Error(`missing captured session.activate request: ${run.stderr}`)
   const response = run.output.find(message => message.id === request.id)
-  if (response?.result === null || typeof response?.result !== 'object' || !('tools' in response.result)
-    || !Array.isArray(response.result.tools)) {
-    throw new Error(`missing captured session.activate tools: ${run.stderr}`)
+  if (response?.result === null || typeof response?.result !== 'object' || !('catalog' in response.result)
+    || response.result.catalog === null || typeof response.result.catalog !== 'object'
+    || !('tools' in response.result.catalog) || !Array.isArray(response.result.catalog.tools)) {
+    throw new Error(`missing captured session.activate catalog: ${run.stderr}`)
   }
-  return response.result.tools.flatMap(tool => (
+  return response.result.catalog.tools.flatMap(tool => (
     tool !== null && typeof tool === 'object' && 'name' in tool && typeof tool.name === 'string' ? [tool.name] : []
   ))
 }
@@ -890,7 +891,7 @@ describe('local OMP plugin package', () => {
         await eventually('OMP CodeGraph first turn completion', () => control.stdout().includes('"type":"agent_end"') ? true : undefined)
         const beforeRemoval = (await codeGraphCommandLog(codegraph.logPath)).length
         const beforeReload = (await capturedMessages(fixture.captureRoot, '.out.bin'))
-          .filter(message => message.method === 'runtime.changed').length
+          .filter(message => message.method === 'toolCatalog.changed').length
         await writeFile(codegraph.presetPath, [
           '- id: tools',
           '  name: "@doppelganger/doppelganger-protocols/tools"',
@@ -900,7 +901,7 @@ describe('local OMP plugin package', () => {
         ].join('\n'))
         await eventually('OMP CodeGraph removal reload', async () => {
           const count = (await capturedMessages(fixture.captureRoot, '.out.bin'))
-            .filter(message => message.method === 'runtime.changed').length
+            .filter(message => message.method === 'toolCatalog.changed').length
           return count > beforeReload ? true : undefined
         })
         child.stdin.write(`${JSON.stringify({ id: 'stale-codegraph', type: 'prompt', message: 'Use the removed CodeGraph status tool.' })}\n`)
@@ -955,15 +956,31 @@ describe('local OMP plugin package', () => {
       ])
       await seedProjectEvolutionProposal(fixture, delegatedWorkspace)
       const presetPath = join(fixture.doppelgangerHome, '.runtime-presets', 'evolution-test', 'runtime.cordis.yml')
-      const run = await runLinkedOmp(fixture, 'test-actor', delegatedWorkspace, fixture.doppelgangerHome, async () => {
-        const before = (await capturedMessages(fixture.captureRoot, '.out.bin'))
-          .filter(message => message.method === 'runtime.changed').length
+      const run = await runLinkedOmp(fixture, 'test-actor', delegatedWorkspace, fixture.doppelgangerHome, async control => {
+        await eventually('Evolution first turn completion', () => control.stdout().includes('"type":"agent_end"') ? true : undefined)
+        const before = (await capturedMessages(fixture.captureRoot, '.in.bin'))
+          .filter(message => message.method === 'context.resolve').length
+        const catalogChanges = (await capturedMessages(fixture.captureRoot, '.out.bin'))
+          .filter(message => message.method === 'toolCatalog.changed').length
         const source = await readFile(presetPath, 'utf8')
         await writeFile(presetPath, source.replace('remindersEnabled: true', 'remindersEnabled: false'))
+        await eventually('Evolution project-local reload commit', async () => {
+          const changes = (await capturedMessages(fixture.captureRoot, '.out.bin'))
+            .filter(message => message.method === 'toolCatalog.changed').length
+          return changes > catalogChanges ? true : undefined
+        })
+        control.child.stdin.write(`${JSON.stringify({ id: 'reload-context-probe', type: 'prompt', message: 'Probe reloaded Evolution context.' })}\n`)
         await eventually('Evolution project-local reload', async () => {
-          const count = (await capturedMessages(fixture.captureRoot, '.out.bin'))
-            .filter(message => message.method === 'runtime.changed').length
-          return count > before ? true : undefined
+          const input = await capturedMessages(fixture.captureRoot, '.in.bin')
+          const requests = input.filter(message => message.method === 'context.resolve')
+          if (requests.length <= before) return
+          const request = requests.at(-1)
+          if (request?.id === undefined) return
+          const output = await capturedMessages(fixture.captureRoot, '.out.bin')
+          const response = output.find(message => message.id === request.id)
+          if (response?.result === null || typeof response?.result !== 'object' || !('content' in response.result)
+            || typeof response.result.content !== 'string') return
+          return response.result.content.includes('[Evolution reminder candidate;') ? undefined : true
         })
       })
       expect(activationRequest(run).params).toMatchObject({
@@ -974,7 +991,7 @@ describe('local OMP plugin package', () => {
       expect(projectedContext(run)).toContain('[Doppelganger Evolution Policy]')
       expect(projectedContext(run)).toContain('[Evolution reminder candidate;')
       expect(activatedToolNames(run).filter(name => name.startsWith('evolution.'))).toHaveLength(7)
-      expect(run.output.some(message => message.method === 'runtime.changed')).toBe(true)
+      expect(run.input.filter(message => message.method === 'context.resolve')).toHaveLength(2)
       const opportunities = join(delegatedWorkspace, '.doppelganger', 'evolution', 'opportunities')
       const files = (await readdir(opportunities)).filter(name => name.endsWith('.yaml'))
       expect(files).toHaveLength(1)
@@ -1021,7 +1038,7 @@ describe('local OMP plugin package', () => {
     expect(captureExtensionOptions).toHaveBeenLastCalledWith({ actorId: 'actor-two' })
   })
 
-  it('contains the resolvable dependency closure for shipped standard and opt-in dynamic plugins', async () => {
+  it('contains the resolvable dependency closure for shipped standard and opt-in Loader plugins', async () => {
     const { root, internalPackages } = await isolatedPluginTree()
     const standardComposition = await readFile(
       join(repositoryRoot, 'packages', 'runtime-presets', 'presets', 'standard', 'runtime.cordis.yml'),
@@ -1034,6 +1051,7 @@ describe('local OMP plugin package', () => {
       '@doppelganger/doppelganger-dynamic-runtime-plugins',
       '@doppelganger/doppelganger-evolution',
       '@doppelganger/doppelganger-codegraph',
+      '@doppelganger/doppelganger-extension-mcp/loader',
       ...standardModules,
     ]
     const probePath = join(root, 'probe.mjs')

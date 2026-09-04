@@ -302,23 +302,12 @@ async function shutdown(fixture: MountedExtension): Promise<void> {
 }
 
 async function projectedContext(fixture: MountedExtension, prompt = 'Inspect generated behavior.'): Promise<string> {
-  await fixture.handlers.get('before_agent_start')?.({
+  const result = await fixture.handlers.get('before_agent_start')?.({
     type: 'before_agent_start',
     prompt,
     systemPrompt: [],
-  }, fixture.context)
-  const result = await fixture.handlers.get('context')?.({
-    type: 'context',
-    messages: [{ role: 'user', content: [{ type: 'text', text: prompt }], timestamp: 1 }],
-  }, fixture.context) as { readonly messages?: readonly unknown[] } | undefined
-  const projected = result?.messages?.at(-1)
-  if (projected === null || typeof projected !== 'object' || !('content' in projected) || !Array.isArray(projected.content)) return ''
-  return projected.content.flatMap(part => (
-    part !== null && typeof part === 'object' && 'type' in part && part.type === 'text'
-      && 'text' in part && typeof part.text === 'string'
-      ? [part.text]
-      : []
-  )).join('\n')
+  }, fixture.context) as { readonly systemPrompt?: readonly string[] } | undefined
+  return result?.systemPrompt?.at(-1) ?? ''
 }
 
 function runInvocationCount(factory: RecordingFactory): number {
@@ -333,15 +322,25 @@ async function waitForTool(fixture: MountedExtension, runtimeName: string, activ
   await vi.waitFor(() => expect(fixture.activeTools().includes(name)).toBe(active))
 }
 
-async function waitForReload(factory: RecordingFactory, predicate: (params: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> {
-  let matched: Record<string, unknown> | undefined
+async function waitForCatalogChange(factory: RecordingFactory, previousCount: number): Promise<void> {
   await vi.waitFor(() => {
-    matched = factory.connection?.notifications.flatMap(notification => {
-      if (notification.method !== 'runtime.changed' || notification.params === null
-        || typeof notification.params !== 'object' || Array.isArray(notification.params)) return []
-      const params = notification.params as Record<string, unknown>
-      return predicate(params) ? [params] : []
-    }).at(-1)
+    const count = factory.connection?.notifications.filter(notification => notification.method === 'toolCatalog.changed').length ?? 0
+    expect(count).toBeGreaterThan(previousCount)
+  }, { timeout: 5000 })
+}
+
+async function waitForReloadFailure(factory: RecordingFactory, message: string): Promise<Record<string, unknown>> {
+  let matched: Record<string, unknown> | undefined
+  await vi.waitFor(async () => {
+    const value = await factory.connection?.request('runtime.diagnostics')
+    if (value !== null && typeof value === 'object' && !Array.isArray(value) && 'diagnostics' in value) {
+      const diagnostics = value.diagnostics
+      if (diagnostics !== null && typeof diagnostics === 'object' && !Array.isArray(diagnostics) && 'reload' in diagnostics) {
+        const reload = diagnostics.reload
+        if (reload !== null && typeof reload === 'object' && !Array.isArray(reload)
+          && 'error' in reload && String(reload.error).includes(message)) matched = value as Record<string, unknown>
+      }
+    }
     expect(matched).toBeDefined()
   }, { timeout: 5000 })
   return matched!
@@ -469,8 +468,9 @@ describe('OMP Dynamic Runtime Plugins integration', () => {
       expect((await approvedRun(fixture, first, 'run')).result.isError).not.toBe(true)
       await waitForTool(fixture, 'generated.before-reload', true)
 
+      const catalogChanges = factory.connection?.notifications.filter(notification => notification.method === 'toolCatalog.changed').length ?? 0
       await writeFile(project.loaderPath, loaderSource(30))
-      await waitForReload(factory, params => !('reload' in ((params.diagnostics ?? {}) as object)))
+      await waitForCatalogChange(factory, catalogChanges)
       await waitForTool(fixture, 'generated.before-reload', false)
       expect(await execute(fixture, 'runtime-plugin.inspect-self', {})).toMatchObject({ details: { plugins: [] } })
 
@@ -494,13 +494,7 @@ describe('OMP Dynamic Runtime Plugins integration', () => {
         : ''
 
       await writeFile(project.loaderPath, loaderSource(0))
-      const failed = await waitForReload(factory, params => {
-        const diagnostics = params.diagnostics
-        if (diagnostics === null || typeof diagnostics !== 'object' || !('reload' in diagnostics)) return false
-        const reload = diagnostics.reload
-        return reload !== null && typeof reload === 'object' && 'error' in reload
-          && String(reload.error).includes('vmTimeoutMs')
-      })
+      const failed = await waitForReloadFailure(factory, 'vmTimeoutMs')
       expect(failed).toMatchObject({ diagnostics: { reload: { state: 'failed' } } })
       await waitForTool(fixture, 'generated.retained', true)
       expect(await execute(fixture, 'generated.retained', {})).toMatchObject({ details: { version: 'retained' } })

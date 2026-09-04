@@ -4,13 +4,12 @@ export {
   type CompositionDefinitionInput,
 } from './definition.ts'
 export {
-  defineSerializedCompositionActivation,
-  type SerializedActivationResolver,
-  type SerializedCompositionActivation,
-  type SerializedCompositionDefinition,
-  type SerializedPrimitive,
-  type SerializedValue,
-} from './serialized-activation.ts'
+  canonicalAbsolutePath,
+  canonicalNonEmpty,
+  canonicalizeCompositionDefinition,
+  type CanonicalCompositionDefinition,
+  type CanonicalCompositionInput,
+} from './canonicalization.ts'
 export {
   createCompositionRuntime,
   type CompositionActivation,

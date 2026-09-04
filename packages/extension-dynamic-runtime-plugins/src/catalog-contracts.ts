@@ -2,9 +2,8 @@ import type {
   ContextContribution,
   ContextProvider,
   ContextResolveRequest,
+  ToolCatalogSnapshot,
   ToolDefinition,
-  ToolDescriptor,
-  ToolRegistration,
 } from '@doppelganger/doppelganger-protocols'
 
 export interface DynamicRuntimeHttpRequest {
@@ -36,8 +35,8 @@ export interface DynamicRuntimeCatalogContracts {
     }>
   }
   readonly tools: {
-    register(definition: ToolDefinition): ToolRegistration
-    list(): readonly ToolDescriptor[]
+    register(definition: ToolDefinition): () => void
+    snapshot(): ToolCatalogSnapshot
   }
   readonly timer: {
     timeout(callback: () => void, delay: number): () => void

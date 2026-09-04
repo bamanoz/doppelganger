@@ -4,24 +4,29 @@ import { fileURLToPath } from 'node:url'
 import {
   createCompositionDefinition,
   createCompositionRuntime,
+  type CanonicalCompositionDefinition,
   type CompositionRuntime,
   type CompositionSession,
-  type SerializedCompositionDefinition,
 } from '@doppelganger/doppelganger-composition-runtime'
 import {
-  OMP_RPC_PROTOCOL_VERSION,
-  defineSerializedOmpActivation,
-  type ContextResolveParams,
-  type SessionActivateParams,
-  type ToolsInvokeParams,
-} from './contracts.ts'
-import { FramedJsonRpcPeer, type RpcNotificationObserverDiagnostic } from './protocol.ts'
+  createActorIdentityPlugin,
+  createRuntimeHostPlugin,
+  type LifecycleEvent,
+  type RuntimeHostBridge,
+} from '@doppelganger/doppelganger-protocols'
 import {
-  createOmpRuntimeHostPlugin,
-  type OmpLifecycleEvent,
-  type OmpRuntimeHost,
-  type RuntimeNotification,
-} from './runtime-host.ts'
+  OMP_RPC_PROTOCOL_VERSION,
+  defineHostContextRequest,
+  defineSessionActivateParams,
+  defineToolCancellationRequest,
+  defineToolInvocationRequest,
+} from './contracts.ts'
+import {
+  createOmpHostEventPlugin,
+  defineOmpTodoReminderEvent,
+  type OmpHostEventSink,
+} from './omp-host-events.ts'
+import { FramedJsonRpcPeer, type RpcNotificationObserverDiagnostic } from './protocol.ts'
 
 export interface OmpRuntimeChild {
   dispose(): Promise<void>
@@ -40,7 +45,7 @@ function objectParams<T>(value: unknown, method: string): T {
   return value as T
 }
 
-function materializeComposition(input: SerializedCompositionDefinition) {
+function materializeComposition(input: CanonicalCompositionDefinition) {
   return createCompositionDefinition({
     id: input.id,
     revision: input.revision,
@@ -60,97 +65,113 @@ export function serveOmpRuntime(
     : { onNotificationObserverError: options.onNotificationObserverError })
   let runtime: CompositionRuntime | undefined
   let session: CompositionSession | undefined
-  let host: OmpRuntimeHost | undefined
+  let bridge: RuntimeHostBridge | undefined
+  let ompHostEvents: OmpHostEventSink | undefined
   let disposing: Promise<void> | undefined
 
   const binding = {
-    attach(next: OmpRuntimeHost) {
-      if (host !== undefined) throw new Error('OMP runtime host is already attached')
-      host = next
+    attach(next: RuntimeHostBridge) {
+      if (bridge !== undefined) throw new Error('Runtime Host bridge is already attached')
+      bridge = next
     },
-    detach(current: OmpRuntimeHost) {
-      if (host === current) host = undefined
+    detach(current: RuntimeHostBridge) {
+      if (bridge === current) bridge = undefined
     },
-    notify(notification: RuntimeNotification) {
-      peer.notify(notification.method, notification.params)
+    toolCatalogChanged(revision: string) {
+      peer.notify('toolCatalog.changed', { revision })
+    },
+  }
+  const ompHostEventBinding = {
+    attach(next: OmpHostEventSink) {
+      if (ompHostEvents !== undefined) throw new Error('OMP host event provider is already attached')
+      ompHostEvents = next
+    },
+    detach(current: OmpHostEventSink) {
+      if (ompHostEvents === current) ompHostEvents = undefined
     },
   }
 
   peer.expose('session.activate', async (value) => {
     if (runtime !== undefined || session !== undefined) throw new Error('runtime session is already activated')
-    const request = objectParams<SessionActivateParams>(value, 'session.activate')
-    if (request.protocolVersion !== OMP_RPC_PROTOCOL_VERSION) {
-      throw new TypeError(`unsupported OMP RPC protocol version ${String(request.protocolVersion)}`)
-    }
-    const params = defineSerializedOmpActivation(request)
+    const params = defineSessionActivateParams(value)
     const composition = materializeComposition(params.composition)
-    const notifyRuntimeChanged = (event: { compositionRevision: string; diagnostics: unknown }) => {
-      const activeHost = host
-      if (activeHost === undefined) return
-      binding.notify({
-        method: 'runtime.changed',
-        params: {
-          runtimeRevision: event.compositionRevision,
-          diagnostics: event.diagnostics,
-          tools: activeHost.listTools(),
-        },
-      })
-    }
     runtime = createCompositionRuntime(params.watch === false
-      ? { watch: false, onReload: notifyRuntimeChanged, onReloadFailure: notifyRuntimeChanged }
-      : {
-          watch: { base: dirname(composition.loaderPath), root: ['.'] },
-          onReload: notifyRuntimeChanged,
-          onReloadFailure: notifyRuntimeChanged,
-        })
+      ? { watch: false }
+      : { watch: { base: dirname(composition.loaderPath), root: ['.'] } })
     try {
       const activated = await runtime.activate({
         composition,
         sessionId: params.sessionId,
         ...(params.workspaceRoot === undefined ? {} : { workspaceRoot: params.workspaceRoot }),
-        runtimePlugins: { 'omp-host': createOmpRuntimeHostPlugin(binding, params.actorId) },
+        runtimePlugins: {
+          actor: createActorIdentityPlugin(params.actorId),
+          'omp-host-events': createOmpHostEventPlugin(ompHostEventBinding),
+          'runtime-host': createRuntimeHostPlugin(binding, params.capabilities),
+        },
         runtimePluginIsolation: {
-          'omp-host': ['doppelgangerActor', 'doppelgangerContext', 'doppelgangerTools', 'doppelgangerLifecycle'],
+          actor: ['doppelgangerActor'],
+          'omp-host-events': ['doppelgangerRuntimeSession'],
+          'runtime-host': [
+            'doppelgangerRuntimeSession',
+            'doppelgangerContext',
+            'doppelgangerHostCapabilities',
+            'doppelgangerLifecycle',
+            'doppelgangerTools',
+          ],
         },
       })
       session = activated
-      const activeHost = host
-      if (activeHost === undefined) {
-        throw new Error(`runtime activated without the OMP host bridge: ${JSON.stringify(activated.diagnostics())}`)
+      const activeBridge = bridge
+      if (activeBridge === undefined) {
+        throw new Error(`runtime activated without the shared Runtime Host bridge: ${JSON.stringify(activated.diagnostics())}`)
       }
       const diagnostics = activated.diagnostics()
       return {
         protocolVersion: OMP_RPC_PROTOCOL_VERSION,
+        capabilities: activeBridge.capabilities,
         diagnostics,
         runtimeRevision: diagnostics.compositionRevision,
-        tools: activeHost.listTools(),
+        catalog: activeBridge.snapshotTools(),
       }
     } catch (cause) {
       await runtime.dispose()
       runtime = undefined
       session = undefined
-      host = undefined
+      bridge = undefined
+      ompHostEvents = undefined
       throw cause
     }
   })
 
-  peer.expose('context.resolve', async (value) => {
-    const params = objectParams<ContextResolveParams>(value, 'context.resolve')
-    if (host === undefined) throw new Error('runtime session is not active')
-    return host.resolveContext(params.input, params.turnId, params.tokenBudget)
+  peer.expose('runtime.diagnostics', () => {
+    if (session === undefined) throw new Error('runtime session is not active')
+    const diagnostics = session.diagnostics()
+    return { runtimeRevision: diagnostics.compositionRevision, diagnostics }
   })
-  peer.expose('tools.list', () => {
-    if (host === undefined) throw new Error('runtime session is not active')
-    return host.listTools()
+  peer.expose('context.resolve', (value) => {
+    if (bridge === undefined) throw new Error('runtime session is not active')
+    return bridge.resolveContext(defineHostContextRequest(value))
   })
-  peer.expose('tools.invoke', async (value) => {
-    const params = objectParams<ToolsInvokeParams>(value, 'tools.invoke')
-    if (host === undefined) throw new Error('runtime session is not active')
-    return host.invokeTool(params.name, params.input)
+  peer.expose('tools.snapshot', () => {
+    if (bridge === undefined) throw new Error('runtime session is not active')
+    return bridge.snapshotTools()
+  })
+  peer.expose('tools.invoke', (value) => {
+    if (bridge === undefined) throw new Error('runtime session is not active')
+    return bridge.invokeTool(defineToolInvocationRequest(value))
+  })
+  peer.expose('tools.cancel', (value) => {
+    if (bridge === undefined) throw new Error('runtime session is not active')
+    return bridge.cancelTool(defineToolCancellationRequest(value))
   })
   peer.expose('event.publish', async (value) => {
-    if (host === undefined) throw new Error('runtime session is not active')
-    await host.publishEvent(objectParams<OmpLifecycleEvent>(value, 'event.publish'))
+    if (bridge === undefined) throw new Error('runtime session is not active')
+    await bridge.publishLifecycle(objectParams<LifecycleEvent>(value, 'event.publish'))
+    return null
+  })
+  peer.expose('omp.todo-reminder', async (value) => {
+    if (ompHostEvents === undefined) throw new Error('OMP host event provider is not active')
+    await ompHostEvents.publishTodoReminder(defineOmpTodoReminderEvent(value))
     return null
   })
 
@@ -163,7 +184,8 @@ export function serveOmpRuntime(
       const activeRuntime = runtime
       runtime = undefined
       if (activeRuntime !== undefined) await activeRuntime.dispose()
-      host = undefined
+      bridge = undefined
+      ompHostEvents = undefined
     })()
     return disposing
   }

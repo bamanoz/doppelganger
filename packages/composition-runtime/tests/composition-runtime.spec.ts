@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { Context, type Plugin } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
+import { fileURLToPath } from 'node:url'
 import {
   CompositionActivationError,
   createCompositionDefinition,
@@ -11,14 +12,22 @@ import {
   type RuntimeSessionMetadata,
 } from '../src/index.ts'
 
-declare global {
-  var doppelgangerLifecycle: string[] | undefined
+interface TestMcpSnapshot {
+  readonly servers: Array<{ readonly id: string; readonly state: string }>
+  readonly diagnostics: Array<{ readonly code: string }>
 }
 
+declare global {
+  var doppelgangerLifecycle: string[] | undefined
+  var doppelgangerMcpSnapshot: (() => TestMcpSnapshot) | undefined
+}
 const temporaryRoots: string[] = []
+const mcpFixture = fileURLToPath(new URL('../../extension-mcp/tests/fixtures/stdio-server.mjs', import.meta.url))
 
 afterEach(async () => {
   globalThis.doppelgangerLifecycle = undefined
+  globalThis.doppelgangerMcpSnapshot = undefined
+  delete process.env.COMPOSITION_MCP_INITIALIZE_DELAY
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -42,6 +51,51 @@ async function plugin(root: string, name: string, source: string): Promise<strin
   const filename = join(root, name)
   await writeFile(filename, source)
   return `./${name}`
+}
+
+async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for condition')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+async function mcpComposition(config: object): Promise<CompositionDefinition> {
+  const files = await composition([])
+  const root = dirname(files.definition.loaderPath)
+  const observer = await plugin(root, 'mcp-observer.mjs', [
+    "export default { name: 'mcp-observer', inject: ['doppelgangerMcp'], apply(ctx) {",
+    '  globalThis.doppelgangerMcpSnapshot = () => ctx.doppelgangerMcp.snapshot()',
+    '} }',
+  ].join('\n'))
+  return createCompositionDefinition({
+    ...files.definition,
+    patches: [{
+      source: 'MCP activation fixture',
+      baseUrl: root,
+      patches: [{ insert: [
+        {
+          id: 'doppelganger-tools',
+          name: '@doppelganger/doppelganger-protocols/tools',
+          isolate: { doppelgangerTools: 'session' },
+        },
+        {
+          id: 'doppelganger-mcp',
+          name: '@doppelganger/doppelganger-extension-mcp/loader',
+          inject: ['doppelgangerTools'],
+          isolate: { doppelgangerTools: 'session', doppelgangerMcp: 'session' },
+          config,
+        },
+        {
+          id: 'mcp-observer',
+          name: observer,
+          inject: ['doppelgangerMcp'],
+          isolate: { doppelgangerMcp: 'session' },
+        },
+      ] }],
+    }],
+  })
 }
 
 describe('composition definitions', () => {
@@ -189,6 +243,153 @@ describe('layered activation and session isolation', () => {
     await runtime.dispose()
   })
 
+  it('mounts an actor-neutral bridge, optional actor provider, and typed host sibling in isolated session realms', async () => {
+    const files = await composition([])
+    const observed = new Map<string, {
+      readonly actor: unknown
+      readonly bridge: unknown
+      readonly native: unknown
+      readonly order: readonly string[]
+    }>()
+    const runtime = createCompositionRuntime({ watch: false })
+    const activate = async (sessionId: string, actor: 'absent' | 'unbound' | 'bound') => {
+      const order: string[] = []
+      const bridge: Plugin = {
+        name: 'shared-runtime-host',
+        apply(ctx) {
+          order.push('bridge')
+          ctx.provide('sharedHostBridge', Object.freeze({ sessionId }))
+        },
+      }
+      const native: Plugin = {
+        name: 'typed-omp-provider',
+        inject: ['sharedHostBridge'],
+        apply(ctx) {
+          order.push('native')
+          ctx.provide('ompNativeProvider', Object.freeze({ bridge: ctx.get('sharedHostBridge') }))
+        },
+      }
+      const actorPlugin: Plugin | undefined = actor === 'absent' ? undefined : {
+        name: 'separate-actor-provider',
+        apply(ctx) {
+          order.push('actor')
+          ctx.provide('doppelgangerActor', actor === 'bound'
+            ? Object.freeze({ state: 'bound', actorId: sessionId })
+            : Object.freeze({ state: 'unbound' }))
+        },
+      }
+      const observer: Plugin = {
+        name: 'protected-observer',
+        inject: ['sharedHostBridge', 'ompNativeProvider'],
+        apply(ctx) {
+          order.push('observer')
+          observed.set(sessionId, {
+            actor: ctx.get('doppelgangerActor', false),
+            bridge: ctx.get('sharedHostBridge'),
+            native: ctx.get('ompNativeProvider'),
+            order: [...order],
+          })
+        },
+      }
+      return runtime.activate({
+        composition: files.definition,
+        sessionId,
+        runtimePlugins: {
+          bridge,
+          ...(actorPlugin === undefined ? {} : { actor: actorPlugin }),
+          native,
+          observer,
+        },
+        runtimePluginIsolation: {
+          bridge: ['sharedHostBridge'],
+          ...(actorPlugin === undefined ? {} : { actor: ['doppelgangerActor'] }),
+          native: ['sharedHostBridge', 'ompNativeProvider'],
+          observer: ['sharedHostBridge', 'doppelgangerActor', 'ompNativeProvider'],
+        },
+      })
+    }
+
+    const absent = await activate('absent-session', 'absent')
+    const unbound = await activate('unbound-session', 'unbound')
+    const bound = await activate('bound-session', 'bound')
+    expect(observed.get('absent-session')?.actor).toBeUndefined()
+    expect(observed.get('unbound-session')?.actor).toEqual({ state: 'unbound' })
+    expect(observed.get('bound-session')?.actor).toEqual({ state: 'bound', actorId: 'bound-session' })
+    expect(observed.get('bound-session')?.order).toEqual(['actor', 'bridge', 'native', 'observer'])
+    expect(observed.get('absent-session')?.bridge).not.toBe(observed.get('bound-session')?.bridge)
+    expect(observed.get('unbound-session')?.native).not.toBe(observed.get('bound-session')?.native)
+    await Promise.all([absent.dispose(), unbound.dispose(), bound.dispose()])
+    await runtime.dispose()
+  })
+
+  it('exhausts partially attached protected providers when activation fails', async () => {
+    const files = await composition([])
+    const lifecycle: string[] = []
+    let attached: object | undefined
+    const binding = {
+      attach(bridge: object) {
+        if (attached !== undefined) throw new Error('bridge already attached')
+        attached = bridge
+        lifecycle.push('bridge:attach')
+      },
+      detach(bridge: object) {
+        if (attached === bridge) attached = undefined
+        lifecycle.push('bridge:detach')
+      },
+    }
+    const bridge: Plugin = {
+      name: 'failing-shared-bridge',
+      apply(ctx) {
+        const value = Object.freeze({ sessionId: 'failing-protected' })
+        binding.attach(value)
+        ctx.provide('sharedHostBridge', value)
+        ctx.effect(() => () => binding.detach(value), 'testBridge.detach')
+        ctx.effect(() => {
+          lifecycle.push('callback:attach')
+          return () => { lifecycle.push('callback:dispose') }
+        }, 'testBridge.callback')
+      },
+    }
+    const actor: Plugin = {
+      name: 'failing-actor-provider',
+      apply(ctx) {
+        ctx.provide('doppelgangerActor', Object.freeze({ state: 'unbound' }))
+        return () => { lifecycle.push('actor:dispose') }
+      },
+    }
+    const native: Plugin = {
+      name: 'failing-native-provider',
+      inject: ['sharedHostBridge'],
+      apply(ctx) {
+        ctx.provide('ompNativeProvider', Object.freeze({ active: true }))
+        return () => { lifecycle.push('native:dispose') }
+      },
+    }
+    const blocked: Plugin = {
+      name: 'blocked-protected-provider',
+      inject: ['missingProtectedDependency'],
+      apply() {},
+    }
+    const runtime = createCompositionRuntime({ watch: false })
+    await expect(runtime.activate({
+      composition: files.definition,
+      sessionId: 'failing-protected',
+      runtimePlugins: { bridge, actor, native, blocked },
+      runtimePluginIsolation: {
+        bridge: ['sharedHostBridge'],
+        actor: ['doppelgangerActor'],
+        native: ['sharedHostBridge', 'ompNativeProvider'],
+      },
+    })).rejects.toBeInstanceOf(CompositionActivationError)
+    expect(attached).toBeUndefined()
+    expect(lifecycle).toEqual(expect.arrayContaining([
+      'bridge:attach', 'bridge:detach', 'callback:attach', 'callback:dispose', 'actor:dispose', 'native:dispose',
+    ]))
+    lifecycle.length = 0
+    await runtime.dispose()
+    expect(lifecycle).toEqual([])
+  })
+
   it('reports missing services and cleans partially activated resources', async () => {
     const files = await composition([])
     const root = dirname(files.definition.loaderPath)
@@ -224,6 +425,57 @@ describe('layered activation and session isolation', () => {
     await runtime.dispose()
   })
 
+
+  it('audits the MCP Loader row active without awaiting external server readiness', async () => {
+    process.env.COMPOSITION_MCP_INITIALIZE_DELAY = '400'
+    const definition = await mcpComposition({
+      servers: {
+        delayed: {
+          startupTimeoutMs: 1_000,
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [mcpFixture],
+            environment: { MCP_INITIALIZE_DELAY_MS: { env: 'COMPOSITION_MCP_INITIALIZE_DELAY' } },
+          },
+        },
+      },
+    })
+    const runtime = createCompositionRuntime({ watch: false })
+    const startedAt = Date.now()
+    const session = await runtime.activate({ composition: definition, sessionId: 'mcp-delayed' })
+
+    expect(Date.now() - startedAt).toBeLessThan(300)
+    expect(session.diagnostics().entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'doppelganger-mcp', state: 'active' }),
+    ]))
+    expect(globalThis.doppelgangerMcpSnapshot?.().servers).toEqual([
+      expect.objectContaining({ id: 'delayed', state: 'connecting' }),
+    ])
+    await waitFor(() => globalThis.doppelgangerMcpSnapshot?.().servers[0]?.state === 'active')
+    await runtime.dispose()
+  })
+
+  it('keeps the Runtime Session active when an MCP server fails operationally', async () => {
+    const definition = await mcpComposition({
+      servers: {
+        unavailable: {
+          transport: { type: 'stdio', command: join(tmpdir(), 'missing-composition-mcp') },
+        },
+      },
+    })
+    const runtime = createCompositionRuntime({ watch: false })
+    const session = await runtime.activate({ composition: definition, sessionId: 'mcp-failed' })
+
+    await waitFor(() => globalThis.doppelgangerMcpSnapshot?.().servers[0]?.state === 'failed')
+    expect(session.diagnostics().entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'doppelganger-mcp', state: 'active' }),
+    ]))
+    expect(globalThis.doppelgangerMcpSnapshot?.().diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'MCP_SPAWN_FAILED' }),
+    ]))
+    await runtime.dispose()
+  })
   it('never rewrites authored composition and disposes idempotently', async () => {
     const files = await composition([])
     const runtime = createCompositionRuntime({ watch: false })

@@ -1,13 +1,15 @@
 import { access } from 'node:fs/promises'
 import { dirname, join, normalize, parse, resolve } from 'node:path'
-import type { ToolDescriptor } from '@doppelganger/doppelganger-protocols'
+import type { RuntimeHostCapabilities, ToolCatalogSnapshot } from '@doppelganger/doppelganger-protocols'
 import {
   OMP_RPC_PROTOCOL_VERSION,
+  OMP_RUNTIME_HOST_CAPABILITIES,
   defineSerializedOmpActivation,
-  type RuntimeChangedParams,
+  defineSessionActivateResult,
+  defineToolCatalogChangedParams,
+  defineToolCatalogSnapshot,
   type SerializedOmpActivation,
   type SessionActivateParams,
-  type SessionActivateResult,
 } from './contracts.ts'
 
 export type OmpAdapterState = 'inactive' | 'starting' | 'active' | 'failed' | 'disposed'
@@ -37,8 +39,7 @@ export interface OmpChildFactory {
 export interface OmpAdapterOptions {
   readonly activation?: SerializedOmpActivation
   readonly childFactory: OmpChildFactory
-  readonly onToolsChanged?: (tools: readonly ToolDescriptor[]) => void | Promise<void>
-  readonly onRuntimeChanged?: (revision: string, diagnostics: unknown) => void | Promise<void>
+  readonly onCatalogChanged?: (catalog: ToolCatalogSnapshot) => void | Promise<void>
   readonly notifyDiagnostic?: (diagnostic: OmpAdapterDiagnostic) => void
 }
 
@@ -46,9 +47,10 @@ export interface OmpAdapterSnapshot {
   readonly state: OmpAdapterState
   readonly initializationAvailable: boolean
   readonly diagnostic?: OmpAdapterDiagnostic
+  readonly capabilities?: RuntimeHostCapabilities
   readonly runtimeRevision?: string
   readonly runtimeDiagnostics?: unknown
-  readonly tools: readonly ToolDescriptor[]
+  readonly catalog: ToolCatalogSnapshot
 }
 
 export interface OmpAdapterDisposal {
@@ -56,6 +58,8 @@ export interface OmpAdapterDisposal {
   readonly sessionDisposeAcknowledged: boolean
   readonly diagnostic?: string
 }
+
+const EMPTY_CATALOG: ToolCatalogSnapshot = Object.freeze({ revision: 'catalog:0', tools: Object.freeze([]) })
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -97,95 +101,8 @@ function activationParams(input: SerializedOmpActivation): SessionActivateParams
   const activation = defineSerializedOmpActivation(input)
   return Object.freeze({
     protocolVersion: OMP_RPC_PROTOCOL_VERSION,
+    capabilities: OMP_RUNTIME_HOST_CAPABILITIES,
     ...activation,
-  })
-}
-
-function toolApproval(value: unknown, label: string): ToolDescriptor['approval'] {
-  if (value === undefined) return undefined
-  if (value === null || Array.isArray(value) || typeof value !== 'object') {
-    throw new TypeError(`${label} must be an object`)
-  }
-  const keys = Object.keys(value)
-  if (keys.some(key => key !== 'policy' && key !== 'reason')) {
-    throw new TypeError(`${label} contains unsupported fields`)
-  }
-  if (!('policy' in value) || value.policy !== 'required') {
-    throw new TypeError(`${label}.policy must be "required"`)
-  }
-  if (!('reason' in value) || typeof value.reason !== 'string'
-    || value.reason.trim().length === 0 || value.reason.trim().length > 1_024) {
-    throw new TypeError(`${label}.reason must contain 1-1024 characters`)
-  }
-  return Object.freeze({ policy: 'required', reason: value.reason.trim() })
-}
-
-function toolDescriptors(value: unknown): readonly ToolDescriptor[] {
-  if (!Array.isArray(value)) throw new TypeError('runtime tools must be an array')
-  const tools = value.map((item, index) => {
-    if (item === null || Array.isArray(item) || typeof item !== 'object') {
-      throw new TypeError(`runtime tools[${index}] must be an object`)
-    }
-    if (!('name' in item) || typeof item.name !== 'string' || item.name.length === 0) {
-      throw new TypeError(`runtime tools[${index}].name must be a non-empty string`)
-    }
-    if (!('description' in item) || typeof item.description !== 'string' || item.description.length === 0) {
-      throw new TypeError(`runtime tools[${index}].description must be a non-empty string`)
-    }
-    if (!('inputSchema' in item) || item.inputSchema === null || Array.isArray(item.inputSchema)
-      || typeof item.inputSchema !== 'object') {
-      throw new TypeError(`runtime tools[${index}].inputSchema must be an object`)
-    }
-    if (!('available' in item) || typeof item.available !== 'boolean') {
-      throw new TypeError(`runtime tools[${index}].available must be a boolean`)
-    }
-    const approval = toolApproval('approval' in item ? item.approval : undefined, `runtime tools[${index}].approval`)
-    const descriptor: ToolDescriptor = {
-      name: item.name,
-      description: item.description,
-      inputSchema: item.inputSchema,
-      available: item.available,
-      ...(approval === undefined ? {} : { approval }),
-    }
-    return Object.freeze(descriptor)
-  })
-  return Object.freeze(tools)
-}
-
-function sessionActivateResult(value: unknown): SessionActivateResult {
-  if (value === null || Array.isArray(value) || typeof value !== 'object') {
-    throw new TypeError('session.activate result must be an object')
-  }
-  if (!('protocolVersion' in value) || value.protocolVersion !== OMP_RPC_PROTOCOL_VERSION) {
-    const version = 'protocolVersion' in value ? value.protocolVersion : undefined
-    throw new TypeError(`unsupported runtime RPC protocol version ${String(version)}`)
-  }
-  if (!('runtimeRevision' in value) || typeof value.runtimeRevision !== 'string' || value.runtimeRevision.length === 0) {
-    throw new TypeError('session.activate result runtimeRevision must be a non-empty string')
-  }
-  if (!('diagnostics' in value)) throw new TypeError('session.activate result must include diagnostics')
-  if (!('tools' in value)) throw new TypeError('session.activate result must include tools')
-  return Object.freeze({
-    protocolVersion: OMP_RPC_PROTOCOL_VERSION,
-    runtimeRevision: value.runtimeRevision,
-    diagnostics: value.diagnostics,
-    tools: toolDescriptors(value.tools),
-  })
-}
-
-function runtimeChangedParams(value: unknown): RuntimeChangedParams {
-  if (value === null || Array.isArray(value) || typeof value !== 'object') {
-    throw new TypeError('runtime.changed params must be an object')
-  }
-  if (!('runtimeRevision' in value) || typeof value.runtimeRevision !== 'string' || value.runtimeRevision.length === 0) {
-    throw new TypeError('runtime.changed runtimeRevision must be a non-empty string')
-  }
-  if (!('diagnostics' in value)) throw new TypeError('runtime.changed must include diagnostics')
-  if (!('tools' in value)) throw new TypeError('runtime.changed must include tools')
-  return Object.freeze({
-    runtimeRevision: value.runtimeRevision,
-    diagnostics: value.diagnostics,
-    tools: toolDescriptors(value.tools),
   })
 }
 
@@ -193,10 +110,13 @@ export class OmpAdapterSession {
   readonly #options: OmpAdapterOptions
   #state: OmpAdapterState = 'inactive'
   #diagnostic: OmpAdapterDiagnostic | undefined
+  #capabilities: RuntimeHostCapabilities | undefined
   #runtimeRevision: string | undefined
   #runtimeDiagnostics: unknown
-  #tools: readonly ToolDescriptor[] = Object.freeze([])
+  #catalog: ToolCatalogSnapshot = EMPTY_CATALOG
   #connection: OmpChildConnection | undefined
+  #catalogQueue = Promise.resolve()
+  #pendingCatalogRevision: string | undefined
 
   constructor(options: OmpAdapterOptions) {
     this.#options = options
@@ -207,9 +127,10 @@ export class OmpAdapterSession {
       state: this.#state,
       initializationAvailable: this.#state === 'inactive',
       ...(this.#diagnostic === undefined ? {} : { diagnostic: this.#diagnostic }),
+      ...(this.#capabilities === undefined ? {} : { capabilities: this.#capabilities }),
       ...(this.#runtimeRevision === undefined ? {} : { runtimeRevision: this.#runtimeRevision }),
       ...(this.#runtimeDiagnostics === undefined ? {} : { runtimeDiagnostics: this.#runtimeDiagnostics }),
-      tools: this.#tools,
+      catalog: this.#catalog,
     })
   }
 
@@ -225,28 +146,23 @@ export class OmpAdapterSession {
       const activate = activationParams(this.#options.activation)
       const connection = await this.#options.childFactory.start()
       this.#connection = connection
-      connection.onNotification('tools.changed', params => {
-        if (this.#state !== 'active') return
+      connection.onNotification('toolCatalog.changed', params => {
+        let revision: string
         try {
-          this.#tools = toolDescriptors(params)
-          void Promise.resolve(this.#options.onToolsChanged?.(this.#tools)).catch(cause => this.fail(diagnostic(cause)))
+          revision = defineToolCatalogChangedParams(params).revision
         } catch (cause) {
-          void this.fail(diagnostic(cause))
+          if (this.#state === 'active') void this.fail(diagnostic(cause))
+          return
         }
-      })
-      connection.onNotification('runtime.changed', params => {
+        if (this.#state === 'starting') {
+          this.#pendingCatalogRevision = revision
+          return
+        }
         if (this.#state !== 'active') return
-        try {
-          const changed = runtimeChangedParams(params)
-          this.#runtimeRevision = changed.runtimeRevision
-          this.#runtimeDiagnostics = changed.diagnostics
-          this.#tools = changed.tools
-          void Promise.resolve(this.#options.onToolsChanged?.(this.#tools))
-            .then(() => this.#options.onRuntimeChanged?.(changed.runtimeRevision, changed.diagnostics))
-            .catch(cause => this.fail(diagnostic(cause)))
-        } catch (cause) {
-          void this.fail(diagnostic(cause))
-        }
+        this.#catalogQueue = this.#catalogQueue.then(
+          () => this.#refreshCatalog(revision),
+          () => this.#refreshCatalog(revision),
+        )
       })
       connection.onNotification('runtime.failed', params => {
         const message = params !== null && typeof params === 'object' && 'message' in params
@@ -254,12 +170,20 @@ export class OmpAdapterSession {
           : 'runtime reported an unspecified failure'
         void this.fail({ code: 'RUNTIME_FAILED', message })
       })
-      const activated = sessionActivateResult(await connection.request('session.activate', activate))
+      const activated = defineSessionActivateResult(await connection.request('session.activate', activate))
+      if (this.#state !== 'starting' || connection !== this.#connection) return this.snapshot()
+      this.#capabilities = activated.capabilities
       this.#runtimeRevision = activated.runtimeRevision
       this.#runtimeDiagnostics = activated.diagnostics
-      this.#tools = activated.tools
+      this.#catalog = activated.catalog
+      while (this.#pendingCatalogRevision !== undefined) {
+        const revision = this.#pendingCatalogRevision
+        this.#pendingCatalogRevision = undefined
+        await this.#refreshCatalog(revision, true)
+        if (this.#state !== 'starting' || connection !== this.#connection) return this.snapshot()
+      }
       this.#state = 'active'
-      await this.#options.onToolsChanged?.(this.#tools)
+      await this.#options.onCatalogChanged?.(this.#catalog)
       return this.snapshot()
     } catch (cause) {
       await this.fail(diagnostic(cause))
@@ -271,14 +195,33 @@ export class OmpAdapterSession {
     return this.#state === 'active' ? this.#connection : undefined
   }
 
+  async #refreshCatalog(expectedRevision: string, duringStart = false): Promise<void> {
+    const expectedState = duringStart ? 'starting' : 'active'
+    if (this.#state !== expectedState || expectedRevision === this.#catalog.revision) return
+    const connection = this.#connection
+    if (connection === undefined) return
+    try {
+      const catalog = defineToolCatalogSnapshot(await connection.request('tools.snapshot'))
+      if (this.#state !== expectedState || connection !== this.#connection) return
+      if (catalog.revision !== expectedRevision) return
+      this.#catalog = catalog
+      if (!duringStart) await this.#options.onCatalogChanged?.(catalog)
+    } catch (cause) {
+      if (duringStart) throw cause
+      await this.fail(diagnostic(cause))
+    }
+  }
+
   async fail(problem: OmpAdapterDiagnostic): Promise<void> {
     if (this.#state === 'disposed' || this.#state === 'failed') return
     this.#state = 'failed'
     this.#diagnostic = Object.freeze({ ...problem })
+    this.#capabilities = undefined
     this.#runtimeRevision = undefined
     this.#runtimeDiagnostics = undefined
-    this.#tools = Object.freeze([])
-    await this.#options.onToolsChanged?.(this.#tools)
+    this.#catalog = EMPTY_CATALOG
+    this.#pendingCatalogRevision = undefined
+    await this.#options.onCatalogChanged?.(this.#catalog)
     const connection = this.#connection
     this.#connection = undefined
     if (connection !== undefined) await connection.dispose().catch(() => undefined)
@@ -288,7 +231,8 @@ export class OmpAdapterSession {
   async dispose(): Promise<OmpAdapterDisposal> {
     if (this.#state === 'disposed') return Object.freeze({ outcome: 'not-started', sessionDisposeAcknowledged: false })
     this.#state = 'disposed'
-    this.#tools = Object.freeze([])
+    this.#pendingCatalogRevision = undefined
+    this.#catalog = EMPTY_CATALOG
     const connection = this.#connection
     this.#connection = undefined
     if (connection === undefined) return Object.freeze({ outcome: 'not-started', sessionDisposeAcknowledged: false })

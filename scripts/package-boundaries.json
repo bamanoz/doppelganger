@@ -35,6 +35,12 @@
         "@doppelganger/doppelganger-sqlite"
       ]
     },
+    "@doppelganger/doppelganger-extension-mcp": {
+      "directory": "extension-mcp",
+      "dependencies": [
+        "@doppelganger/doppelganger-protocols"
+      ]
+    },
     "@doppelganger/doppelganger-host-omp": {
       "directory": "host-omp",
       "dependencies": [
@@ -65,6 +71,7 @@
         "@doppelganger/doppelganger-codegraph",
         "@doppelganger/doppelganger-dynamic-runtime-plugins",
         "@doppelganger/doppelganger-evolution",
+        "@doppelganger/doppelganger-extension-mcp",
         "@doppelganger/doppelganger-host-omp",
         "@doppelganger/doppelganger-persona",
         "@doppelganger/doppelganger-persona-authoring",

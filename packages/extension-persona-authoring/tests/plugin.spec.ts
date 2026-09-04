@@ -90,7 +90,7 @@ describe('Persona Authoring foundation', () => {
 
   it('registers exactly inspect and approved revise for one writable active trait', async () => {
     const { ctx, authoring, writable, identity } = await setup({ writableTargets: ['trait:evolving-profile'] })
-    expect(ctx.doppelgangerTools.list()).toEqual([
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([
       expect.objectContaining({ name: 'persona.inspect', available: true }),
       expect.objectContaining({
         name: 'persona.revise',
@@ -102,33 +102,33 @@ describe('Persona Authoring foundation', () => {
       }),
     ])
 
-    await expect(ctx.doppelgangerTools.invoke('persona.inspect', { target: 'identity' })).resolves.toMatchObject({
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'persona.inspect', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'persona.inspect')!.revision, input: { target: 'identity' } }, 'test-session')).resolves.toMatchObject({
       ok: true,
       value: { target: 'identity', writable: false, content: 'Test identity.\n' },
     })
-    await expect(ctx.doppelgangerTools.invoke('persona.inspect', { target: 'trait:engineer' })).resolves.toMatchObject({
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'persona.inspect', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'persona.inspect')!.revision, input: { target: 'trait:engineer' } }, 'test-session')).resolves.toMatchObject({
       ok: true,
       value: { target: 'trait:engineer', writable: false },
     })
-    await expect(ctx.doppelgangerTools.invoke('persona.inspect', { target: 'trait:evolving-profile' })).resolves.toMatchObject({
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'persona.inspect', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'persona.inspect')!.revision, input: { target: 'trait:evolving-profile' } }, 'test-session')).resolves.toMatchObject({
       ok: true,
       value: { target: 'trait:evolving-profile', writable: true, content: 'Evolving profile.\n' },
     })
 
-    await expect(ctx.doppelgangerTools.invoke('persona.inspect', { target: 'trait:absent' })).resolves.toMatchObject({
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'persona.inspect', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'persona.inspect')!.revision, input: { target: 'trait:absent' } }, 'test-session')).resolves.toMatchObject({
       ok: false,
       error: { code: 'PERSONA_TARGET_UNKNOWN' },
     })
-    await expect(ctx.doppelgangerTools.invoke('persona.inspect', { target: writable })).resolves.toMatchObject({
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'persona.inspect', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'persona.inspect')!.revision, input: { target: writable } }, 'test-session')).resolves.toMatchObject({
       ok: false,
       error: { code: 'PERSONA_TARGET_UNKNOWN' },
     })
-    await expect(ctx.doppelgangerTools.invoke('persona.inspect', {
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'persona.inspect', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'persona.inspect')!.revision, input: {
       target: 'identity',
       path: identity,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
     await authoring.dispose()
-    expect(ctx.doppelgangerTools.list()).toEqual([])
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
     await ctx.fiber.dispose()
   })
 
@@ -186,7 +186,7 @@ describe('Persona Authoring foundation', () => {
       await expect(ctx.plugin(PersonaAuthoringPlugin, {
         writableTargets: candidate.writableTargets,
       })).rejects.toThrow()
-      expect(ctx.doppelgangerTools.list(), candidate.label).toEqual([])
+      expect(ctx.doppelgangerTools.snapshot().tools, candidate.label).toEqual([])
       await ctx.fiber.dispose()
     }
   })
@@ -204,7 +204,7 @@ describe('Persona Authoring foundation', () => {
     expect(ctx.doppelgangerPersona.traits).toEqual([
       expect.objectContaining({ name: 'evolving-profile' }),
     ])
-    expect(ctx.doppelgangerTools.list()).toEqual([])
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
     await ctx.fiber.dispose()
   })
 

@@ -18,15 +18,17 @@ The effective tree applies these layers in order:
 2. optional `$DOPPELGANGER_HOME/runtime.cordis.patch.yml`;
 3. optional `<project>/.doppelganger/runtime.cordis.patch.yml`;
 4. explicit host/session patches;
-5. protected runtime-owned host bridge.
+5. protected runtime-owned host layer.
 
 Later replacement semantics are Cordis semantics. Targeted mutations must match the tree produced by earlier layers or fail visibly. Relative plugin assets inserted by a filesystem patch resolve from that patch file's directory.
 
-Runtime-owned entry and import identities are reserved. Authored presets and caller patches cannot forge, replace, or remove the final host bridge.
+Runtime-owned entry and import identities are reserved. Authored presets and caller patches cannot forge, replace, or remove the final protected plugins, including session metadata, the actor-neutral shared Runtime Host bridge and capability service, a separately configured Actor Identity provider, or explicit typed host-native providers.
 
 ## Activation
 
-Activation loads and validates every source, builds the effective entry list, mounts a session-owned Include tree, waits for nested plugin Fibers, and audits every enabled entry. Missing dependencies, duplicate services, invalid entries, or failed plugins prevent the Runtime Session from being returned. Partial activation is disposed.
+Activation loads and validates every source, builds the effective entry list, mounts a session-owned Include tree, waits for nested plugin Fibers, and audits every enabled entry. Missing dependencies, duplicate services, invalid entries, or failed plugins prevent the Runtime Session from being returned. Partial activation is disposed. A Loader Fiber being active proves its synchronous composition contract, not the readiness of optional external dependencies that the plugin explicitly owns as background operational state.
+
+The optional MCP import row validates its complete authored shape, publishes its service and local server slots, and returns before external processes or endpoints finish initialization and discovery. Each server then reports `connecting`, `active`, or operational `failed` through its feature-owned snapshot. A slow or unavailable MCP server therefore does not delay or invalidate the Runtime Session; malformed MCP configuration still fails the Loader row synchronously.
 
 Direct Composition Definition construction and serialized host activation use one package-private canonicalizer. It enforces non-empty identifiers, lowercase kebab-case Runtime Preset IDs, absolute supported Loader paths, cloned and deeply frozen patch data, omitted absent optional fields, and deterministic field-labelled diagnostics. Public entry points add only their context-specific activation fields.
 
@@ -59,6 +61,7 @@ An explicitly composed Dynamic Runtime Plugins row owns one in-memory registry u
 
 An explicitly composed Evolution row owns one actor-aware service, instruction/reminder context provider, and seven ledger controls. Valid owner replacement disposes and recreates those session effects while global SQLite and project YAML remain durable. Invalid owner reload retains the previous audited generation. Removing the row cleanly removes the service, context, and tools without deleting stored proposals.
 An explicitly composed CodeGraph row owns two portable registrations and its bounded process adapter under one Loader Fiber. Valid replacement starts an independent candidate generation and commits through ordinary Composition Runtime semantics; invalid replacement retains the previous generation. Removal rejects queued work, terminates active children, removes both tools, and leaves the existing index intact.
+An explicitly composed MCP import row separates structural Loader validity from external server health. Valid row replacement retires changed/removed client generations, withdraws their complete tool sets, installs replacement `connecting` slots, and returns from the Loader update without awaiting spawn, initialization, or discovery. Unchanged normalized server configurations retain their exact generation. External failure becomes feature-local operational state and does not roll back the valid authored configuration; structurally invalid configuration still rejects the candidate Loader generation through ordinary Composition Runtime rollback.
 
 ## Disposal
 

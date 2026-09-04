@@ -373,7 +373,7 @@ function registerTools(
     name: 'persona.inspect',
     description: 'Inspect one active Persona asset by logical target',
     inputSchema: inspectSchema,
-    async invoke(input) {
+    async invoke(input, _context) {
       const record = inputObject(input, ['target'])
       const target = selectedTarget(targets, record.target ?? null)
       const asset = await inspectPersonaAsset(target.filename, config.maximumAssetBytes)
@@ -394,7 +394,7 @@ function registerTools(
       policy: 'required',
       reason: 'This changes active Persona instructions.',
     }),
-    invoke(input) {
+    invoke(input, _context) {
       const command = reviseInput(input)
       const target = selectedTarget(targets, command.target)
       return enqueue(() => revisePersona(observer, target, command, config))

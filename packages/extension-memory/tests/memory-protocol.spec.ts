@@ -67,7 +67,7 @@ describe('memory protocol', () => {
     await context.plugin(MemoryService)
     const protocol = await context.plugin(MemoryProtocolPlugin)
 
-    expect(context.doppelgangerTools.list().map(tool => tool.name)).toEqual([
+    expect(context.doppelgangerTools.snapshot().tools.map(tool => tool.name)).toEqual([
       'memory.candidates.approve',
       'memory.candidates.corroborate',
       'memory.candidates.list',
@@ -86,7 +86,7 @@ describe('memory protocol', () => {
       'memory.search',
       'memory.unpin',
     ])
-    const rememberSchema = context.doppelgangerTools.list().find(tool => tool.name === 'memory.remember')!.inputSchema
+    const rememberSchema = context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.remember')!.inputSchema
     expect(rememberSchema).toMatchObject({
       type: 'object',
       required: ['operationId', 'subjectKey', 'content', 'kind'],
@@ -101,37 +101,37 @@ describe('memory protocol', () => {
     })
 
     for (const identityField of ['principalId', 'actorId'] as const) {
-      const rejected = await context.doppelgangerTools.invoke('memory.remember', {
+      const rejected = await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'memory.remember', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.remember')!.revision, input: {
         operationId: `reject-${identityField}`,
         subjectKey: 'identity.override',
         kind: 'fact',
         content: 'Tool input must not select a memory identity.',
         [identityField]: 'override',
-      })
+      } }, 'test-session')
       expect(rejected).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
     }
 
-    const preferenceResult = await context.doppelgangerTools.invoke('memory.remember', {
+    const preferenceResult = await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'memory.remember', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.remember')!.revision, input: {
       operationId: 'remember-preference',
       subjectKey: 'preference.response.evidence',
       kind: 'preference',
       content: 'Prefer evidence in technical answers.',
       scope: 'relationship',
-    })
-    const factResult = await context.doppelgangerTools.invoke('memory.remember', {
+    } }, 'test-session')
+    const factResult = await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'memory.remember', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.remember')!.revision, input: {
       operationId: 'remember-fact',
       subjectKey: 'project.storage.engine',
       kind: 'fact',
       content: 'Project evidence is stored in SQLite.',
-    })
+    } }, 'test-session')
     expect(preferenceResult.ok).toBe(true)
     expect(factResult.ok).toBe(true)
     if (!preferenceResult.ok) throw new Error(preferenceResult.error.message)
     const preference = resultObject(preferenceResult.value)
-    await context.doppelgangerTools.invoke('memory.pin', {
+    await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'memory.pin', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.pin')!.revision, input: {
       operationId: 'pin-preference',
       id: preference.id!,
-    })
+    } }, 'test-session')
 
     const assembled = await context.doppelgangerContext.resolve({
       turn: { input: 'technical evidence SQLite' },
@@ -151,15 +151,15 @@ describe('memory protocol', () => {
       }),
     ])
 
-    const secret = await context.doppelgangerTools.invoke('memory.remember', {
+    const secret = await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'memory.remember', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.remember')!.revision, input: {
       operationId: 'secret',
       subjectKey: 'secret.token',
       kind: 'fact',
       content: 'api_key = sk_live_1234567890abcdefgh',
-    })
+    } }, 'test-session')
     expect(secret).toMatchObject({ ok: false, error: { code: 'SECRET_REJECTED' } })
     await protocol.dispose()
-    expect(context.doppelgangerTools.list()).toEqual([])
+    expect(context.doppelgangerTools.snapshot().tools).toEqual([])
     await context.fiber.dispose()
   })
   it('automatically recalls stable relationship profile without lexical overlap', async () => {

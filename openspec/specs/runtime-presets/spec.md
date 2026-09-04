@@ -57,7 +57,7 @@ Each `runtime.cordis.yml` SHALL be a complete Cordis Loader entry tree, includin
 
 #### Scenario: Activate an arbitrary plugin tree
 - **ID**: `runtime.presets.activation.arbitrary-plugin-tree`
-- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation without preset assembly`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
 - **WHEN** a selected Runtime Preset contains a valid third-party Cordis plugin
 - **THEN** the runtime activates it without requiring any Persona or memory package
 
@@ -174,7 +174,7 @@ Generic selection and serialized activation SHALL identify the Runtime Preset, n
 
 #### Scenario: Serialize a non-Persona activation
 - **ID**: `runtime.presets.activation.generic-serialization`
-- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation without preset assembly`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
 - **WHEN** a host activates a selected Runtime Preset
 - **THEN** the child receives only generic composition and host integration data
 

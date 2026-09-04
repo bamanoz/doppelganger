@@ -1,6 +1,6 @@
 ## Purpose
 
-Define the native DeepSeek Harness host boundary that activates isolated Doppelganger Runtime Sessions inside DSH agent scopes and projects host-neutral context, tools, lifecycle events, actor identity, reload, and failure behavior without an RPC child.
+Define the native DeepSeek Harness host boundary that activates isolated Doppelganger Runtime Sessions inside DSH agent scopes, binds the actor-neutral shared Runtime Host API directly in-process, projects context, revisioned tools, cancellation, declared lifecycle events, and independently configured Actor Identity, and preserves reload and failure behavior without an RPC child or parallel bridge.
 
 ## ADDED Requirements
 
@@ -32,14 +32,14 @@ The native DSH host SHALL resolve the Runtime Preset through the injected author
 - **WHEN** two live DSH agents activate the same Runtime Preset concurrently
 - **THEN** each agent owns distinct plugin instances, registrations, lifecycle state, and reload ownership
 
-### Requirement: DSH supplies host-owned activation inputs
-The native host SHALL derive the stable Runtime Session ID from the DSH session, derive the optional workspace root from the DSH session header, request selection and canonical user/project patch paths from the injected roster service, and install the protected protocol bridge after caller-controlled layers. Authored Runtime Presets and patches SHALL NOT replace or remove the bridge. The host SHALL NOT duplicate roster roots, trust, discovery, authoring, or deployment-default policy.
+### Requirement: DSH supplies host-owned activation inputs and protected plugins
+The native host SHALL derive the stable Runtime Session ID from the DSH session, derive the optional workspace root from the DSH session header, request selection and canonical user/project patch paths from the injected roster service, and install the shared Runtime Host plugin after caller-controlled layers with one immutable closed DSH capability profile. Actor Identity SHALL be mounted only through a separate protected actor plugin in configured absent, unbound, or bound state. Authored Runtime Presets and patches SHALL NOT replace or remove runtime-owned plugins. The host SHALL NOT duplicate roster roots, trust, discovery, authoring, deployment-default policy, protocol service lookup, or shared bridge contracts.
 
 #### Scenario: Project and user patches apply in order
 - **ID**: `host.dsh.activation.patch-order`
 - **EVIDENCE**: `planned:packages/host-dsh/tests/activation.spec.ts::applies user and project patches in canonical order`
 - **WHEN** both optional user and project Runtime Preset patches exist for a DSH workspace
-- **THEN** activation applies the selected preset, user patch, project patch, explicit host patch, and protected bridge in canonical order
+- **THEN** activation applies the selected preset, user patch, project patch, explicit host patch, and one deterministic protected runtime-owned plugin set in canonical order
 
 #### Scenario: Agent has no workspace root
 - **ID**: `host.dsh.activation.workspace-optional`
@@ -47,56 +47,62 @@ The native host SHALL derive the stable Runtime Session ID from the DSH session,
 - **WHEN** a DSH session has no workspace path but user configuration selects a Runtime Preset
 - **THEN** the Runtime Session activates without project discovery and omits workspace metadata
 
-### Requirement: DSH actor binding is host-authoritative
-The native host SHALL install the existing actor-identity protocol through the protected bridge. By default it SHALL bind a namespaced stable identifier derived from DSH's host-owned anonymous harness-home identity. Configuration MAY instead supply a validated actor identifier, select explicit unbound mode, or use a trusted deployment resolver. The chosen state SHALL be snapshotted outside authored Runtime Presets and remain immutable for the Runtime Session.
+### Requirement: DSH Actor Identity is host-authoritative and independent
+The native host SHALL keep actor state outside the shared Runtime Host bridge, binding, capability profile, requests, tool-catalog callback, and lifecycle contracts. The default configuration SHALL mount a separate actor plugin with a namespaced stable identifier derived from DSH's host-owned anonymous harness-home identity. Configuration MAY instead supply a validated actor identifier, select explicit unbound mode, use a trusted deployment resolver, or disable the actor provider entirely. A mounted bound or unbound state SHALL be snapshotted outside authored Runtime Presets and remain immutable for the Runtime Session; disabled mode SHALL leave `doppelgangerActor` absent while actor-independent shared protocols remain usable.
 
 #### Scenario: DSH uses its default installation actor
 - **ID**: `host.dsh.actor.default-anonymous`
 - **EVIDENCE**: `planned:packages/host-dsh/tests/activation.spec.ts::binds the namespaced DSH harness-home actor by default`
 - **WHEN** the host uses default actor configuration
-- **THEN** actor-aware extensions observe one namespaced stable installation identity owned by DSH rather than a session, workspace, or preset value
+- **THEN** actor-aware extensions observe one namespaced stable installation identity owned by DSH rather than a session, workspace, preset, or shared bridge value
 
 #### Scenario: DSH starts a bound actor session
 - **ID**: `host.dsh.actor.bound`
 - **EVIDENCE**: `planned:packages/host-dsh/tests/activation.spec.ts::binds and isolates host-authoritative DSH actors`
 - **WHEN** the DSH host configuration or trusted resolver supplies a valid actor identifier for an agent
-- **THEN** actor-aware extensions observe that immutable bound identity only in that Runtime Session
+- **THEN** the separate actor plugin exposes that immutable bound identity only in that Runtime Session
 
 #### Scenario: DSH starts an unbound generic session
 - **ID**: `host.dsh.actor.unbound`
 - **EVIDENCE**: `planned:packages/host-dsh/tests/activation.spec.ts::exposes explicit unbound actor state to generic presets`
 - **WHEN** host configuration explicitly selects unbound mode and the selected composition is actor-independent
-- **THEN** the Runtime Session activates with explicit unbound actor state
+- **THEN** the Runtime Session activates with an explicit unbound actor provider and an unchanged shared Runtime Host API
+
+#### Scenario: DSH omits Actor Identity
+- **ID**: `host.dsh.actor.absent`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/activation.spec.ts::keeps shared protocols usable without an actor provider`
+- **WHEN** host configuration disables Actor Identity and the selected composition is actor-independent
+- **THEN** `doppelgangerActor` is absent while context, tools, cancellation, lifecycle, and host capabilities remain usable
 
 ### Requirement: Portable context participates in DSH prompt assembly
-For every DSH model step, the native host SHALL resolve the active Doppelganger context protocol with the stable turn identity, the direct principal input for that turn, and a configured hard token budget. It SHALL add accepted `instruction` contributions to DSH prompt sections and accepted `data` contributions to DSH dynamic contexts without replacing existing DSH prompt material or bypassing DSH complete-prompt and runtime-context suppression rules.
+For each direct DSH user turn, the native host SHALL mint one non-empty request ID and call the active bridge exactly once with that request ID, the stable turn identity, the direct principal input, and a configured hard token budget. It SHALL retain the accepted contribution snapshot for that turn, add `instruction` contributions to DSH prompt sections and `data` contributions to DSH dynamic contexts on every model step, and SHALL NOT resolve providers again after tool calls in the same turn.
 
 #### Scenario: Instruction and data context are projected
 - **ID**: `host.dsh.context.authority-projection`
 - **EVIDENCE**: `planned:packages/host-dsh/tests/context.spec.ts::projects instruction and data contributions through DSH prompt assembly`
 - **WHEN** active providers return accepted instruction and data contributions for a DSH turn
-- **THEN** the request contains deterministic Doppelganger prompt sections and dynamic contexts with their authority preserved
+- **THEN** every model step contains deterministic Doppelganger prompt sections and dynamic contexts from the same turn snapshot with authority preserved
 
 #### Scenario: Context exceeds its host budget
 - **ID**: `host.dsh.context.hard-budget`
 - **EVIDENCE**: `planned:packages/host-dsh/tests/context.spec.ts::enforces the configured context budget before DSH projection`
 - **WHEN** active context providers offer more content than the configured Doppelganger budget
-- **THEN** only the context protocol's accepted bounded contributions are projected into DSH
+- **THEN** only the context protocol's accepted bounded contributions enter the turn snapshot
 
-#### Scenario: Later tool step assembles context
-- **ID**: `host.dsh.context.stable-turn-input`
-- **EVIDENCE**: `planned:packages/host-dsh/tests/context.spec.ts::retains one direct principal input across all steps of a DSH turn`
+#### Scenario: Later tool step reuses context
+- **ID**: `host.dsh.context.stable-turn-snapshot`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/context.spec.ts::resolves context once and reuses it across tool steps in one DSH turn`
 - **WHEN** a DSH turn performs multiple model steps after tool calls
-- **THEN** every step resolves context with the same stable turn identity and original direct principal input
+- **THEN** every step uses the same accepted contributions and the bridge receives only one context request for the direct principal input
 
 #### Scenario: Evolution context is projected generically
 - **ID**: `host.dsh.context.evolution-generic`
 - **EVIDENCE**: `planned:packages/host-dsh/tests/context.spec.ts::projects Evolution instruction and reminder data without interpreting proposals`
 - **WHEN** an active Runtime Preset composes Evolution and its context provider returns policy instruction plus one due reminder candidate
-- **THEN** DSH projects both contributions with their declared authority and adds no host-owned Evolution behavior
+- **THEN** DSH projects both contributions from the turn snapshot with their declared authority and adds no host-owned Evolution behavior
 
-### Requirement: Portable tools are native scoped DSH tools
-The native host SHALL translate each available portable tool descriptor into an agent-scoped DSH tool definition, validate its JSON Schema and optional approval metadata before registration, invoke the portable registry with JSON-compatible arguments, return the canonical JSON value on success, and preserve structured domain failures as failed DSH tool results. A portable descriptor with `approval.policy: "required"` SHALL enter DSH's scoped `tools/pre-execute` ask path and SHALL reach the portable handler only after `ApprovalService` returns `allowed-once`. Portable tool registrations SHALL not mask unrelated DSH tools.
+### Requirement: Portable tools are exact native scoped DSH tools
+The native host SHALL translate each available descriptor from one immutable revisioned bridge snapshot into an agent-scoped DSH tool definition, validate its JSON Schema and optional approval metadata before registration, retain the exact portable name and descriptor revision in the native closure, and invoke only through `bridge.invokeTool` with stable call ID, optional turn ID, exact tool revision, JSON-compatible input, and an optional protected approval grant. It SHALL return the canonical JSON value on success and preserve structured protocol/domain failures as failed DSH tool results. A portable descriptor with `approval.policy: "required"` SHALL enter DSH's scoped `tools/pre-execute` ask path and SHALL reach the bridge only after `ApprovalService` returns `allowed-once`; the adapter SHALL then mint a one-shot grant bound to call ID, tool revision, and canonical input digest for bridge revalidation. Portable tool registrations SHALL not mask unrelated DSH tools.
 
 #### Scenario: DSH invokes a portable tool
 - **ID**: `host.dsh.tools.native-invocation`
@@ -140,8 +146,20 @@ The native host SHALL translate each available portable tool descriptor into an 
 - **WHEN** no ApprovalService or owning answerer can resolve a required portable tool call
 - **THEN** the call fails closed before portable dispatch while the DSH agent and unrelated tools remain usable
 
+#### Scenario: DSH cancels a portable tool call
+- **ID**: `host.dsh.tools.cancellation`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/tools.spec.ts::forwards native cancellation to the exact portable call`
+- **WHEN** DSH aborts an active projected tool execution
+- **THEN** the adapter calls `bridge.cancelTool` with that call ID, the portable handler observes its invocation signal, unrelated calls remain active, and the settled structured result is preserved
+
+#### Scenario: Native closure carries a stale tool revision
+- **ID**: `host.dsh.tools.stale-revision`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/tools.spec.ts::rejects stale descriptor revisions before portable dispatch`
+- **WHEN** a retained DSH closure invokes after the same portable name has a new descriptor revision
+- **THEN** bridge invocation returns `TOOL_REVISION_STALE` and neither the old nor current handler runs
+
 ### Requirement: Tool projection exactly follows committed runtime state
-The native host SHALL serialize tool-set refreshes, validate the complete candidate set before replacing registrations, and commit one exact scoped DSH projection only after a successful Runtime Preset activation or reload. Tool approval metadata SHALL participate in the same candidate commit. Removed or unavailable portable tools SHALL disappear, stale closures SHALL NOT invoke a removed handler, and stale approval state SHALL NOT authorize a changed or removed descriptor. Invalid reload SHALL retain the previous DSH projection and approval behavior.
+The native host SHALL accept only the shared binding's explicit `toolCatalogChanged(revision)` callback, fetch and validate the matching complete immutable snapshot, serialize refreshes, and commit one exact scoped DSH projection only after successful candidate registration. It SHALL define no generic runtime notification envelope or DSH-local mutable bridge registry. Tool approval metadata SHALL participate in the same candidate commit. Removed or unavailable portable tools SHALL disappear, stale catalog callbacks SHALL NOT restore an older projection, stale closures SHALL NOT invoke a removed or replaced handler, and stale approval state SHALL NOT authorize a changed or removed descriptor. Invalid reload SHALL retain the previous DSH projection and approval behavior.
 
 #### Scenario: Valid reload replaces tools
 - **ID**: `host.dsh.reload.tool-cutover`
@@ -173,8 +191,8 @@ The native host SHALL serialize tool-set refreshes, validate the complete candid
 - **WHEN** a caller retains a previously projected DSH tool closure after committed removal
 - **THEN** the closure returns an unavailable failure without invoking the removed portable handler or consuming a prior approval grant
 
-### Requirement: DSH durable facts drive normalized lifecycle events
-The native host SHALL derive lifecycle publication from DSH agent notifications and committed session-log events rather than streaming guesses. It SHALL publish stable deterministic delivery identities, map DSH numeric turns and tool call IDs to stable portable identities, publish each completed tool result only through its correlated `tool-completed` event, and publish `turn-committed` only after DSH appends `turn/end`.
+### Requirement: DSH durable facts drive declared normalized lifecycle events
+The native host SHALL derive lifecycle publication from DSH agent notifications and committed session-log events rather than streaming guesses. Its frozen capability profile SHALL declare only the standard lifecycle kinds DSH can publish faithfully, and `bridge.publishLifecycle` SHALL reject any undeclared kind. For declared events, the host SHALL publish stable deterministic delivery identities, map DSH numeric turns and tool call IDs to stable portable identities, publish each completed tool result only through its correlated `tool-completed` event, and publish `turn-committed` only after DSH appends `turn/end`. Teardown alone SHALL NOT advertise or synthesize `session-completed`.
 
 #### Scenario: DSH turn commits normally
 - **ID**: `host.dsh.lifecycle.committed-turn`
@@ -245,20 +263,38 @@ The native host SHALL bind Runtime Session ownership to the DSH agent lifecycle,
 - **WHEN** DSH tears down an agent without an explicit successful session outcome
 - **THEN** the host publishes neutral session disposal and does not publish a fabricated completed session
 
-### Requirement: The native host preserves one trusted Cordis runtime
-The DSH host package SHALL use the host-provided `@deepseek-ai/cordis` identity as a peer, consume the roster through its public Cordis service in that same root, depend only on the DSH packages whose public APIs it consumes, run as trusted same-process plugin code, and SHALL NOT introduce a second dependency-injection container, Loader tree, roster implementation, agent loop, RPC process, generated-code runner, or sandbox claim.
+### Requirement: The native host preserves one trusted Cordis runtime and one shared bridge
+The DSH host package SHALL use the host-provided `@deepseek-ai/cordis` identity as a peer, consume the roster through its public Cordis service in that same root, depend only on the DSH packages whose public APIs it consumes, and run as trusted same-process plugin code. Each selected agent SHALL bind exactly one shared `extension-protocols` Runtime Host bridge directly in-process. `host-dsh` SHALL NOT introduce a second dependency-injection container, Loader tree, roster implementation, agent loop, DSH-local bridge contract, generic runtime notification channel, RPC process, router, sidecar, generated-code runner, sandbox claim, or parallel session-binding path.
 
 #### Scenario: DSH loads the host package
 - **ID**: `host.dsh.architecture.single-cordis-root`
 - **EVIDENCE**: `planned:packages/host-dsh/tests/composition.spec.ts::loads the native host through one DSH Cordis root`
 - **WHEN** the native host is composed into a DSH installation
-- **THEN** its services, effects, scopes, and Runtime Sessions belong to the same Cordis registry and disposal tree as the host agent
+- **THEN** its services, effects, scopes, bridge, and Runtime Sessions belong to the same Cordis registry and disposal tree as the host agent
 
 #### Scenario: Native host runs in-process
 - **ID**: `host.dsh.architecture.no-rpc-bridge`
-- **EVIDENCE**: `planned:packages/host-dsh/tests/composition.spec.ts::projects protocols without starting an OMP child transport`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/composition.spec.ts::binds the shared Runtime Host API directly without another transport`
 - **WHEN** a DSH agent activates Doppelganger
-- **THEN** context, tool, lifecycle, and actor projection use direct Cordis APIs without starting the OMP child or JSON-RPC transport
+- **THEN** context, tool, cancellation, lifecycle, and optional separate Actor Identity projection use direct Cordis APIs without an OMP child, JSON-RPC transport, or DSH-specific bridge
+
+### Requirement: DSH passes shared Runtime Host conformance
+Before native DSH support is considered implemented, the adapter SHALL pass the same transport-independent Runtime Host conformance suite as OMP without process-topology exceptions. Coverage SHALL include two-session isolation, canonical empty context and tools, closed capability validation, atomic catalog replacement, stale descriptor invocation, one-shot approval replay, cancellation/completion races, undeclared lifecycle rejection, actor-provider absence/unbound/bound independence, disposal during active work, and late callbacks after binding replacement.
+
+#### Scenario: Direct adapter claims shared API support
+- **ID**: `host.dsh.architecture.shared-conformance`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/runtime-host-conformance.spec.ts::passes the shared Runtime Host conformance suite`
+- **WHEN** `host-dsh` binds the common bridge directly in-process
+- **THEN** it satisfies the same observable Runtime Host contract as the transported OMP adapter
+
+### Requirement: DSH-only extensions remain typed and host-specific
+A DSH-only service or event SHALL be provided only by an explicitly typed `doppelganger/host/dsh/...` protected Cordis plugin that is isolated to the owning Runtime Session, validates bounded JSON-compatible values, owns registration and cleanup as Cordis effects, and reuses the existing agent-owned in-process binding and lifecycle. It SHALL NOT expose raw DSH runtime objects or create another channel. Promotion into the common Runtime Host API SHALL require two implemented adapters proving equivalent timing, authority, correlation, failure/cancellation/replay semantics, stale behavior, rollback, and disposal.
+
+#### Scenario: DSH exposes a native-only hook
+- **ID**: `host.dsh.architecture.typed-host-extension`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/composition.spec.ts::keeps native-only hooks in typed protected plugins`
+- **WHEN** DSH needs to project a native observation with no proven common semantic equivalent
+- **THEN** it uses one typed DSH-namespaced protected provider in the existing agent binding and does not expand or bypass the shared Runtime Host API
 
 ### Requirement: DSH projects opt-in Dynamic Runtime Plugins through the portable surface
 When a selected Runtime Preset explicitly composes Dynamic Runtime Plugins and the optional extension package is resolvable by the DSH deployment, the native host SHALL project the exact portable `runtime-plugin.inspect-list`, `runtime-plugin.inspect-query`, `runtime-plugin.inspect-self`, `runtime-plugin.define`, `runtime-plugin.run`, `runtime-plugin.stop`, and `runtime-plugin.undefine` descriptors through its ordinary scoped tool path. It SHALL NOT import, delegate to, or duplicate `@deepseek-ai/dsh-cordis-host-runner` registry, evaluator, inspection, or version-transition semantics. Every exact `runtime-plugin.run` first run, restart, update, or rollback SHALL require a new native one-shot approval before portable dispatch. Generated context and tools SHALL follow the same committed dynamic projection and stale-closure rules as other portable effects. Ordinary structured extension failures SHALL remain agent-contained, while documentation SHALL state that generated code executes in the native DSH process and is not hostile-code containment. Agent and host teardown SHALL await exhaustive Runtime Session disposal of every reachable generated Fiber.

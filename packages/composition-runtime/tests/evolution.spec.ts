@@ -19,10 +19,10 @@ const sqliteModule = fileURLToPath(new URL('../../extension-sqlite/src/index.ts'
 const evolutionModule = fileURLToPath(new URL('../../extension-evolution/src/index.ts', import.meta.url))
 
 interface Tools {
-  list(): readonly { readonly name: string }[]
+  snapshot(): { readonly revision: string; readonly tools: readonly { readonly name: string; readonly revision: string }[] }
 }
 interface ToolsEvents {
-  on(name: 'doppelganger/tools-changed', listener: () => void): () => void
+  on(name: 'doppelganger/tools-changed', listener: (revision: string) => void): () => void
 }
 
 
@@ -127,7 +127,7 @@ function observer(target: Map<string, { service: object; tools: readonly string[
       const tools = ctx.get('doppelgangerTools') as Tools
       const update = () => target.set(ctx.doppelgangerRuntimeSession.sessionId, {
         service: ctx.get('doppelgangerEvolution') as object,
-        tools: tools.list().map(tool => tool.name),
+        tools: tools.snapshot().tools.map(tool => tool.name),
       })
       update()
       ;(ctx as unknown as ToolsEvents).on('doppelganger/tools-changed', update)
@@ -175,7 +175,7 @@ describe('Evolution under Composition Runtime', () => {
     const neutralObserver: Plugin = {
       name: 'neutral-observer',
       inject: ['doppelgangerTools'],
-      apply(ctx: Context) { tools = (ctx.get('doppelgangerTools') as Tools).list().map(tool => tool.name) },
+      apply(ctx: Context) { tools = (ctx.get('doppelgangerTools') as Tools).snapshot().tools.map(tool => tool.name) },
     }
     await neutralRuntime.activate({
       composition: plainDefinition,

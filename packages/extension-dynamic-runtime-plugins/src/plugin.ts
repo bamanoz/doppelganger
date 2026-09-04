@@ -52,7 +52,7 @@ function definitions(
       name: 'runtime-plugin.inspect-list',
       description: 'List the source-verified generated runtime capability providers and query methods',
       inputSchema: inspectListSchema,
-      invoke(input) {
+      invoke(input, _context) {
         inputRecord(input, [])
         return inspectList(config)
       },
@@ -61,13 +61,13 @@ function definitions(
       name: 'runtime-plugin.inspect-query',
       description: 'Query one exact approved Service, Event, Builtin, or current Tool contract without invoking it',
       inputSchema: inspectQuerySchema,
-      invoke: input => inspectQuery(ctx, input, config),
+      invoke: (input, _context) => inspectQuery(ctx, input, config),
     },
     {
       name: 'runtime-plugin.inspect-self',
       description: 'Inspect session-owned temporary Plugins, immutable Packages, pointers, source, and bounded diagnostics progressively',
       inputSchema: inspectSelfSchema,
-      invoke(input) {
+      invoke(input, _context) {
         const record = inputRecord(input, ['pluginId', 'packageId'])
         const pluginId = optionalString(record, 'pluginId', 128)
         const packageId = optionalString(record, 'packageId', 128)
@@ -78,7 +78,7 @@ function definitions(
       name: 'runtime-plugin.define',
       description: 'Define one immutable bounded plain-JavaScript Package without evaluating or activating it',
       inputSchema: defineSchema(config.maximumNameLength, config.maximumPurposeLength, config.maximumSourceBytes),
-      invoke(input) {
+      invoke(input, _context) {
         const record = inputRecord(input, ['pluginId', 'idPrefix', 'name', 'purpose', 'source'])
         const pluginId = optionalString(record, 'pluginId', 128)
         const idPrefix = optionalString(record, 'idPrefix', 32)
@@ -100,7 +100,7 @@ function definitions(
       description: 'After native one-shot approval, evaluate and activate one exact immutable generated Package',
       inputSchema: runSchema(config.maximumNameLength, config.maximumPurposeLength),
       approval: Object.freeze({ policy: 'required', reason: RUN_APPROVAL_REASON }),
-      invoke(input) {
+      invoke(input, _context) {
         const record = inputRecord(input, ['pluginId', 'packageId', 'mode', 'name', 'purpose', 'sourceDigest'])
         const mode = requiredString(record, 'mode', 6)
         if (mode !== 'run' && mode !== 'update') throw new RuntimePluginError('INVALID_INPUT', 'mode must be "run" or "update"')
@@ -118,7 +118,7 @@ function definitions(
       name: 'runtime-plugin.stop',
       description: 'Idempotently stop one temporary Plugin while retaining immutable Packages and version pointers',
       inputSchema: pluginIdentitySchema,
-      invoke(input) {
+      invoke(input, _context) {
         const record = inputRecord(input, ['pluginId'])
         return registry.stop(requiredString(record, 'pluginId', 128))
       },
@@ -127,7 +127,7 @@ function definitions(
       name: 'runtime-plugin.undefine',
       description: 'Stop and permanently remove one temporary Plugin and every Package from the current Runtime Session',
       inputSchema: pluginIdentitySchema,
-      invoke(input) {
+      invoke(input, _context) {
         const record = inputRecord(input, ['pluginId'])
         return registry.undefine(requiredString(record, 'pluginId', 128))
       },

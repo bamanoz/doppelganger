@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createPersonaActivationPlugin, type PersonaAssetRevision } from '@doppelganger/doppelganger-persona'
 import { ToolRegistry, type ToolInvocationResult } from '@doppelganger/doppelganger-protocols'
 import { PersonaAuthoringPlugin } from '../src/index.ts'
+import { invokeTool } from './support.ts'
 
 const temporaryRoots: string[] = []
 
@@ -41,7 +42,7 @@ async function session(filename: string, id: string) {
 }
 
 async function inspectedRevision(ctx: Context): Promise<PersonaAssetRevision> {
-  const result = await ctx.doppelgangerTools.invoke('persona.inspect', { target: 'trait:evolving-profile' })
+  const result = await invokeTool(ctx, 'persona.inspect', { target: 'trait:evolving-profile' })
   if (!result.ok || result.value === null || Array.isArray(result.value) || typeof result.value !== 'object') {
     throw new Error('inspection failed')
   }
@@ -51,7 +52,7 @@ async function inspectedRevision(ctx: Context): Promise<PersonaAssetRevision> {
 }
 
 function revise(ctx: Context, expectedRevision: PersonaAssetRevision, replacement: string): Promise<ToolInvocationResult> {
-  return ctx.doppelgangerTools.invoke('persona.revise', {
+  return invokeTool(ctx, 'persona.revise', {
     target: 'trait:evolving-profile',
     expectedRevision,
     replacement,

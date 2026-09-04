@@ -30,9 +30,9 @@ async function loaderProjection(includeDynamic: boolean): Promise<readonly strin
     name: 'test-tool-observer',
     inject: ['doppelgangerTools'],
     apply(child) {
-      projected = child.doppelgangerTools.list().map(tool => tool.name)
+      projected = child.doppelgangerTools.snapshot().tools.map(tool => tool.name)
       child.on('doppelganger/tools-changed', () => {
-        projected = child.doppelgangerTools.list().map(tool => tool.name)
+        projected = child.doppelgangerTools.snapshot().tools.map(tool => tool.name)
       })
     },
   }
@@ -77,10 +77,10 @@ describe('Dynamic Runtime Plugins foundation', () => {
   it('registers exactly the seven control tools only when explicitly composed', async () => {
     const plain = new Context()
     await plain.plugin(ToolRegistry)
-    expect(plain.doppelgangerTools.list()).toEqual([])
+    expect(plain.doppelgangerTools.snapshot().tools).toEqual([])
 
     const { ctx, plugin } = await setup()
-    expect(ctx.doppelgangerTools.list().map(tool => tool.name)).toEqual([
+    expect(ctx.doppelgangerTools.snapshot().tools.map(tool => tool.name)).toEqual([
       'runtime-plugin.define',
       'runtime-plugin.inspect-list',
       'runtime-plugin.inspect-query',
@@ -89,10 +89,10 @@ describe('Dynamic Runtime Plugins foundation', () => {
       'runtime-plugin.stop',
       'runtime-plugin.undefine',
     ])
-    expect(ctx.doppelgangerTools.list().find(tool => tool.name === 'runtime-plugin.run')?.approval?.policy)
+    expect(ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.run')?.approval?.policy)
       .toBe('required')
     await plugin.dispose()
-    expect(ctx.doppelgangerTools.list()).toEqual([])
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
     await ctx.fiber.dispose()
     await plain.fiber.dispose()
   })
@@ -115,7 +115,7 @@ describe('Dynamic Runtime Plugins foundation', () => {
     ctx.provide('doppelgangerRuntimeSession', Object.freeze({ sessionId: 'session-1', runtimePresetId: 'test' }))
     await ctx.plugin(ToolRegistry)
     await expect(ctx.plugin(DynamicRuntimePluginsPlugin, { vmTimeoutMs: 0 })).rejects.toThrow('between 1')
-    expect(ctx.doppelgangerTools.list()).toEqual([])
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
     await ctx.fiber.dispose()
   })
 })

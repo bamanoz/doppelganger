@@ -2,6 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import { ContextProtocol, ToolRegistry, type JsonValue } from '@doppelganger/doppelganger-protocols'
 import { DynamicRuntimePluginsPlugin } from '../src/index.ts'
+import { invokeTool } from './support.ts'
 
 async function setup() {
   const ctx = new Context()
@@ -34,19 +35,19 @@ function record(value: JsonValue): Readonly<Record<string, JsonValue>> {
 }
 
 async function define(ctx: Context, source: string, pluginId?: JsonValue) {
-  const result = await ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+  const result = await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
     ...(pluginId === undefined ? { idPrefix: 'effects' } : { pluginId }),
     name: pluginId === undefined ? 'effect package one' : 'effect package two',
     purpose: 'prove portable effect lifecycle',
     source,
-  })
+  } }, 'test-session')
   if (!result.ok) throw new Error(result.error.message)
   return result.value
 }
 
 async function run(ctx: Context, definition: JsonValue, mode: 'run' | 'update') {
   const value = record(definition)
-  return ctx.doppelgangerTools.invoke('runtime-plugin.run', {
+  return invokeTool(ctx, 'runtime-plugin.run', {
     pluginId: value.pluginId ?? null,
     packageId: value.packageId ?? null,
     mode,
@@ -94,20 +95,20 @@ describe('portable generated effect lifecycle', () => {
     await ctx.parallel('doppelganger/turn-started', {} as never)
     expect(state).toEqual({ version: 'one', events: 1 })
     expect(await resolvedSources(ctx)).toEqual(['generated-one', 'unrelated'])
-    expect(await ctx.doppelgangerTools.invoke('generated.one', {})).toEqual({ ok: true, value: { version: 'one' } })
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'generated.one', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'generated.one')!.revision, input: {} }, 'test-session')).toEqual({ ok: true, value: { version: 'one' } })
 
     const value = record(definition)
-    expect(await ctx.doppelgangerTools.invoke('runtime-plugin.stop', { pluginId: value.pluginId ?? null }))
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.stop', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.stop')!.revision, input: { pluginId: value.pluginId ?? null } }, 'test-session'))
       .toMatchObject({ ok: true, value: { stopped: true, wasRunning: true } })
     await ctx.parallel('doppelganger/turn-started', {} as never)
     expect(state.events).toBe(1)
     expect(ctx.get('generated.state')).toBeUndefined()
     expect(await resolvedSources(ctx)).toEqual(['unrelated'])
-    expect(await ctx.doppelgangerTools.invoke('generated.one', {})).toMatchObject({
+    expect(await invokeTool(ctx, 'generated.one', {})).toMatchObject({
       ok: false,
       error: { code: 'TOOL_NOT_FOUND' },
     })
-    expect(await ctx.doppelgangerTools.invoke('unrelated.echo', {})).toEqual({ ok: true, value: { stable: true } })
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'unrelated.echo', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'unrelated.echo')!.revision, input: {} }, 'test-session')).toEqual({ ok: true, value: { stable: true } })
     await ctx.fiber.dispose()
   })
 
@@ -124,9 +125,9 @@ describe('portable generated effect lifecycle', () => {
     expect(oldState.events).toBe(0)
     expect(newState).toEqual({ version: 'two', events: 1 })
     expect(await resolvedSources(ctx)).toEqual(['generated-two', 'unrelated'])
-    expect(await ctx.doppelgangerTools.invoke('generated.one', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
-    expect(await ctx.doppelgangerTools.invoke('generated.two', {})).toEqual({ ok: true, value: { version: 'two' } })
-    expect(await ctx.doppelgangerTools.invoke('unrelated.echo', {})).toEqual({ ok: true, value: { stable: true } })
+    expect(await invokeTool(ctx, 'generated.one', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'generated.two', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'generated.two')!.revision, input: {} }, 'test-session')).toEqual({ ok: true, value: { version: 'two' } })
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'unrelated.echo', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'unrelated.echo')!.revision, input: {} }, 'test-session')).toEqual({ ok: true, value: { stable: true } })
     await ctx.fiber.dispose()
   })
 
@@ -143,10 +144,10 @@ describe('portable generated effect lifecycle', () => {
 
     expect(ctx.get('generated.state')).toBeUndefined()
     expect(await resolvedSources(ctx)).toEqual(['unrelated'])
-    expect(await ctx.doppelgangerTools.invoke('generated.one', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
-    expect(await ctx.doppelgangerTools.invoke('generated.two', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
-    expect(await ctx.doppelgangerTools.invoke('unrelated.echo', {})).toEqual({ ok: true, value: { stable: true } })
-    const inspected = await ctx.doppelgangerTools.invoke('runtime-plugin.inspect-self', { pluginId: pluginId ?? null })
+    expect(await invokeTool(ctx, 'generated.one', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
+    expect(await invokeTool(ctx, 'generated.two', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'unrelated.echo', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'unrelated.echo')!.revision, input: {} }, 'test-session')).toEqual({ ok: true, value: { stable: true } })
+    const inspected = await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-self', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-self')!.revision, input: { pluginId: pluginId ?? null } }, 'test-session')
     expect(inspected).toMatchObject({
       ok: true,
       value: {
@@ -171,7 +172,7 @@ describe('portable generated effect lifecycle', () => {
     ].join('\n'))
     expect(await run(ctx, definition, 'run')).toMatchObject({ ok: true })
     const pluginId = record(definition).pluginId ?? null
-    expect(await ctx.doppelgangerTools.invoke('runtime-plugin.stop', { pluginId })).toMatchObject({
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.stop', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.stop')!.revision, input: { pluginId } }, 'test-session')).toMatchObject({
       ok: false,
       error: {
         code: 'RUN_DISPOSAL_FAILED',

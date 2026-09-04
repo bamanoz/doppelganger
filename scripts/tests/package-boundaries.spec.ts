@@ -120,6 +120,7 @@ describe('package boundary checker', () => {
       '@doppelganger/doppelganger-codegraph',
       '@doppelganger/doppelganger-dynamic-runtime-plugins',
       '@doppelganger/doppelganger-evolution',
+      '@doppelganger/doppelganger-extension-mcp',
       '@doppelganger/doppelganger-host-omp',
       '@doppelganger/doppelganger-persona',
       '@doppelganger/doppelganger-persona-authoring',

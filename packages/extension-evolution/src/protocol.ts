@@ -4,6 +4,7 @@ import {
   type ContextContribution,
   type JsonValue,
   type ToolDefinition,
+  type ToolInvocationContext,
 } from '@doppelganger/doppelganger-protocols'
 import {
   EvolutionError,
@@ -134,7 +135,7 @@ function json(value: unknown): JsonValue {
 }
 
 function handler(operation: (input: JsonValue) => unknown | Promise<unknown>) {
-  return async (input: JsonValue): Promise<JsonValue> => {
+  return async (input: JsonValue, _context: ToolInvocationContext): Promise<JsonValue> => {
     try {
       return json(await operation(input))
     } catch (cause) {

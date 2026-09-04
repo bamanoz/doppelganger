@@ -47,7 +47,7 @@ function guardedService(service: object | Function, name: string, report: (error
 
 function toolsFacade(ctx: Context, report: (error: Error) => void) {
   return Object.freeze({
-    list: () => ctx.doppelgangerTools.list(),
+    snapshot: () => ctx.doppelgangerTools.snapshot(),
     register: (definition: ToolDefinition) => {
       if (typeof definition?.name !== 'string' || definition.name.startsWith('runtime-plugin.')) {
         const error = new Error('generated tools cannot use the reserved runtime-plugin namespace')

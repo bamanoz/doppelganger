@@ -94,7 +94,7 @@ deployment default─┘                    ▼
                              ▼          ▼          ▼
                           context      tools    lifecycle
                              │          │          │
-                             └──── generic host bridge ────┘
+                             └── shared Runtime Host bridge ──┘
 ```
 
 Core concepts:
@@ -106,16 +106,36 @@ Core concepts:
 - **Runtime Session** — one isolated activation inside one host agent session.
 - **Persona Instance** — optional identity and state lineage owned by Persona extensions, not by the kernel or host.
 
-The kernel knows composition, isolation, diagnostics, reload, and teardown. It does not know what Persona, identity, traits, memory, actors, storage, context, or tools mean. The protected host bridge may bind one immutable actor identity and projects standard protocols only when the selected composition provides them; an empty Runtime Preset is valid.
+The kernel knows composition, isolation, diagnostics, reload, and teardown. It does not know what Persona, identity, traits, memory, actors, storage, context, or tools mean. The protected shared Runtime Host bridge is actor-neutral and projects standard protocols only when the selected composition provides them. A compatible host may mount Actor Identity as a separate protected absent, unbound, or bound capability; an empty Runtime Preset remains valid.
 
 ## Local OMP installation and dogfooding
 
-The private workspace package `@doppelganger/doppelganger-omp` is the local OMP install unit. Link it through OMP's normal plugin registry, then start OMP from a workspace outside this repository to avoid also discovering the repository-local extension:
+Doppelganger supports two OMP loading modes. Select exactly one for an OMP invocation and profile:
+
+| Mode | Use when | Required setup |
+| --- | --- | --- |
+| Installed or linked plugin | Running OMP from workspaces that do not expose this repository's `.omp/extensions/doppelganger.ts` | Link and enable `@doppelganger/doppelganger-omp` in the active OMP profile |
+| Project-local dogfood | Running OMP in this repository through `.omp/extensions/doppelganger.ts` | Disable the linked plugin in the active OMP profile |
+
+For linked-plugin mode, run from the repository root, then launch OMP from a workspace outside this repository:
 
 ```bash
 omp plugin link ./packages/omp
 DOPPELGANGER_HOME=/absolute/path/to/a/new-home omp --cwd /absolute/path/outside/doppelganger
 ```
+
+For project-local dogfood mode, disable the linked package before launching from this repository:
+
+```bash
+omp plugin disable @doppelganger/doppelganger-omp
+DOPPELGANGER_HOME=/absolute/path/to/a/development-home DOPPELGANGER_ACTOR_ID=my-actor omp --cwd /absolute/path/to/doppelganger
+```
+
+Re-enable linked-plugin mode with `omp plugin enable @doppelganger/doppelganger-omp`. Plugin state belongs to the active OMP profile. For a named profile, place `--profile <name>` before the `plugin` subcommand and use the same profile for launch, for example `omp --profile work plugin disable @doppelganger/doppelganger-omp` followed by `omp --profile work --cwd /absolute/path/to/doppelganger`.
+
+OMP discovers native project extensions and installed plugin entrypoints independently, resolves every candidate to an absolute path, and deduplicates only identical resolved paths. `.omp/extensions/doppelganger.ts` re-exports the package factory, but its path differs from the linked package entrypoint. If both are enabled, OMP invokes two adapters; each can register handlers and start its own child runtime. Disable one loading path rather than relying on factory identity.
+
+This is an invocation-configuration boundary, not session exclusivity. Doppelganger adds no process-wide singleton, lease, or filesystem lock, and does not prevent several OMP processes from opening the same session. Within each committed adapter binding, that adapter owns one isolated child Runtime Session.
 
 With no authored selection and no `DOPPELGANGER_ACTOR_ID`, the linked plugin activates the shipped actor-neutral `standard` Runtime Preset. The package entrypoint supplies no repository path, actor, Persona, or named Runtime Preset default.
 
@@ -123,7 +143,7 @@ The home path may be absent before launch. The first Runtime Preset selection cr
 
 The project-local `.omp/extensions/doppelganger.ts` is only a default re-export from that same package entrypoint. Repository integration tests exercise it with generated temporary Runtime Presets and test actors; they do not consume a personal preset or durable user state.
 
-The extension starts one child runtime for the OMP session, appends assembled runtime context to each model turn, and exposes available runtime tools with the `doppelganger_` prefix.
+The extension starts one child runtime for its committed OMP binding, appends assembled runtime context to each model turn, and exposes available runtime tools with the `doppelganger_` prefix.
 
 ## Runtime Preset configuration
 
@@ -193,7 +213,7 @@ Optional patch files use Cordis Include patch syntax and apply in this order:
 $DOPPELGANGER_HOME/runtime.cordis.patch.yml
 <project>/.doppelganger/runtime.cordis.patch.yml
 explicit host patches
-protected runtime-owned host bridge
+protected runtime-owned plugins (shared Runtime Host, optional Actor Identity, typed host extensions)
 ```
 
 The runtime watches the selected preset and applicable patch paths. A valid generation replaces the active tree; an invalid update rolls back without mutating authored files.
@@ -230,9 +250,9 @@ The same roster is available to in-process Cordis hosts through `@doppelganger/d
 
 ### Optional full-stack user presets
 
-An editable user Runtime Preset may extend `standard` with Persona Authoring, Evolution, Dynamic Runtime Plugins, CodeGraph, SQLite, lexical memory, a local embedder, one vector backend, and the semantic coordinator. Such a composition remains user-owned configuration rather than a shipped or repository-specific preset. Each feature stays an independently addressable Loader row, and tests construct equivalent full-stack presets under temporary roots.
+An editable user Runtime Preset may extend `standard` with Persona Authoring, Evolution, Dynamic Runtime Plugins, CodeGraph, MCP tool import, SQLite, lexical memory, a local embedder, one vector backend, and the semantic coordinator. Such a composition remains user-owned configuration rather than a shipped or repository-specific preset. Each feature stays an independently addressable Loader row, and tests construct equivalent full-stack presets under temporary roots.
 
-Persona Authoring writes only explicitly configured logical trait targets. Evolution exists only when its Loader row is present and stores non-executing proposals in actor-partitioned SQLite or project YAML. Dynamic Runtime Plugins exist only when their Loader row is present and keep every definition in Runtime Session process memory. CodeGraph exists only when its Loader row is present and uses the Runtime Session workspace plus a separately installed, user-initialized local index. Omitting the authoring row leaves every Persona asset read-only. Omitting Evolution exposes no proposal controls or reminders. Omitting the dynamic row exposes no runtime-plugin controls. Omitting CodeGraph exposes no graph tools or process prerequisite. Omitting the semantic rows leaves memory valid and lexical-only. `all-MiniLM-L6-v2` remains an explicit 384-dimensional compatibility selection through the embedder row's `model` field; it is not an alias for EmbeddingGemma and produces a distinct embedding space.
+Persona Authoring writes only explicitly configured logical trait targets. Evolution exists only when its Loader row is present and stores non-executing proposals in actor-partitioned SQLite or project YAML. Dynamic Runtime Plugins exist only when their Loader row is present and keep every definition in Runtime Session process memory. CodeGraph exists only when its Loader row is present and uses the Runtime Session workspace plus a separately installed, user-initialized local index. MCP tool import exists only when its Loader row is present and owns only its configured external server connections and imported portable tool sets. Omitting a row leaves that feature and its tools absent.
 
 ### CodeGraph code intelligence
 
@@ -259,6 +279,32 @@ Add the optional row to an editable Runtime Preset that already composes session
 ```
 
 The plugin exposes `codegraph.status` and `codegraph.explore`. Both are bound to the host-owned Runtime Session workspace; tool input cannot choose another path or executable. Exploration validates the existing index and may run only incremental `codegraph sync --quiet` maintenance when that derived index is otherwise safe. The private OMP package contains the optional Loader package in its installed closure; other hosts must make it resolvable themselves. CodeGraph runs as trusted local process code, and returned source context follows the host's ordinary model-disclosure path. See [`docs/features/codegraph.md`](docs/features/codegraph.md) for exact status, safety, bounds, lifecycle, and trust contracts.
+
+### MCP tool import
+
+Add the optional Loader row to an editable Runtime Preset that already composes session-isolated `doppelgangerTools`:
+
+```yaml
+- id: doppelganger-mcp
+  name: "@doppelganger/doppelganger-extension-mcp/loader"
+  inject: [doppelgangerTools]
+  isolate:
+    doppelgangerTools: session
+    doppelgangerMcp: session
+  config:
+    servers:
+      filesystem:
+        startupTimeoutMs: 120000
+        transport:
+          type: stdio
+          command: filesystem-mcp
+          args: ["/absolute/workspace"]
+        tools:
+          write_file:
+            approval: { policy: required }
+```
+
+Server configuration belongs to the Runtime Preset, not OMP or another native host. Credentials are environment-variable references rather than inline values. Doppelganger executes the exact authored command, arguments, or endpoint; it does not install, pin, rewrite, retry, or select fallback MCP servers. Each enabled server connects independently in the background under its bounded `startupTimeoutMs`, so Runtime Session activation does not wait for external readiness. Discovered tools appear atomically as `mcp-<server-id>.<local-id>` through the host's ordinary dynamic catalog path and remain subject to exact-revision approval and cancellation. `approval: { policy: required }` enforces the portable minimum; an optional bounded `reason` is only a host-presentation hint. A failed server publishes no tools and remains visible through `doppelgangerMcp.snapshot()` without invalidating healthy services.
 
 ### Dynamic Runtime Plugin development
 

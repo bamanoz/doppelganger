@@ -123,6 +123,10 @@ const EVENT_NAMES = {
   'turn-started': 'doppelganger/turn-started',
 } as const
 
+export function isLifecycleEventType(value: unknown): value is LifecycleEvent['type'] {
+  return typeof value === 'string' && value in EVENT_NAMES
+}
+
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
     for (const child of Object.values(value)) deepFreeze(child)

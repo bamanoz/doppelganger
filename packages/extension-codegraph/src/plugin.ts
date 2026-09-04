@@ -70,7 +70,7 @@ function definitions(adapter: CodeGraphAdapter, config: NormalizedCodeGraphPlugi
       name: 'codegraph.status',
       description: 'Diagnose the local CodeGraph prerequisite and index for this Runtime Session workspace.',
       inputSchema: EMPTY_OBJECT_SCHEMA,
-      async invoke(input) {
+      async invoke(input, _context) {
         const value = inputRecord(input)
         if (Object.keys(value).length > 0) throw new CodeGraphError('CODEGRAPH_INVALID_INPUT', 'codegraph.status accepts no fields')
         return await adapter.status() as unknown as JsonValue
@@ -80,7 +80,7 @@ function definitions(adapter: CodeGraphAdapter, config: NormalizedCodeGraphPlugi
       name: 'codegraph.explore',
       description: 'Return bounded graph-ranked source context and call paths from the existing local CodeGraph index.',
       inputSchema: EXPLORE_SCHEMA,
-      async invoke(input) {
+      async invoke(input, _context) {
         const value = exploreInput(input, config)
         return await adapter.explore(value.query, value.maxFiles) as unknown as JsonValue
       },

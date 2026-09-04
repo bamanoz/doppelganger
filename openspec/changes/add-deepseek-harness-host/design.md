@@ -2,7 +2,7 @@
 
 Doppelganger currently has one concrete host, OMP. OMP cannot share its Cordis process with the runtime, so `packages/host-omp` uses a Node child and framed JSON-RPC. DeepSeek Harness already owns the compatible Cordis root, Loader family, agent scopes, system-prompt registry, native tool pipeline, append-only Session log, and quiescent agent teardown. A native DSH adapter should therefore run in-process and reuse those host APIs instead of reusing the OMP transport.
 
-The research gate was revalidated against DeepSeek Harness commit `4e84901e6471b79ec0338099867ebb4606d12bb5` on September 1, 2026. The relevant source contracts are:
+The research gate was revalidated against DeepSeek Harness commit `4e84901e6471b79ec0338099867ebb4606d12bb5` on September 3, 2026. The relevant source contracts are:
 
 - `apps/cli/src/profile-boot.ts`, `packages/boot/app-boot/src/index.ts`, and `apps/cli/src/process-shutdown.ts`: one root Cordis Context, Loader activation audit, and bounded process shutdown.
 - `vendor/loader/src/config/{entry,group,tree}.ts`, `vendor/include/src/index.ts`, and `vendor/cordis/src/fiber.ts`: serialized Include mutation, Loader-owned rollback, Fiber settlement, and quiescent disposal.
@@ -16,7 +16,7 @@ The research gate was revalidated against DeepSeek Harness commit `4e84901e6471b
 - `packages/preset/agent-presets/src/index.ts` and `mount.ts`: standing preset scopes, live-mount-first inventory, per-runtime mount filtering, and descendant-agent routing; shared standing plugin objects remain unsuitable for Doppelganger's per-session mutable plugin trees.
 - `packages/extensions/cordis-{host,client}-runner`: trusted dynamic-code façades, explicitly not containment; the refreshed host runner preserves the same immutable Package, guarded evaluator, current/next, and Fiber lifecycle model and remains unnecessary for this adapter.
 
-Doppelganger's host-neutral seams exist in `runtime-presets`, `composition-runtime`, and `extension-protocols`. The companion shipped-roster change makes `runtime-presets` the authoritative ordered multi-root roster, exposes the same API as a Cordis service, and supplies the `standard` deployment default. `CompositionRuntime` accepts a caller-owned Context and mounts protected runtime plugins after authored layers. The remaining work is a DSH lifecycle owner and direct projection adapter.
+Doppelganger's host-neutral seams exist in `runtime-presets`, `composition-runtime`, and `extension-protocols`. The implemented roster is the authoritative ordered multi-root service and supplies the `standard` deployment default. `CompositionRuntime` accepts a caller-owned Context and mounts protected runtime plugins after authored layers. `extension-protocols` now provides the actor-neutral shared Runtime Host plugin, its closed semantic capability profile, revisioned tool catalogs, exact invocation/approval/cancellation contracts, declared lifecycle availability, and a transport-independent conformance suite. The remaining work is a DSH lifecycle owner and direct projection adapter using those contracts unchanged.
 
 ## Goals / Non-Goals
 
@@ -24,11 +24,12 @@ Doppelganger's host-neutral seams exist in `runtime-presets`, `composition-runti
 
 - Add `packages/host-dsh` as a native Cordis plugin package.
 - Activate exactly one isolated Doppelganger Runtime Session per selected live DSH agent.
-- Preserve Runtime Preset precedence across explicit, project, user-default, and deployment-default selection, patch ordering, activation audit, rollback, actor binding, and protocol contracts.
+- Preserve Runtime Preset precedence across explicit, project, user-default, and deployment-default selection, patch ordering, activation audit, rollback, independent actor binding, and protocol contracts.
 - Project portable context and tools through DSH's scoped registries without modifying the DSH agent loop.
+- Declare one frozen DSH Runtime Host capability profile matching implemented context, tool, approval, cancellation, and lifecycle semantics.
 - Translate committed DSH Session events into lifecycle protocol version 2 with stable identities and replay safety.
 - Make activation, reload, projection, and teardown serialized, idempotent, and session-contained.
-- Prove portability with hermetic tests against the actual DSH public package APIs.
+- Pass the same transport-independent Runtime Host conformance suite as OMP against the actual DSH public package APIs.
 - Prove that an opt-in Runtime Preset can expose the portable Dynamic Runtime Plugins control surface, execute one exactly approved Package, project its effects, replace or stop it, and dispose it through the ordinary Runtime Session lifecycle.
 - Prove that an opt-in Runtime Preset can expose Evolution's stable instruction, relevant reminder data, and exact portable controls while all proposal persistence and user-directed workflow remain owned by the extension.
 
@@ -40,6 +41,8 @@ Doppelganger's host-neutral seams exist in `runtime-presets`, `composition-runti
 - Treating DSH scope routing, `node:vm`, the Cordis runners, or Dynamic Runtime Plugins as a security sandbox.
 - Adding account authentication, actor onboarding, in-session actor switching, Runtime Preset package installation, or cross-host behavioral identity.
 - Changing the existing Runtime Preset, composition-runtime, actor-identity, or lifecycle protocol requirements.
+- Adding a DSH-specific common bridge, generic runtime notification channel, parallel router, sidecar, or second host binding.
+- Promoting a DSH-only service or event into the common API without two implemented adapters proving semantic equivalence.
 
 ## Decisions
 
@@ -73,8 +76,9 @@ Each state creates `createCompositionRuntime({ context: agent.ctx, watch, onRelo
 - `workspaceRoot: agent.session.header.cwd` when present;
 - canonical user and project patch paths returned by roster selection;
 - optional trusted host patches from plugin configuration;
-- one protected protocol bridge runtime plugin;
-- explicit session isolation for `doppelgangerActor`, `doppelgangerContext`, `doppelgangerTools`, and `doppelgangerLifecycle`.
+- the shared `createRuntimeHostPlugin(binding, DSH_RUNTIME_HOST_CAPABILITIES)` protected runtime plugin;
+- a separate `createActorIdentityPlugin(...)` only when DSH is configured to provide explicit unbound or immutable bound Actor Identity;
+- explicit session isolation for every service consumed or provided by each protected plugin, including `doppelgangerRuntimeSession`, `doppelgangerHostCapabilities`, `doppelgangerContext`, `doppelgangerTools`, `doppelgangerLifecycle`, and separately `doppelgangerActor` when installed.
 
 The roster applies strict first-match precedence: explicit host selection, project selection, user default, then deployment default. Its normal Cordis plugin deployment defaults to the shipped `standard` Runtime Preset. A deployment that intentionally needs an inactive no-selection state configures the roster service without a deployment default; the DSH host does not invent a second host-local switch or discovery path.
 
@@ -86,80 +90,85 @@ Alternative considered: one Composition Runtime shared by every DSH agent. Rejec
 
 Alternative considered: create a second root Context per agent. Rejected because it splits Cordis service identity and prevents direct scoped DSH projection.
 
-### 4. Extract the protected runtime protocol bridge from `host-omp`
+### 4. Consume the shared Runtime Host API directly
 
-`packages/host-omp/src/runtime-host.ts` already implements the protected in-runtime bridge: bind actor identity, read optional context/tools services, invoke tools, publish lifecycle events, and observe tool changes. The second host should not copy that behavior.
+`extension-protocols` owns the single protected actor-neutral Runtime Host plugin and bridge contract. `host-dsh` imports `createRuntimeHostPlugin`, `RuntimeHostBridge`, `RuntimeHostBinding`, the capability types, tool snapshots, exact invocation and cancellation requests, and approval helpers from that public package. It does not define a DSH-local bridge interface, copy protocol-service lookup logic, or expose native DSH objects through the common API.
 
-Move the host-neutral bridge contract and plugin factory into `extension-protocols`, for example `host-bridge.ts`, exported from its public index. The bridge exposes only:
+Each agent state owns one direct in-memory `RuntimeHostBinding`. `attach` accepts exactly one bridge, `detach` clears only that bridge, and `toolCatalogChanged(revision)` enqueues a snapshot refresh for the current state. A second attachment before exact detach is an activation error. Delayed callbacks from a detached or replaced state are ignored through exact state identity and committed catalog revision checks.
 
-- `resolveContext(input, turnId, tokenBudget)`;
-- `listTools()`;
-- `invokeTool(name, input)`;
-- `publishEvent(event)`;
-- attach/detach and tools-changed notifications.
+The bridge surface is used unchanged:
 
-OMP migrates to that implementation without behavioral changes. DSH binds the same direct interface in-process. Host-specific reload notifications, diagnostics, tool projection, and transport remain in their host packages.
+- `resolveContext({ requestId, turn: { input, turnId? }, tokenBudget })`;
+- `snapshotTools()` returning one immutable catalog revision and revisioned descriptors;
+- `invokeTool({ callId, turnId?, name, toolRevision, input, approval? })`;
+- `cancelTool({ callId, reason? })`;
+- `publishLifecycle(event)` constrained by the declared capability profile;
+- `attach`, `detach`, and the single explicit `toolCatalogChanged(revision)` callback.
 
-Alternative considered: duplicate the approximately equivalent bridge in `host-dsh`. Rejected because actor/context/tool/lifecycle optional-service semantics are one protocol contract and a second implementation would drift.
+DSH has no bridge transport: the adapter and protected plugins share the agent-owned Cordis process and lifecycle. A future DSH-only hook must use a separate typed `doppelganger/host/dsh/...` service or event plugin in the same protected layer and in-process binding; it cannot add a generic notification envelope, second bridge, router, connection, sidecar, or session-binding path. Such a contract remains host-specific until two implemented adapters prove the common-API promotion criteria.
 
-### 5. Actor identity defaults to DSH's anonymous harness-home identity
+Alternative considered: duplicate an approximately equivalent bridge in `host-dsh`. Rejected because it would create a second protocol implementation, bypass shared capability and approval validation, and drift from the conformance suite.
+
+### 5. Actor Identity is a separate optional protected plugin
 
 The checked-out DSH source has no authenticated account/principal service. It does provide `@deepseek-ai/dsh-anonymous-user-id`, a stable random UUID per `$DSH_HOME`, already shared by telemetry, feedback, and DeepSeek requests. The default DSH actor resolver uses `getOrCreateAnonymousUserId()` and prefixes or namespaces the value as documented so it cannot be confused with a future account identifier.
 
-Configuration may instead select explicit unbound mode or provide a trusted host callback/API entry point for a deployment-specific actor ID. Runtime Presets, project manifests, session metadata, prompts, and tools cannot supply it. The resolved identity is snapshotted once per Runtime Session and cannot change on reload.
+Configuration may instead select explicit unbound mode, disable Actor Identity entirely, or provide a trusted host callback/API entry point for a deployment-specific actor ID. Bound and unbound modes mount `createActorIdentityPlugin(...)` as a sibling of the shared Runtime Host plugin; disabled mode leaves `doppelgangerActor` absent. Runtime Presets, project manifests, session metadata, prompts, tools, the Runtime Host capability profile, and the bridge cannot supply or infer actor state. The resolved value is snapshotted once per Runtime Session and cannot change on reload.
 
 This is installation identity, not authenticated human identity. Actor onboarding and multi-user account binding remain deferred. Deleting the DSH anonymous ID file intentionally creates a new actor partition on a later process launch.
 
-Alternative considered: use the DSH session ID. Rejected because it destroys persistence continuity across sessions.
+Alternative considered: put actor identity back into the shared bridge. Rejected because actor absence, explicit unbound, and immutable bound state are independent from context, tools, cancellation, and lifecycle capabilities.
 
-Alternative considered: use workspace, hostname, git remote, or model-visible metadata. Rejected because those values are neither user identity nor privacy-preserving host authority.
+Alternative considered: use the DSH session ID, workspace, hostname, git remote, or model-visible metadata. Rejected because those values are neither stable user identity nor host-authoritative privacy-preserving binding.
 
-Alternative considered: remain unbound by default. Rejected because DSH owns an appropriate anonymous installation identity for actor-aware Runtime Presets. The shipped `standard` deployment default is actor-neutral and can activate regardless; stable default binding additionally lets a later explicit actor-aware memory preset preserve partitioned persistence. Explicit unbound mode remains available for generic deployments.
+### 6. Resolve context once per DSH turn and preserve authority
 
-### 6. Project context through `system-prompt/assemble`, preserving authority
+An agent-scoped turn snapshot records the direct principal text captured from `agent/inbox/claimed` messages whose `source.kind === "user"`. On the first `system-prompt/assemble` for that turn, the adapter awaits activation and calls `bridge.resolveContext` with:
 
-A scoped `system-prompt/assemble` waterfall listener receives `AssembleContext.agent`. It finds that agent's state, awaits activation, and resolves the bridge context with:
-
+- one adapter-minted `requestId` for the turn snapshot;
 - portable `turnId = "<sessionId>:turn:<DSH turn number>"`;
-- the direct principal text captured from `agent/inbox/claimed` messages whose `source.kind === "user"`;
+- the direct principal text for that turn;
 - configured `tokenBudget`.
 
-The state records the first direct user batch for a turn and reuses it for later tool-driven steps. Text blocks are joined deterministically; non-text blocks do not become invented text. Lifecycle publication may retain bounded structured host facts, but memory capture continues to receive strings only.
+Text blocks are joined deterministically; non-text blocks do not become invented text. Later tool-driven model steps reuse the accepted contribution snapshot and do not call `resolveContext` again. A new direct user turn creates a new snapshot, so memory retrieval, reminders, Persona asset reloads, and other provider changes become visible at the next turn boundary.
 
-The adapter maps each accepted contribution independently:
+Every prompt assembly maps the cached accepted contributions independently:
 
 - `authority: "instruction"` -> an appended DSH `PromptAssembly.sections` row;
 - `authority: "data"` -> an appended DSH `PromptAssembly.contexts` row.
 
-Names include a reserved `doppelganger:` prefix plus source and stable ordinal. Existing DSH rows remain intact. The adapter does not call `SystemPrompt.section()` for asynchronous providers, because section callbacks are synchronous; the awaited waterfall is the supported asynchronous seam. DSH's post-waterfall complete-section restoration and runtime-context suppression remain authoritative, so the adapter cannot bypass host prompt governance.
+Names include a reserved `doppelganger:` prefix plus source and stable ordinal. Existing DSH rows remain intact. The adapter does not call `SystemPrompt.section()` for asynchronous providers, because section callbacks are synchronous; the awaited waterfall is used once to create the turn snapshot and then projects that immutable result. DSH's post-waterfall complete-section restoration and runtime-context suppression remain authoritative, so the adapter cannot bypass host prompt governance.
+
+Alternative considered: resolve again for every model step. Rejected because identity, traits, memory, and reminders belong to one direct user turn; recomputing them after each tool call creates duplicate semantic injections and unstable turn behavior.
 
 Alternative considered: append the flattened assembled string as one system section. Rejected because it erases instruction/data authority and provenance.
 
 Alternative considered: inject a `user/message` through `agent.inject()`. Rejected because instruction contributions would be demoted to data and persisted as synthetic user history.
 
-### 7. Translate portable tools to exact agent-scoped DSH registrations
+### 7. Translate immutable revisioned snapshots to exact agent-scoped DSH tools
 
-After bridge attachment and on every tools-changed/reload notification, the state builds a complete candidate projection from `bridge.listTools().filter(available)`. Before changing live registrations it:
+After bridge attachment, the state reads `bridge.snapshotTools()`. On `toolCatalogChanged(revision)`, it ignores a revision already committed or superseded, fetches a fresh complete snapshot, requires the fetched revision to match the callback before commit, and repeats if a newer callback arrived during preparation. Only descriptors with `available: true` are candidates; unavailable descriptors remain absent with diagnostics where required.
 
-1. rejects duplicate names;
+Before changing live registrations, candidate preparation:
+
+1. rejects duplicate portable names and duplicate descriptor revisions for one name;
 2. validates each raw input schema with DSH's public `assertObjectJsonSchema`/`assertSupportedJsonSchema` boundary;
-3. validates optional portable approval metadata and rejects unsupported policies;
+3. validates portable required-approval metadata and blocks such a descriptor if the declared host profile did not support native required approval;
 4. rejects the DSH-reserved `run_code` name;
-5. builds every `ToolDefinition` using the portable name and description, raw parameters, output schema `{ type: "json" }`, and deterministic JSON text rendering.
+5. builds every `ToolDefinition` using the portable name and description, raw parameters, output schema `{ type: "json" }`, and deterministic JSON text rendering;
+6. retains the exact portable name, descriptor revision, and catalog revision in every native closure.
 
-The per-agent state retains the current committed descriptor map. One agent-scoped `tools/pre-execute` waterfall listener resolves the exact current descriptor for projected portable calls. A descriptor with `approval.policy === "required"` returns `{ kind: "ask", reason }`; ordinary projected tools and unrelated native DSH tools delegate with `next()`. DSH Tool Runtime then routes the exact `agent`, `callId`, tool name, and reason through its `ApprovalService`. Only `allowed-once` reaches dispatch; rejection, cancellation, a missing service, or an unavailable answerer fails closed without invoking the portable handler. Host deployment policy may deny more operations but cannot silently auto-allow a portable required approval.
+One agent-scoped `tools/pre-execute` waterfall listener resolves the exact current descriptor for projected portable calls. A descriptor with `approval.policy === "required"` returns `{ kind: "ask", ...(reason === undefined ? {} : { reason }) }`; ordinary projected tools and unrelated native DSH tools delegate with `next()`. DSH Tool Runtime routes the exact agent, call ID, tool name, and optional advisory reason through ApprovalService. Only `allowed-once` authorizes the adapter to mint one protected grant bound to a fresh grant ID, the exact call ID, descriptor revision, and `digestToolInput` of the parsed canonical input. Rejection, native cancellation, a missing service, or an unavailable answerer fails closed without calling `bridge.invokeTool`. Host deployment policy may deny more operations but cannot silently weaken or fabricate the portable requirement, and reason absence never bypasses the gate.
 
-The tool closure reads the current committed descriptor/bridge from state at execution time. It invokes `bridge.invokeTool`, returns the success JSON value, and converts a portable structured failure into a DSH/Harness error retaining the portable code and message. It forwards `exec.signal` only if the portable tool contract later grows cancellation; the initial adapter declares no DSH timeout because the current portable invocation API has no AbortSignal.
+The native tool closure verifies that its captured catalog and tool revisions are still the committed state, then calls `bridge.invokeTool({ callId, turnId, name, toolRevision, input, approval? })`. It returns the success JSON value and maps each structured portable failure code to a bounded failed DSH result. It never calls a portable handler or registry directly. If the DSH execution signal aborts before settlement, the adapter calls `bridge.cancelTool({ callId, reason })`; completion/cancellation races preserve the bridge's actual structured result and never fabricate success. Every invocation still receives a valid portable signal even if a future DSH configuration truthfully advertises no native cancellation.
 
-Refresh is serialized. Candidate validation happens first; then new registrations are installed on `agent.ctx`; only after all installs succeed does the state swap the committed map and dispose obsolete registrations. Approval metadata participates in that same commit. If installation fails, candidate registrations are disposed and the previous map, registrations, and approval behavior remain. Removed closures and the pre-execute listener consult the committed map and fail unavailable rather than calling or approving a captured old handler.
+Refresh is serialized and transactional. Candidate validation and registration happen first; only after all installs succeed does the state atomically swap the committed catalog revision, descriptor map, registrations, and approval behavior, then dispose obsolete registrations. Failure disposes candidates and retains the previous complete projection. Removed closures, stale descriptor revisions, delayed catalog callbacks, and stale grants fail unavailable or revision-stale before approval consumption or portable dispatch.
 
 Native DSH tools outside the adapter's agent-scoped registrations are untouched. DSH's own scope shadowing rules decide name collisions; a collision in the same scope is a visible projection failure, not an automatic rename.
 
-Alternative considered: prefix or encode portable tool names as OMP does. Rejected because DSH accepts the qualified names directly and renaming would make one Runtime Preset expose different tool identities by host.
+An opt-in Dynamic Runtime Plugins row needs no host-specific registration path. Its seven `runtime-plugin.*` descriptors enter this same projection unchanged. Every `runtime-plugin.run` descriptor carries portable required approval, so each exact first run, restart, update, or rollback asks through the native gate before the shared bridge revalidates and dispatches it. Generated context and tools appear and disappear through catalog revision callbacks and transactional refresh; a retained DSH closure cannot approve or invoke a removed generated handler.
 
-An opt-in Dynamic Runtime Plugins row needs no host-specific registration path. Its exact seven `runtime-plugin.*` descriptors enter this same candidate projection unchanged. Every `runtime-plugin.run` descriptor carries portable required approval, so each exact first run, restart, update, or rollback asks through the native gate before portable dispatch. Generated context and tools appear and disappear through the existing bridge notifications and transactional refresh; a retained DSH closure consults current committed state and cannot approve or invoke a removed generated handler.
-
-An opt-in Evolution row follows the same host-neutral path. Its instruction-authority policy and at most one data-authority reminder candidate enter ordinary prompt projection, while its seven `evolution.*` descriptors enter ordinary tool projection unchanged. The adapter does not interpret proposal kinds, stores, state transitions, cooldown, review consent, research consent, or executor routing. Evolution requires a bound actor through the protected bridge; an explicitly unbound DSH agent can still run actor-neutral presets, but a selected preset requiring Evolution fails that row visibly.
+An opt-in Evolution row follows the same host-neutral path. Its context contributions and seven `evolution.*` descriptors are projected without interpreting proposal kinds, stores, state transitions, cooldown, review consent, research consent, or executor routing. Evolution may require separately provided bound Actor Identity; the shared bridge itself remains usable when the actor service is absent or unbound.
 
 Alternative considered: register one generic dispatch tool. Rejected because it hides schemas, weakens DSH policy/presentation, and breaks normal durable tool correlation.
 
@@ -191,15 +200,15 @@ A raw `tool/call.arguments` string is parsed as JSON when valid; invalid model J
 
 `pre-compaction` is emitted on the durable start marker, using `compactionId` for deterministic delivery and bounded material containing the marker facts and the current surface summary needed by subscribers. Seed-orphaned markers are ignored through the live-seq boundary.
 
-Delivery IDs are deterministic strings derived from session ID, event kind, and durable DSH identity (`turn`, `callId`, or `compactionId`). Publication is serialized in Session event order. Subscriber failures remain contained by `publishLifecycleEvent`; they do not fail DSH Session append or committed host work.
+Delivery IDs are deterministic strings derived from session ID, event kind, and durable DSH identity (`turn`, `callId`, or `compactionId`). Publication is serialized in Session event order and sent only through `bridge.publishLifecycle` for event kinds listed in `DSH_RUNTIME_HOST_CAPABILITIES.lifecycle.events`; `session-completed` is omitted because teardown alone does not prove a terminal committed outcome. Subscriber failures remain contained by `publishLifecycleEvent`; they do not fail DSH Session append or committed host work.
 
 Alternative considered: use stream chunks and live tool scheduler callbacks. Rejected because partial work is not committed and replay/idempotence would depend on timing rather than the durable log.
 
 ### 9. Reload refreshes projection only after audited commit
 
-Composition Runtime remains the sole watch/mutation/rollback owner. The injected roster service owns discovery and selection but does not add an activation watcher. `onReload` enqueues one projection refresh after the new generation is audited. `onReloadFailure` records diagnostics and does not refresh tools or bridge identity, so the prior generation remains visible.
+Composition Runtime remains the sole watch/mutation/rollback owner. The injected roster service owns discovery and selection but does not add an activation watcher. `onReload` enqueues one projection refresh after the new generation is audited. `onReloadFailure` records diagnostics and does not refresh the committed tool projection, so the prior generation remains visible.
 
-Context is resolved from the bridge at each assembly and therefore observes the committed generation without cached provider objects. Tool refresh uses the serialized exact-replacement transaction above. Actor identity and Runtime Session metadata are outside reload and remain unchanged.
+Context is resolved from the bridge at each assembly and therefore observes the committed generation without cached provider objects. Tool refresh uses the explicit catalog revision callback and serialized exact-replacement transaction above. The separately mounted Actor Identity value and Runtime Session metadata are outside reload and remain unchanged.
 
 The adapter does not add a second filesystem watcher or write normalized Loader input back to Runtime Preset or patch files.
 
@@ -229,10 +238,10 @@ Alternative considered: rely only on parent Fiber recursive disposal. Rejected b
 
 - **DSH API maturity**: the adapter targets `0.1.2-alpha.4` APIs at commit `4e84901e...`; package changes can be breaking. Mitigation: exact compatible peer ranges, compile-time API coverage, and a native composition smoke test.
 - **Activation starts after publication**: DSH's public observer is not awaited. Mitigation: start immediately at `agent/session-start`, memoize the operation, and make the awaited prompt waterfall the first hard barrier. An upstream setup-composition hook would be cleaner but is not required.
-- **Anonymous actor semantics**: the default identifies a DSH home, not a verified person, and deletion intentionally forks memory. Mitigation: document the boundary, namespace the identifier, support explicit unbound and trusted deployment resolvers, and do not call it authentication.
+- **Anonymous actor semantics**: the default identifies a DSH home, not a verified person, and deletion intentionally forks memory. Mitigation: document the boundary, namespace the identifier, support disabled, explicit unbound, and trusted deployment resolvers, and do not call it authentication.
 - **Tool schema intersection**: portable JSON Schema may exceed DSH's supported subset. Mitigation: validate the complete candidate projection before commit and fail visibly rather than silently weakening schemas.
-- **Required approval composition**: DSH may run without an ApprovalService or interactive answerer. Mitigation: portable `required` tools ask through the native pre-execute seam and fail closed before handler dispatch when the approval path is unavailable.
-- **Tool cancellation**: the current portable invocation API has no AbortSignal. Mitigation: do not advertise DSH tool timeouts and await invocation quiescence. A cancellation-capable protocol is a separate cross-host change.
+- **Required approval composition**: DSH may run without an ApprovalService or interactive answerer. Mitigation: portable `required` tools ask through the native pre-execute seam, mint an exact protected grant only after `allowed-once`, and rely on bridge revalidation before handler dispatch.
+- **Tool cancellation is cooperative**: DSH supplies a fused execution signal but neither host nor bridge can force arbitrary plugin code to stop. Mitigation: call `cancelTool` with the exact call ID, preserve the settled structured result, and await invocation quiescence during disposal.
 - **Prompt governance**: DSH complete prompts or runtime-context suppression can intentionally hide projected contributions. Mitigation: preserve DSH's governing semantics and test that the adapter does not bypass them.
 - **Turn text projection**: memory capture accepts only strings, while DSH supports rich blocks. Mitigation: use only direct user/model text for capture and never stringify image or tool metadata into invented principal text.
 - **Standing plugin lifetime**: one host plugin observes many descendant agents. Mitigation: WeakMap by exact Agent, exact Session filtering, per-agent queues, per-agent Composition Runtime ownership, and exhaustive host-plugin disposal.

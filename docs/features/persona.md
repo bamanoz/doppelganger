@@ -12,7 +12,7 @@ The Persona Loader row owns:
 - ordered trait assets;
 - instruction-authority context contributions.
 
-It derives host session ID and optional workspace metadata from Runtime Session metadata. Concrete identity and trait content are configuration/assets unless they require new executable behavior. Persona configuration and activation metadata do not contain `actorId` or the removed `principalId`; the protected host bridge owns actor identity through a separate `doppelgangerActor` service.
+It derives host session ID and optional workspace metadata from Runtime Session metadata. Concrete identity and trait content are configuration/assets unless they require new executable behavior. Persona configuration and activation metadata do not contain `actorId` or the removed `principalId`; a compatible host may mount the separate protected `doppelgangerActor` service, while the actor-neutral shared Runtime Host bridge neither owns nor infers identity.
 
 A Persona Instance may be active for several actors and in several hosts concurrently. Each activation has an independent plugin tree. Actor-aware extensions partition shared durable state by the host binding rather than changing the Persona definition.
 

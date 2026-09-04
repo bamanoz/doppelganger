@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "reviewDate": "2026-08-30",
+  "reviewDate": "2026-09-03",
   "deploymentRestriction": "The local embedder is opt-in and may load only trusted, pinned model artifacts. Do not process untrusted model archives or image inputs until the reviewed transitive advisories are fixed upstream.",
   "advisories": {
     "@huggingface/transformers": {

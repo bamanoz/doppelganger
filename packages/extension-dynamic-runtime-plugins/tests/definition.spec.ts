@@ -13,7 +13,7 @@ async function setup(config: object = {}) {
 }
 
 async function call(ctx: Context, name: string, input: JsonValue): Promise<JsonValue> {
-  const result = await ctx.doppelgangerTools.invoke(name, input)
+  const result = await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: name, toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === name)!.revision, input: input }, 'test-session')
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
   return result.value
 }
@@ -77,9 +77,9 @@ describe('ephemeral immutable Package definitions', () => {
       ['return <div />', 'JSX'],
     ]
     for (const [source, message] of invalidSources) {
-      const result = await ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+      const result = await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
         idPrefix: 'bad', name: 'bad', purpose: 'invalid source', source,
-      })
+      } }, 'test-session')
       expect(result).toMatchObject({ ok: false, error: { code: 'SOURCE_PARSE_FAILED' } })
       if (!result.ok) expect(result.error.message).toContain(message)
     }
@@ -100,19 +100,19 @@ describe('ephemeral immutable Package definitions', () => {
       idPrefix: 'only', name: 'only', purpose: 'first package', source,
     })
     const pluginId = field(first, 'pluginId')
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
       pluginId, name: 'extra', purpose: 'too many packages', source,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'REGISTRY_LIMIT_EXCEEDED' } })
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'REGISTRY_LIMIT_EXCEEDED' } })
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
       idPrefix: 'other', name: 'other', purpose: 'too many plugins', source,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'REGISTRY_LIMIT_EXCEEDED' } })
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'REGISTRY_LIMIT_EXCEEDED' } })
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
       idPrefix: 'large', name: 'large', purpose: 'oversized source', source: 'x'.repeat(65),
-    })).resolves.toMatchObject({ ok: false, error: { code: 'SOURCE_PARSE_FAILED' } })
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.inspect-self', {
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'SOURCE_PARSE_FAILED' } })
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-self', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-self')!.revision, input: {
       pluginId,
       packageId: field(first, 'packageId'),
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INSPECTION_LIMIT_EXCEEDED' } })
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'INSPECTION_LIMIT_EXCEEDED' } })
     expect(await call(ctx, 'runtime-plugin.inspect-self', {})).toMatchObject({ plugins: [{ pluginId }] })
     await ctx.fiber.dispose()
 
@@ -125,12 +125,12 @@ describe('ephemeral immutable Package definitions', () => {
     const aggregateFirst = await call(aggregate, 'runtime-plugin.define', {
       idPrefix: 'total', name: 'first', purpose: 'aggregate first', source,
     })
-    await expect(aggregate.doppelgangerTools.invoke('runtime-plugin.define', {
+    await expect(aggregate.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: aggregate.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
       pluginId: field(aggregateFirst, 'pluginId'),
       name: 'second',
       purpose: 'aggregate overflow',
       source,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'REGISTRY_LIMIT_EXCEEDED' } })
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'REGISTRY_LIMIT_EXCEEDED' } })
     expect(await call(aggregate, 'runtime-plugin.inspect-self', {
       pluginId: field(aggregateFirst, 'pluginId'),
     })).toMatchObject({ packages: [{ name: 'first' }] })
@@ -143,10 +143,10 @@ describe('ephemeral immutable Package definitions', () => {
     const defined = await call(first, 'runtime-plugin.define', {
       idPrefix: 'shared', name: 'private', purpose: 'session local', source: 'return { apply() {} }',
     })
-    await expect(second.doppelgangerTools.invoke('runtime-plugin.inspect-self', {
+    await expect(second.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-self', toolRevision: second.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-self')!.revision, input: {
       pluginId: field(defined, 'pluginId'),
       packageId: field(defined, 'packageId'),
-    })).resolves.toMatchObject({ ok: false, error: { code: 'PLUGIN_NOT_FOUND' } })
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'PLUGIN_NOT_FOUND' } })
     expect(await call(second, 'runtime-plugin.inspect-self', {})).toEqual({ plugins: [] })
     await first.fiber.dispose()
     await second.fiber.dispose()

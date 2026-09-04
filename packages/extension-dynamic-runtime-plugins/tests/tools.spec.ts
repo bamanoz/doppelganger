@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { ToolRegistry, type JsonValue } from '@doppelganger/doppelganger-protocols'
 import { DynamicRuntimePluginsPlugin, normalizeDynamicRuntimePluginsConfig } from '../src/index.ts'
 import { DynamicRuntimePluginRegistry } from '../src/registry.ts'
+import { invokeTool } from './support.ts'
 
 async function setup() {
   const ctx = new Context()
@@ -27,19 +28,19 @@ async function define(
   pluginId?: JsonValue,
   prefix = 'tools',
 ) {
-  const result = await ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+  const result = await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
     ...(pluginId === undefined ? { idPrefix: prefix } : { pluginId }),
     name: `${prefix} name`,
     purpose: `${prefix} purpose`,
     source,
-  })
+  } }, 'test-session')
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
   return result.value
 }
 
 async function run(ctx: Context, definition: JsonValue, overrides: Readonly<Record<string, JsonValue>> = {}) {
   const record = objectValue(definition)
-  return ctx.doppelgangerTools.invoke('runtime-plugin.run', {
+  return invokeTool(ctx, 'runtime-plugin.run', {
     pluginId: record.pluginId ?? null,
     packageId: record.packageId ?? null,
     mode: 'run',
@@ -53,7 +54,7 @@ async function run(ctx: Context, definition: JsonValue, overrides: Readonly<Reco
 describe('Dynamic Runtime Plugin control tools', () => {
   it('publishes strict complete schemas and shell-equivalent exact-run approval', async () => {
     const { ctx } = await setup()
-    const descriptors = ctx.doppelgangerTools.list()
+    const descriptors = ctx.doppelgangerTools.snapshot().tools
     expect(descriptors.map(tool => tool.name)).toEqual([
       'runtime-plugin.define',
       'runtime-plugin.inspect-list',
@@ -80,21 +81,21 @@ describe('Dynamic Runtime Plugin control tools', () => {
 
   it('rejects malformed additional fields before mutation', async () => {
     const { ctx } = await setup()
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
       idPrefix: 'strict',
       name: 'strict',
       purpose: 'strict validation',
       source: 'return { apply() {} }',
       extra: true,
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
       idPrefix: 'strict',
       pluginId: 'foreign-1',
       name: 'strict',
       purpose: 'strict validation',
       source: 'return { apply() {} }',
-    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.inspect-self', {})).resolves.toEqual({
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-self', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-self')!.revision, input: {} }, 'test-session')).resolves.toEqual({
       ok: true,
       value: { plugins: [] },
     })
@@ -125,12 +126,12 @@ describe('Dynamic Runtime Plugin control tools', () => {
 
   it('serializes mutations deterministically and supports idempotent stop and restart', async () => {
     const { ctx } = await setup()
-    const firstPromise = ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+    const firstPromise = ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
       idPrefix: 'ordered', name: 'first', purpose: 'first', source: 'return { apply(ctx) { ctx.provide("test.control", "active") } }',
-    })
-    const secondPromise = ctx.doppelgangerTools.invoke('runtime-plugin.define', {
+    } }, 'test-session')
+    const secondPromise = ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.define', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.define')!.revision, input: {
       idPrefix: 'ordered', name: 'second', purpose: 'second', source: 'return { apply() {} }',
-    })
+    } }, 'test-session')
     const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise])
     expect(firstResult).toMatchObject({ ok: true, value: { pluginId: 'ordered-1', packageId: 'pkg-1' } })
     expect(secondResult).toMatchObject({ ok: true, value: { pluginId: 'ordered-2', packageId: 'pkg-2' } })
@@ -138,16 +139,16 @@ describe('Dynamic Runtime Plugin control tools', () => {
     expect(await run(ctx, firstResult.value)).toMatchObject({ ok: true })
     expect(ctx.get('test.control')).toBe('active')
 
-    expect(await ctx.doppelgangerTools.invoke('runtime-plugin.stop', {
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.stop', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.stop')!.revision, input: {
       pluginId: field(firstResult.value, 'pluginId'),
-    })).toMatchObject({ ok: true, value: { stopped: true, wasRunning: true } })
+    } }, 'test-session')).toMatchObject({ ok: true, value: { stopped: true, wasRunning: true } })
     expect(ctx.get('test.control')).toBeUndefined()
-    expect(await ctx.doppelgangerTools.invoke('runtime-plugin.stop', {
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.stop', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.stop')!.revision, input: {
       pluginId: field(firstResult.value, 'pluginId'),
-    })).toMatchObject({ ok: true, value: { stopped: true, wasRunning: false } })
-    expect(await ctx.doppelgangerTools.invoke('runtime-plugin.inspect-self', {
+    } }, 'test-session')).toMatchObject({ ok: true, value: { stopped: true, wasRunning: false } })
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-self', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-self')!.revision, input: {
       pluginId: field(firstResult.value, 'pluginId'),
-    })).toMatchObject({
+    } }, 'test-session')).toMatchObject({
       ok: true,
       value: { currentPackageId: field(firstResult.value, 'packageId'), packages: [expect.any(Object)] },
     })
@@ -166,16 +167,16 @@ describe('Dynamic Runtime Plugin control tools', () => {
     )
     expect(await run(ctx, definition)).toMatchObject({ ok: true })
     expect(ctx.get('test.removed')).toBe(true)
-    expect(await ctx.doppelgangerTools.invoke('runtime-plugin.undefine', {
+    expect(await ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.undefine', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.undefine')!.revision, input: {
       pluginId: field(definition, 'pluginId'),
-    })).toMatchObject({ ok: true, value: { removed: true, wasRunning: true } })
+    } }, 'test-session')).toMatchObject({ ok: true, value: { removed: true, wasRunning: true } })
     expect(ctx.get('test.removed')).toBeUndefined()
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.inspect-self', {
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.inspect-self', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.inspect-self')!.revision, input: {
       pluginId: field(definition, 'pluginId'),
-    })).resolves.toMatchObject({ ok: false, error: { code: 'PLUGIN_NOT_FOUND' } })
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.stop', {
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'PLUGIN_NOT_FOUND' } })
+    await expect(ctx.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'runtime-plugin.stop', toolRevision: ctx.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'runtime-plugin.stop')!.revision, input: {
       pluginId: field(definition, 'pluginId'),
-    })).resolves.toMatchObject({ ok: false, error: { code: 'PLUGIN_NOT_FOUND' } })
+    } }, 'test-session')).resolves.toMatchObject({ ok: false, error: { code: 'PLUGIN_NOT_FOUND' } })
 
     const active = await define(
       ctx,
@@ -187,8 +188,8 @@ describe('Dynamic Runtime Plugin control tools', () => {
     await owner.dispose()
     await owner.dispose()
     expect(ctx.get('test.owner')).toBeUndefined()
-    expect(ctx.doppelgangerTools.list()).toEqual([])
-    await expect(ctx.doppelgangerTools.invoke('runtime-plugin.inspect-self', {})).resolves.toMatchObject({
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
+    await expect(invokeTool(ctx, 'runtime-plugin.inspect-self', {})).resolves.toMatchObject({
       ok: false,
       error: { code: 'TOOL_NOT_FOUND' },
     })

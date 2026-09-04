@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,8 +18,20 @@ interface InvocationResult {
 }
 
 interface Tools {
-  list(): readonly { readonly name: string }[]
-  invoke(name: string, input: unknown): Promise<InvocationResult>
+  snapshot(): { readonly revision: string; readonly tools: readonly { readonly name: string; readonly revision: string; readonly approval?: unknown }[] }
+  invoke(request: {
+    readonly callId: string
+    readonly name: string
+    readonly toolRevision: string
+    readonly input: unknown
+    readonly approval?: {
+      readonly kind: 'one-shot'
+      readonly grantId: string
+      readonly callId: string
+      readonly toolRevision: string
+      readonly inputDigest: string
+    }
+  }, sessionId: string): Promise<InvocationResult>
 }
 
 const temporaryRoots: string[] = []
@@ -82,8 +95,40 @@ function value(result: InvocationResult): Record<string, unknown> {
   return result.value as Record<string, unknown>
 }
 
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  return `{${Object.entries(value)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+    .join(',')}}`
+}
+
+function invoke(tools: Tools, name: string, input: unknown): Promise<InvocationResult> {
+  const descriptor = tools.snapshot().tools.find(tool => tool.name === name)
+  if (descriptor === undefined) {
+    return Promise.resolve({ ok: false, error: { code: 'TOOL_NOT_FOUND', message: `tool "${name}" is not registered` } })
+  }
+  const callId = crypto.randomUUID()
+  return tools.invoke({
+    callId,
+    name,
+    toolRevision: descriptor.revision,
+    input,
+    ...(descriptor.approval === undefined ? {} : {
+      approval: {
+        kind: 'one-shot',
+        grantId: crypto.randomUUID(),
+        callId,
+        toolRevision: descriptor.revision,
+        inputDigest: createHash('sha256').update(canonicalJson(input)).digest('hex'),
+      },
+    }),
+  }, 'test-session')
+}
+
 async function defineAndRun(tools: Tools, idPrefix: string, toolName: string) {
-  const definition = await tools.invoke('runtime-plugin.define', {
+  const definition = await invoke(tools, 'runtime-plugin.define', {
     idPrefix,
     name: `${idPrefix} package`,
     purpose: 'Composition Runtime lifecycle proof',
@@ -102,7 +147,7 @@ async function defineAndRun(tools: Tools, idPrefix: string, toolName: string) {
     ].join('\n'),
   })
   const defined = value(definition)
-  const started = await tools.invoke('runtime-plugin.run', {
+  const started = await invoke(tools, 'runtime-plugin.run', {
     pluginId: defined.pluginId,
     packageId: defined.packageId,
     mode: 'run',
@@ -146,34 +191,34 @@ describe('Dynamic Runtime Plugins under Composition Runtime', () => {
       runtimePlugins: { host },
     })
     if (tools === undefined) throw new Error('host tools did not activate')
-    expect(tools.list().map(tool => tool.name)).toContain('runtime-plugin.run')
+    expect(tools.snapshot().tools.map(tool => tool.name)).toContain('runtime-plugin.run')
 
     await defineAndRun(tools, 'before', 'generated.before-reload')
-    expect(await tools.invoke('generated.before-reload', {})).toEqual({ ok: true, value: { owner: 'before' } })
+    expect(await invoke(tools, 'generated.before-reload', {})).toEqual({ ok: true, value: { owner: 'before' } })
 
     const valid = reloads.next('valid dynamic row replacement')
     await writeFile(loaderPath, loader(30))
     const committed = await valid
-    expect(await tools.invoke('runtime-plugin.inspect-self', {})).toEqual({ ok: true, value: { plugins: [] } })
-    expect(await tools.invoke('generated.before-reload', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
+    expect(await invoke(tools, 'runtime-plugin.inspect-self', {})).toEqual({ ok: true, value: { plugins: [] } })
+    expect(await invoke(tools, 'generated.before-reload', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
 
     await defineAndRun(tools, 'retained', 'generated.retained')
-    expect(await tools.invoke('generated.retained', {})).toEqual({ ok: true, value: { owner: 'retained' } })
+    expect(await invoke(tools, 'generated.retained', {})).toEqual({ ok: true, value: { owner: 'retained' } })
 
     const invalid = failures.next('invalid dynamic row replacement')
     await writeFile(loaderPath, loader(0))
     const rejected = await invalid
     expect(rejected.compositionRevision).toBe(committed.compositionRevision)
     expect(rejected.diagnostics.reload).toMatchObject({ state: 'failed', error: expect.stringContaining('vmTimeoutMs') })
-    expect(await tools.invoke('generated.retained', {})).toEqual({ ok: true, value: { owner: 'retained' } })
-    expect(await tools.invoke('runtime-plugin.inspect-self', {})).toMatchObject({
+    expect(await invoke(tools, 'generated.retained', {})).toEqual({ ok: true, value: { owner: 'retained' } })
+    expect(await invoke(tools, 'runtime-plugin.inspect-self', {})).toMatchObject({
       ok: true,
       value: { plugins: [{ pluginId: 'retained-1', packageCount: 1, running: true }] },
     })
 
     await session.dispose()
-    expect(tools.list()).toEqual([])
-    expect(await tools.invoke('generated.retained', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
+    expect(tools.snapshot().tools).toEqual([])
+    expect(await invoke(tools, 'generated.retained', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
     await runtime.dispose()
   })
 })

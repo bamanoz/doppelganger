@@ -23,6 +23,7 @@
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.1",
     "@doppelganger/doppelganger-composition-runtime": "0.0.0",
+    "@sentry/core": "10.73.0",
     "@sentry/node": "10.73.0"
   },
   "peerDependencies": {

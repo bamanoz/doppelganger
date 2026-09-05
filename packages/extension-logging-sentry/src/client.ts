@@ -1,4 +1,9 @@
 import {
+  _INTERNAL_captureSerializedLog,
+  type LogSeverityLevel,
+  type SerializedLog,
+} from '@sentry/core'
+import {
   NodeClient,
   Scope,
   defaultStackParser,
@@ -20,11 +25,25 @@ export interface OwnedSentryClient extends RuntimeLogSink {
 
 export type SentryTransportFactory = typeof makeNodeTransport
 
-const sentrySeverity: Readonly<Record<RuntimeLogSeverity, SeverityLevel>> = Object.freeze({
+const sentryEventSeverity: Readonly<Record<RuntimeLogSeverity, SeverityLevel>> = Object.freeze({
   error: 'error',
   warn: 'warning',
   info: 'info',
   debug: 'debug',
+})
+
+const sentryLogSeverity: Readonly<Record<RuntimeLogSeverity, LogSeverityLevel>> = Object.freeze({
+  error: 'error',
+  warn: 'warn',
+  info: 'info',
+  debug: 'debug',
+})
+
+const sentryLogSeverityNumber: Readonly<Record<RuntimeLogSeverity, number>> = Object.freeze({
+  error: 17,
+  warn: 13,
+  info: 9,
+  debug: 5,
 })
 
 function runtimeContext(record: RuntimeLogRecord): Record<string, string | number> {
@@ -42,9 +61,35 @@ function breadcrumb(record: RuntimeLogRecord): Breadcrumb {
   return {
     timestamp: record.timestamp / 1_000,
     category: record.logger,
-    level: sentrySeverity[record.severity],
+    level: sentryEventSeverity[record.severity],
     message: record.message,
     data: runtimeContext(record),
+  }
+}
+
+function serializedLog(
+  record: RuntimeLogRecord,
+  config: ResolvedSentryLoggingConfig,
+): SerializedLog {
+  return {
+    timestamp: record.timestamp / 1_000,
+    level: sentryLogSeverity[record.severity],
+    body: record.message,
+    severity_number: sentryLogSeverityNumber[record.severity],
+    attributes: {
+      runtimeActivationId: { type: 'string', value: record.runtimeActivationId },
+      sessionId: { type: 'string', value: record.sessionId },
+      runtimePresetId: { type: 'string', value: record.runtimePresetId },
+      logger: { type: 'string', value: record.logger },
+      severity: { type: 'string', value: record.severity },
+      sequence: { type: 'integer', value: record.sequence },
+      ...(config.environment === undefined
+        ? {}
+        : { 'sentry.environment': { type: 'string', value: config.environment } }),
+      ...(config.release === undefined
+        ? {}
+        : { 'sentry.release': { type: 'string', value: config.release } }),
+    },
   }
 }
 
@@ -92,10 +137,12 @@ function errorEvent(record: RuntimeLogRecord): Event {
 class NodeOwnedSentryClient implements OwnedSentryClient {
   private readonly client: NodeClient
   private readonly scope: Scope
+  private readonly config: ResolvedSentryLoggingConfig
   private closing: Promise<boolean> | undefined
   private accepting = true
 
   constructor(config: ResolvedSentryLoggingConfig, transport: SentryTransportFactory) {
+    this.config = config
     this.client = new NodeClient({
       dsn: config.dsn,
       ...(config.environment === undefined ? {} : { environment: config.environment }),
@@ -105,7 +152,7 @@ class NodeOwnedSentryClient implements OwnedSentryClient {
       stackParser: defaultStackParser,
       sendClientReports: false,
       sendDefaultPii: false,
-      enableLogs: false,
+      enableLogs: true,
       skipOpenTelemetrySetup: true,
       registerEsmLoaderHooks: false,
       includeServerName: false,
@@ -121,6 +168,14 @@ class NodeOwnedSentryClient implements OwnedSentryClient {
 
   write(record: RuntimeLogRecord): void {
     if (!this.accepting) throw new Error('Sentry logging client is not accepting records')
+    const log = serializedLog(record, this.config)
+    _INTERNAL_captureSerializedLog(this.client, log)
+    this.client.emit('afterCaptureLog', {
+      level: sentryLogSeverity[record.severity],
+      message: record.message,
+      attributes: runtimeContext(record),
+      severityNumber: sentryLogSeverityNumber[record.severity],
+    })
     if (record.severity !== 'error') {
       this.scope.addBreadcrumb(breadcrumb(record), 100)
       return

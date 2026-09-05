@@ -187,7 +187,7 @@ A file open failure SHALL fail the exporter Loader row. A write, rotate, rename,
 
 #### Scenario: Sentry exporter activates beside another Sentry user
 - **ID**: `runtime.logging.sentry.client-isolation`
-- **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::uses a private client without mutating global Sentry state`
+- **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::keeps multiple private clients isolated from ambient global Sentry state and its application client`
 - **WHEN** the exporter activates in a process that already has unrelated Sentry state
 - **THEN** it sends logging events through its own client and scope without reading, replacing, or closing the unrelated client
 
@@ -200,8 +200,21 @@ The Sentry exporter SHALL require `dsnEnv` to name one environment variable and 
 - **WHEN** `dsnEnv` is configured but that exact environment variable is missing, empty, or invalid
 - **THEN** the Sentry exporter row fails activation without sending a request or exposing the credential value
 
-### Requirement: Sentry maps records to errors and breadcrumbs
-The Sentry exporter SHALL add each admitted non-error record as a bounded breadcrumb carrying concrete runtime activation, Runtime Session, Runtime Preset, logger, severity, and sequence correlation. It SHALL submit each admitted `error` record as one event with the same correlation in tags or context. When the normalized record carries an error description, the exporter SHALL preserve its bounded error semantics; otherwise it SHALL capture the rendered message. It SHALL not send raw Cordis arguments.
+### Requirement: Sentry maps records to structured Logs, errors, and breadcrumbs
+The Sentry exporter SHALL submit every admitted severity as a standalone structured Sentry Log carrying the original normalized timestamp, rendered message, concrete runtime activation, Runtime Session, Runtime Preset, logger, severity, and sequence correlation. Structured Logs SHALL use only bounded record data and explicitly configured exporter metadata, never unrelated ambient Sentry users, tags, or attributes. Non-error Logs SHALL be submitted without requiring a later error. The exporter SHALL additionally add each admitted non-error record as a bounded private-scope breadcrumb and submit each admitted `error` record as one error event with the same correlation in tags or context. When the normalized record carries an error description, the exporter SHALL preserve its bounded error semantics; otherwise it SHALL capture the rendered message. It SHALL not send raw Cordis arguments. Submission SHALL remain best-effort and SHALL NOT imply backend ingestion acknowledgement.
+
+#### Scenario: Records are searchable without a later error
+- **ID**: `runtime.logging.sentry.structured-logs`
+- **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::emits all admitted severities as standalone structured Logs with original identity and timestamps`
+- **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::periodically flushes structured Logs without closing the private client`
+- **WHEN** the exporter admits normalized records at each runtime severity
+- **THEN** it submits standalone structured Logs preserving their severity, original timestamp, message, and runtime correlation while the client remains open and flushes any pending suffix at disposal
+
+#### Scenario: Ambient application state stays outside structured Logs
+- **ID**: `runtime.logging.sentry.structured-log-isolation`
+- **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::keeps multiple private clients isolated from ambient global Sentry state and its application client`
+- **WHEN** separate private exporters run beside an application-owned Sentry client with ambient user, tag, and attribute values
+- **THEN** each structured Log reaches only its owning private client and excludes the unrelated ambient values
 
 #### Scenario: Warning precedes an error
 - **ID**: `runtime.logging.sentry.breadcrumb-and-error`
@@ -220,14 +233,14 @@ The Sentry exporter SHALL add each admitted non-error record as a bounded breadc
 - **ID**: `runtime.logging.sentry.activation-correlation`
 - **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::keeps private clients and breadcrumbs isolated across activations sharing one logical session`
 - **WHEN** Sentry receives records from concrete activations that use the same host `sessionId`
-- **THEN** their breadcrumbs and error events remain distinguishable by `runtimeActivationId`
+- **THEN** their structured Logs, breadcrumbs, and error events remain distinguishable by `runtimeActivationId`
 
 ### Requirement: Sentry shutdown is bounded
-On exporter replacement, row removal, or Runtime Session disposal, the Sentry exporter SHALL stop accepting records and flush its private client for at most configured `flushTimeoutMs`. Timeout or flush failure SHALL be contained, and the exporter SHALL close only its own client resources.
+On exporter replacement, row removal, or Runtime Session disposal, the Sentry exporter SHALL stop accepting records and flush pending structured Logs and error events through its private client for at most configured `flushTimeoutMs`. Timeout or flush failure SHALL be contained, and the exporter SHALL close only its own client resources.
 
 #### Scenario: Sentry flush completes
 - **ID**: `runtime.logging.sentry.dispose-flush`
-- **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::flushes and closes only the private client during disposal`
+- **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::flushes structured Logs and closes only the private client during disposal`
 - **WHEN** the exporter is disposed with accepted events pending and the transport drains within `flushTimeoutMs`
 - **THEN** it completes its private flush and closes its client before disposal settles
 

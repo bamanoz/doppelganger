@@ -137,9 +137,11 @@ Use the independently mountable Loader entry:
 
 `dsnEnv` is required and names exactly one environment variable resolved once for that Loader generation. Missing, empty, or invalid DSN values fail activation without fallback and without exposing the value. The optional Sentry `environment` and `release` metadata are bounded. `level` defaults to `info`, `flushTimeoutMs` defaults to 2,000 ms and accepts 100 through 60,000 ms, and `maximumPendingRecords` defaults to 1,024.
 
-The package uses one private manually constructed Sentry client and private Scope per exporter generation. It does not call global `Sentry.init`, replace or close an application's current client, enable default integrations, tracing, profiling, automatic request instrumentation, default PII collection, or a logs integration.
+The package uses one private manually constructed Sentry client and private Scope per exporter generation. It does not call global `Sentry.init`, replace or close an application's current client, enable default integrations, tracing, profiling, automatic request instrumentation, default PII collection, or automatic console capture.
 
-Admitted `warn`, `info`, and `debug` records become private-scope breadcrumbs. An admitted `error` record emits one event with bounded error/message data and Runtime Activation, Runtime Session, Runtime Preset, logger, severity, and sequence correlation. Raw Cordis arguments and the DSN are unavailable to the exporter.
+Every admitted `debug`, `info`, `warn`, and `error` record is submitted as a standalone structured Sentry Log with its original timestamp, bounded rendered message, and Runtime Activation, Runtime Session, Runtime Preset, logger, severity, and sequence correlation. Non-error logs do not depend on a later error to become searchable. The destination must support Sentry Logs; setting `level: debug` admits all four runtime severities. Submission is best-effort, not an acknowledgement of backend ingestion or durable delivery.
+
+Admitted `warn`, `info`, and `debug` records additionally become private-scope breadcrumbs. An admitted `error` record additionally emits one error event with bounded error/message data and the same correlation. Raw Cordis arguments and the DSN are unavailable to the record mapper. Structured Logs exclude ambient application users, tags, and attributes; they do not inherit unrelated global Sentry context.
 
 Replacement, removal, and Runtime Session disposal unregister the sink first, then close only the private client within `flushTimeoutMs`. Delivery rejection, flush failure, or timeout remains contained and cannot fail the source logger call, sibling destinations, or the Runtime Session.
 

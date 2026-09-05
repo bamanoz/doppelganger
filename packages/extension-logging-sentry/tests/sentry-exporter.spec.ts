@@ -1,6 +1,12 @@
 import { readFile } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
-import { getClient } from '@sentry/node'
+import {
+  NodeClient,
+  defaultStackParser,
+  getClient,
+  logger,
+  withScope,
+} from '@sentry/node'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
   RuntimeLoggingService,
@@ -52,6 +58,7 @@ afterEach(() => {
   sentryLoaderTransport.envelopes.length = 0
   sentryLoaderTransport.events.length = 0
   sentryLoaderTransport.flushTimeouts.length = 0
+  vi.useRealTimers()
 })
 
 function record(
@@ -107,6 +114,29 @@ function transportHarness(options: {
     },
   })
   return { envelopes, factory, flushTimeouts }
+}
+
+interface CapturedLog {
+  readonly timestamp: number
+  readonly level: string
+  readonly body: string
+  readonly severity_number: number
+  readonly attributes: Readonly<Record<string, { readonly type: string, readonly value: unknown }>>
+}
+
+type CapturedEnvelope = readonly [
+  unknown,
+  ReadonlyArray<readonly [
+    Readonly<{ type?: string }>,
+    Readonly<{ items?: readonly CapturedLog[] }>,
+  ]>,
+]
+
+function capturedLogs(envelopes: readonly unknown[]): CapturedLog[] {
+  return envelopes.flatMap(envelope => {
+    const [, items] = envelope as CapturedEnvelope
+    return items.flatMap(([header, payload]) => header.type === 'log' ? payload.items ?? [] : [])
+  })
 }
 
 async function settle(): Promise<void> {
@@ -182,6 +212,7 @@ describe('Sentry logging configuration', () => {
 
     expect(Object.keys(manifest.exports).sort()).toEqual(['.', './loader'])
     expect(manifest.dependencies['@sentry/node']).toBe('10.73.0')
+    expect(manifest.dependencies['@sentry/core']).toBe('10.73.0')
     expect(Object.keys(manifest.dependencies).filter(name => name.startsWith('@doppelganger/'))).toEqual([
       '@doppelganger/doppelganger-composition-runtime',
     ])
@@ -189,16 +220,93 @@ describe('Sentry logging configuration', () => {
 })
 
 describe('private Sentry client', () => {
-  it('uses a private client without mutating global Sentry state', async () => {
-    const before = getClient()
+  it('emits all admitted severities as standalone structured Logs with original identity and timestamps', async () => {
     const transport = transportHarness()
     const client = createOwnedSentryClient(resolved(), transport.factory)
+    const records = [
+      record(1, 'debug', 'debug body', 'worker'),
+      record(2, 'info', 'info body', 'worker'),
+      record(3, 'warn', 'warn body', 'worker'),
+      record(4, 'error', 'error body', 'worker'),
+    ] as const
 
-    client.write(record(1, 'error', 'private event'))
+    for (const item of records) client.write(item)
     await client.close(100)
 
+    const logs = capturedLogs(transport.envelopes)
+    expect(logs.map(log => ({
+      timestamp: log.timestamp,
+      level: log.level,
+      body: log.body,
+      severityNumber: log.severity_number,
+      attributes: Object.fromEntries(
+        Object.entries(log.attributes).map(([key, attribute]) => [key, attribute.value]),
+      ),
+    }))).toEqual(records.map((item, index) => ({
+      timestamp: item.timestamp / 1_000,
+      level: item.severity,
+      body: item.message,
+      severityNumber: [5, 9, 13, 17][index],
+      attributes: {
+        runtimeActivationId: item.runtimeActivationId,
+        sessionId: item.sessionId,
+        runtimePresetId: item.runtimePresetId,
+        logger: item.logger,
+        severity: item.severity,
+        sequence: item.sequence,
+      },
+    })))
+  })
+
+  it('keeps multiple private clients isolated from ambient global Sentry state and its application client', async () => {
+    const before = getClient()
+    const applicationTransport = transportHarness()
+    const applicationClient = new NodeClient({
+      dsn: validDsn,
+      integrations: [],
+      transport: applicationTransport.factory,
+      stackParser: defaultStackParser,
+      sendDefaultPii: false,
+      enableLogs: true,
+      skipOpenTelemetrySetup: true,
+      registerEsmLoaderHooks: false,
+    })
+    applicationClient.init()
+    const firstTransport = transportHarness()
+    const secondTransport = transportHarness()
+    const first = createOwnedSentryClient(resolved(), firstTransport.factory)
+    const second = createOwnedSentryClient(resolved(), secondTransport.factory)
+    await withScope(async currentScope => {
+      currentScope.setClient(applicationClient)
+      currentScope.setUser({ id: 'ambient-user', email: 'ambient@example.com' })
+      currentScope.setTag('ambient-current-tag', 'must-not-leak')
+      logger.info('application log', { applicationAttribute: 'application-only' })
+      first.write(record(1, 'info', 'first private log', 'first'))
+      second.write({
+        ...record(2, 'warn', 'second private log', 'second'),
+        runtimeActivationId: '123e4567-e89b-42d3-b456-426614174001',
+      })
+      await Promise.all([first.close(100), second.close(100)])
+
+      expect(getClient()).toBe(applicationClient)
+      expect(applicationTransport.envelopes).toHaveLength(0)
+    })
+    await applicationClient.close(100)
+
+    const firstLogs = capturedLogs(firstTransport.envelopes)
+    const secondLogs = capturedLogs(secondTransport.envelopes)
+    expect(firstLogs.map(log => log.body)).toEqual(['first private log'])
+    expect(secondLogs.map(log => log.body)).toEqual(['second private log'])
+    expect(Object.keys(firstLogs[0]!.attributes).sort()).toEqual([
+      'logger', 'runtimeActivationId', 'runtimePresetId', 'sequence', 'sessionId', 'severity',
+    ])
+    expect(firstLogs[0]).not.toHaveProperty('trace_id')
+    expect(secondLogs[0]).not.toHaveProperty('trace_id')
+    expect(Object.keys(secondLogs[0]!.attributes).sort()).toEqual([
+      'logger', 'runtimeActivationId', 'runtimePresetId', 'sequence', 'sessionId', 'severity',
+    ])
+    expect(capturedLogs(applicationTransport.envelopes).map(log => log.body)).toEqual(['application log'])
     expect(getClient()).toBe(before)
-    expect(transport.envelopes).toHaveLength(1)
   })
 
   it('attaches admitted breadcrumbs and runtime correlation to an error event', async () => {
@@ -221,8 +329,12 @@ describe('private Sentry client', () => {
     expect(payload).toContain('sentry-session')
     expect(payload).toContain('sentry-preset')
     expect(payload).toContain('release-1')
+    for (const log of capturedLogs(transport.envelopes)) {
+      expect(log.attributes['sentry.environment']).toEqual({ type: 'string', value: 'test' })
+      expect(log.attributes['sentry.release']).toEqual({ type: 'string', value: 'release-1' })
+    }
     expect(payload).not.toContain('rawArgs')
-    expect(transport.envelopes).toHaveLength(1)
+    expect(transport.envelopes).toHaveLength(2)
   })
 
   it('maps error records without error descriptions to bounded message events', async () => {
@@ -243,18 +355,35 @@ describe('private Sentry client', () => {
 
     expect(() => client.write(record(1, 'error', 'rejected event'))).not.toThrow()
     await expect(client.close(100)).resolves.toBeTypeOf('boolean')
-    expect(transport.envelopes).toHaveLength(1)
+    expect(transport.envelopes).toHaveLength(2)
   })
 
-  it('flushes and closes only the private client during disposal', async () => {
+  it('flushes structured Logs and closes only the private client during disposal', async () => {
     const transport = transportHarness()
     const client = createOwnedSentryClient(resolved(), transport.factory)
-    client.write(record(1, 'error', 'pending event'))
+    client.write(record(1, 'info', 'pending log'))
 
     await expect(client.close(100)).resolves.toBe(true)
     await expect(client.close(100)).resolves.toBe(true)
+    expect(capturedLogs(transport.envelopes).map(log => log.body)).toEqual(['pending log'])
     expect(transport.flushTimeouts).toEqual([100])
     expect(() => client.write(record(2, 'error', 'late'))).toThrow('not accepting records')
+  })
+
+  it('periodically flushes structured Logs without closing the private client', async () => {
+    vi.useFakeTimers()
+    const transport = transportHarness()
+    const client = createOwnedSentryClient(resolved(), transport.factory)
+    try {
+      client.write(record(1, 'info', 'periodic log'))
+
+      expect(capturedLogs(transport.envelopes)).toEqual([])
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(capturedLogs(transport.envelopes).map(log => log.body)).toEqual(['periodic log'])
+    } finally {
+      vi.useRealTimers()
+      await expect(client.close(100)).resolves.toBe(true)
+    }
   })
 
   it('bounds shutdown when the private transport does not drain', async () => {
@@ -333,6 +462,7 @@ describe('Sentry Loader lifecycle', () => {
     expect(order).toEqual(['unregister'])
     expect(sentryLoaderTransport.events).toEqual(['flush'])
     expect(sentryLoaderTransport.flushTimeouts).toEqual([250])
+    expect(capturedLogs(sentryLoaderTransport.envelopes).map(log => log.body)).toEqual(['accepted'])
     expect(() => registeredSink!.write(record(3, 'error', 'late'))).toThrow('not accepting records')
     await root.fiber.dispose()
   })

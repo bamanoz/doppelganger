@@ -1,8 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { isLifecycleEventType, type LifecycleEvent } from './lifecycle.ts'
+import { cloneJsonValue, type JsonValue } from './json-value.ts'
 
 export const RUNTIME_HOST_PROTOCOL_VERSION = 2 as const
 export const HOST_CAPABILITIES_SERVICE = 'doppelgangerHostCapabilities' as const
+const CAPABILITY_JSON_LIMITS = Object.freeze({ maximumBytes: 32 * 1024, maximumDepth: 8 })
 
 export type ContextDelivery = 'none' | 'session-start' | 'per-turn' | 'per-request'
 export type ToolDelivery = 'none' | 'session-start' | 'dynamic'
@@ -56,7 +58,10 @@ function boolean(value: unknown, label: string): boolean {
 }
 
 export function defineRuntimeHostCapabilities(input: unknown): RuntimeHostCapabilities {
-  const root = object(input, 'runtime host capabilities')
+  const root = object(
+    cloneJsonValue<Record<string, JsonValue>>(input, 'runtime host capabilities', CAPABILITY_JSON_LIMITS),
+    'runtime host capabilities',
+  )
   exactKeys(root, ['protocolVersion', 'context', 'tools', 'lifecycle'], 'runtime host capabilities')
   if (root.protocolVersion !== RUNTIME_HOST_PROTOCOL_VERSION) {
     throw new TypeError(`unsupported Runtime Host protocol version ${String(root.protocolVersion)}`)

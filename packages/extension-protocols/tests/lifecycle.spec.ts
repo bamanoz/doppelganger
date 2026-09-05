@@ -1,10 +1,11 @@
 import { Context, type Plugin } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   LIFECYCLE_PROTOCOL_VERSION,
   normalizeLifecycleEvent,
   serializeLifecycleValue,
   type LifecycleEvent,
+  type JsonValue,
 } from '../src/index.ts'
 import { createFakeLifecycleHost } from './support/lifecycle-host.ts'
 
@@ -103,7 +104,26 @@ describe('committed lifecycle protocol', () => {
       assistantOutput: bounded('completed answer'),
       toolOutcomes: [],
       outcome: 'completed',
-    } as unknown as LifecycleEvent)).toThrow('turn-committed toolOutcomes is not supported')
+    } as unknown as LifecycleEvent)).toThrow('unsupported fields: toolOutcomes')
+  })
+
+  it('rejects unknown variants and malformed variant payloads', () => {
+    const invalid = [
+      { ...base('unknown'), type: 'constructor' },
+      { ...base('extra'), type: 'session-started', outcome: 'completed' },
+      { ...base('missing'), type: 'turn-committed', turnId: 'turn-one', principalInput: bounded('input'), outcome: 'completed' },
+      { ...base('wrong-variant'), type: 'tool-started', turnId: 'turn-one', callId: 'call-one', name: 'read', input: bounded({}), result: bounded('wrong') },
+      { ...base('bad-error'), type: 'session-completed', outcome: 'failed', error: { code: 'FAILED', message: 'failed', extra: true } },
+      { ...base('bad-bounded'), type: 'turn-started', turnId: 'turn-one', principalInput: { value: undefined } },
+    ]
+    for (const event of invalid) {
+      expect(() => normalizeLifecycleEvent(event as unknown as LifecycleEvent)).toThrow()
+    }
+
+    const getter = vi.fn(() => 'session-started')
+    const withGetter = Object.defineProperty(base('getter'), 'type', { enumerable: true, get: getter })
+    expect(() => normalizeLifecycleEvent(withGetter as unknown as LifecycleEvent)).toThrow('accessor')
+    expect(getter).not.toHaveBeenCalled()
   })
 
   it('serializes circular, binary, oversized, deep, and unsupported host values within explicit bounds', () => {
@@ -135,6 +155,29 @@ describe('committed lifecycle protocol', () => {
       truncation: { reasons: ['size'], originalBytes: expect.any(Number) },
     })
     expect(Buffer.byteLength(JSON.stringify(oversized), 'utf8')).toBeLessThan(200)
+  })
+
+  it('serializes host objects without executing accessors or coercion hooks', () => {
+    const getter = vi.fn(() => 'secret')
+    const coercion = vi.fn(() => ({ coerced: true }))
+    const accessor = Object.defineProperty({ visible: true }, 'secret', { enumerable: true, get: getter })
+    const withCoercion = { visible: true, toJSON: coercion }
+    class CustomValue { readonly visible = true }
+    const sparse = [1, , 3]
+    const projection = serializeLifecycleValue({ accessor, withCoercion, custom: new CustomValue(), sparse })
+
+    expect(getter).not.toHaveBeenCalled()
+    expect(coercion).not.toHaveBeenCalled()
+    expect(projection.value).toEqual({
+      accessor: { secret: null, visible: true },
+      custom: null,
+      sparse: [1, null, 3],
+      withCoercion: { toJSON: null, visible: true },
+    })
+    expect(projection.truncation?.reasons).toEqual(['unsupported'])
+    expect(Object.isFrozen(projection)).toBe(true)
+    expect(Object.isFrozen(projection.value)).toBe(true)
+    expect(Object.isFrozen((projection.value as Record<string, JsonValue>).accessor)).toBe(true)
   })
 
   it('contains subscriber failure while independent subscribers observe committed work', async () => {

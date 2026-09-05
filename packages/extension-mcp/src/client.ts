@@ -417,10 +417,12 @@ export class McpClientGeneration {
       return value
     } catch (cause) {
       if (cause instanceof McpImportError) throw toToolInvocationError(cause, cause.code, cause.message)
+      if (this.snapshot().state === 'failed') {
+        throw toToolInvocationError(cause, 'MCP_SERVER_UNAVAILABLE', `MCP server ${this.#config.id} is unavailable`)
+      }
       if (controller.signal.aborted || context.signal.aborted) {
         throw toToolInvocationError(cause, 'MCP_CANCELLED', `MCP tool ${tool.name} was cancelled`)
       }
-      if (this.snapshot().state === 'failed') throw toToolInvocationError(cause, 'MCP_SERVER_UNAVAILABLE', `MCP server ${this.#config.id} is unavailable`)
       if (cause instanceof McpError) throw toToolInvocationError(cause, 'MCP_PROTOCOL_ERROR', `MCP tool ${tool.name} failed at the protocol boundary`)
       throw toToolInvocationError(cause, 'MCP_TRANSPORT_ERROR', `MCP tool ${tool.name} transport failed`)
     } finally {

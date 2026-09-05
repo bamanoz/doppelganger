@@ -5,7 +5,7 @@ import {
   defineRuntimeHostCapabilities,
   type RuntimeHostCapabilities,
 } from './host-capabilities.ts'
-import { publishLifecycleEvent, type LifecycleEvent } from './lifecycle.ts'
+import { normalizeLifecycleEvent, publishLifecycleEvent, type LifecycleEvent } from './lifecycle.ts'
 import {
   type ToolCancellationRequest,
   type ToolCancellationResult,
@@ -44,7 +44,8 @@ interface RuntimeSessionService {
 }
 
 const EMPTY_CONTEXT: AssembledContext = Object.freeze({
-  content: '',
+  instructions: '',
+  data: '',
   contributions: Object.freeze([]),
   omittedSources: Object.freeze([]),
   tokenCount: 0,
@@ -127,8 +128,12 @@ export function createRuntimeHostPlugin(
           if (!attached) return Object.freeze({ cancelled: false })
           return tools()?.cancel(request) ?? Object.freeze({ cancelled: false })
         },
-        async publishLifecycle(event: LifecycleEvent) {
+        async publishLifecycle(input: LifecycleEvent) {
           requireAttached()
+          const event = normalizeLifecycleEvent(input)
+          if (event.sessionId !== session.sessionId) {
+            throw new TypeError(`lifecycle event sessionId must equal Runtime Session "${session.sessionId}"`)
+          }
           if (!capabilities.lifecycle.events.includes(event.type)) {
             throw new TypeError(`lifecycle event "${event.type}" is not declared by Runtime Host capabilities`)
           }

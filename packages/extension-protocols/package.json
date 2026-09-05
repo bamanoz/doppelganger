@@ -15,6 +15,10 @@
     "./tools": {
       "types": "./src/tools-plugin.ts",
       "import": "./src/tools-plugin.ts"
+    },
+    "./test-support/runtime-host-conformance": {
+      "types": "./tests/support/runtime-host-conformance.ts",
+      "import": "./tests/support/runtime-host-conformance.ts"
     }
   },
   "scripts": {

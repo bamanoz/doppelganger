@@ -10,7 +10,7 @@ async function setup() {
 }
 
 describe('context protocol', () => {
-  it('resolves turn-sensitive providers in deterministic priority order within budget', async () => {
+  it('assembles instruction and data authority without promotion', async () => {
     const context = await setup()
     const lower: Plugin = {
       name: 'lower-context',
@@ -48,15 +48,20 @@ describe('context protocol', () => {
       turn: { input: 'alpha' },
       tokenBudget: 30,
     })
-    expect(first.content).toBe('identity\n\nmemory:alpha')
+    expect(first).not.toHaveProperty('content')
+    expect(first.instructions).toBe('identity')
+    expect(first.data).toBe('memory:alpha')
     expect(first.contributions.map(contribution => contribution.authority)).toEqual(['instruction', 'data'])
     expect(first.tokenCount).toBe(22)
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(Object.isFrozen(first.contributions)).toBe(true)
 
     const second = await context.doppelgangerContext.resolve({
       turn: { input: 'beta' },
       tokenBudget: 30,
     })
-    expect(second.content).toContain('memory:beta')
+    expect(second.instructions).toBe('identity')
+    expect(second.data).toBe('memory:beta')
 
     await higherFiber.dispose()
     const afterDisposal = await context.doppelgangerContext.resolve({
@@ -64,6 +69,8 @@ describe('context protocol', () => {
       tokenBudget: 30,
     })
     expect(afterDisposal.contributions.map(contribution => contribution.source)).toEqual(['memory.current-turn'])
+    expect(afterDisposal.instructions).toBe('')
+    expect(afterDisposal.data).toBe('memory:gamma')
 
     await lowerFiber.dispose()
     await context.fiber.dispose()
@@ -100,7 +107,9 @@ describe('context protocol', () => {
       turn: { input: 'irrelevant' },
       tokenBudget: 6,
     })
-    expect(result.content).toBe('abcde…')
+    expect(result).not.toHaveProperty('content')
+    expect(result.instructions).toBe('abcde…')
+    expect(result.data).toBe('')
     expect(result.tokenCount).toBe(6)
     expect(result.contributions[0]).toMatchObject({ source: 'identity', content: 'abcde…' })
     expect(result.omittedSources).toEqual(['memory'])

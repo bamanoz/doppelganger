@@ -511,7 +511,7 @@ describe('Node OMP runtime child', () => {
         catalog: { revision: 'catalog:0', tools: [] },
       })
       await expect(resolveContext(harness.peer, 'Current task')).resolves.toEqual({
-        content: '', contributions: [], omittedSources: [], tokenCount: 0,
+        instructions: '', data: '', contributions: [], omittedSources: [], tokenCount: 0,
       })
       await expect(invokeTool(harness.peer, 'generic.missing', {})).resolves.toEqual({
         ok: false,
@@ -520,6 +520,21 @@ describe('Node OMP runtime child', () => {
           message: 'the active Runtime Preset does not provide the tools protocol',
         },
       })
+      await expect(harness.peer.request('event.publish', {
+        protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+        type: 'session-started',
+        deliveryId: 'invalid-extra-field',
+        sessionId: 'omp-session',
+        timestamp: 1,
+        outcome: 'completed',
+      })).rejects.toThrow('unsupported fields: outcome')
+      await expect(harness.peer.request('event.publish', {
+        protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+        type: 'session-started',
+        deliveryId: 'invalid-session',
+        sessionId: 'other-session',
+        timestamp: 1,
+      })).rejects.toThrow('must equal Runtime Session "omp-session"')
     } catch (cause) {
       throw childError(harness, cause)
     } finally {
@@ -594,8 +609,9 @@ describe('Node OMP runtime child', () => {
       await expect(adapter.start()).resolves.toMatchObject({ state: 'active', catalog: { tools: [] } })
       const connection = adapter.connection()
       if (connection === undefined) throw new Error('standard adapter connection is inactive')
-      const context = await resolveContext(connection, 'Current task', 2000) as { content: string }
-      expect(context.content).toContain("You are the user's durable personal and technical assistant.")
+      const context = await resolveContext(connection, 'Current task', 2000) as { instructions: string; data: string }
+      expect(context.instructions).toContain("You are the user's durable personal and technical assistant.")
+      expect(context.data).toBe('')
     } finally {
       await adapter.dispose()
     }
@@ -738,12 +754,14 @@ describe('Node OMP runtime child', () => {
       }
       expect(activated.catalog.tools).toMatchObject([{ name: 'generic.echo', description: 'Project echo' }])
       await expect(resolveContext(harness.peer, 'Current task')).resolves.toMatchObject({
-        content: 'Project runtime context.',
+        instructions: 'Project runtime context.',
       })
 
       const afterProjectRemoval = await changedCatalog(harness.peer, async () => { await unlink(projectPatch) })
       expect(afterProjectRemoval.tools).toMatchObject([{ name: 'generic.echo', description: 'User echo' }])
-      await expect(resolveContext(harness.peer, 'User layer')).resolves.toMatchObject({ content: 'User runtime context.' })
+      await expect(resolveContext(harness.peer, 'User layer')).resolves.toMatchObject({
+        instructions: 'User runtime context.', data: '',
+      })
 
       const baseCatalog = await changedCatalog(harness.peer, async () => { await unlink(userPatch) })
       expect(baseCatalog.tools).toMatchObject([{
@@ -752,7 +770,7 @@ describe('Node OMP runtime child', () => {
         approval: { policy: 'required', reason: 'Review this exact generic invocation.' },
       }])
       await expect(resolveContext(harness.peer, 'Base layer')).resolves.toMatchObject({
-        content: 'Generic runtime context one.',
+        instructions: 'Generic runtime context one.',
       })
 
       const reloaded = await changedCatalog(harness.peer, async () => {
@@ -818,7 +836,7 @@ describe('Node OMP runtime child', () => {
         ok: true, value: { echoed: 'retained', generation: 'Reloaded project context.' },
       })
       await expect(resolveContext(harness.peer, 'Still active')).resolves.toMatchObject({
-        content: 'Reloaded project context.',
+        instructions: 'Reloaded project context.',
       })
     } catch (cause) {
       throw childError(harness, cause)
@@ -841,7 +859,7 @@ describe('Node OMP runtime child', () => {
         'evolution.reminder.record', 'evolution.snooze', 'evolution.transition',
       ])
       await expect(resolveContext(harness.peer, 'Improve reusable capability planning.')).resolves.toMatchObject({
-        content: expect.stringContaining('[Doppelganger Evolution Policy]'),
+        instructions: expect.stringContaining('[Doppelganger Evolution Policy]'),
       })
 
       const persona = await invokeEvolution(harness.peer, 'evolution.propose', {
@@ -1049,7 +1067,7 @@ describe('Node OMP runtime child', () => {
     try {
       await harness.peer.request('session.activate', activation(root))
       await expect(resolveContext(harness.peer, 'Review this implementation.')).resolves.toMatchObject({
-        content: expect.stringContaining('Prefer careful iteration.'),
+        instructions: expect.stringContaining('Prefer careful iteration.'),
       })
 
       const inspected = await invokeTool(harness.peer, 'persona.inspect', { target: 'trait:evolving-profile' })
@@ -1069,7 +1087,7 @@ describe('Node OMP runtime child', () => {
         value: { status: 'applied', target: 'trait:evolving-profile' },
       })
       await expect(resolveContext(harness.peer, 'Review this implementation.')).resolves.toMatchObject({
-        content: expect.stringContaining('Prefer verified, reversible evolution.'),
+        instructions: expect.stringContaining('Prefer verified, reversible evolution.'),
       })
     } catch (cause) {
       throw childError(harness, cause)

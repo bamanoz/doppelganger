@@ -93,17 +93,17 @@ describe('identity plugin', () => {
     await writeFile(identityPath, '# Test Persona\n\nPrefer verified evidence.')
     notify(identityUrl)
     await changed
-    expect((await resolver()).content).toContain('verified evidence')
+    expect((await resolver()).instructions).toContain('verified evidence')
     changed = observe(identityUrl, 'failed')
     await writeFile(identityPath, '')
     notify(identityUrl)
     await changed
-    expect((await resolver()).content).toContain('verified evidence')
+    expect((await resolver()).instructions).toContain('verified evidence')
     changed = observe(identityUrl, 'success')
     await writeFile(identityPath, '# Test Persona\n\nPrefer recoverable evidence.')
     notify(identityUrl)
     await changed
-    expect((await resolver()).content).toContain('recoverable evidence')
+    expect((await resolver()).instructions).toContain('recoverable evidence')
     await session.dispose()
     await runtime.dispose()
     await context.fiber.dispose()

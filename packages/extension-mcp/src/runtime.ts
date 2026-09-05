@@ -106,7 +106,7 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
     } catch (cause) {
       for (const slot of installed) {
         this.#servers.delete(slot.config.id)
-        slot.registration.dispose()
+        this.#trackCleanup(slot.registration.dispose(), slot.config.id)
         this.#trackCleanup(slot.generation.dispose(), slot.config.id)
       }
       throw cause
@@ -128,7 +128,9 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
         additionRegistrations.set(server.id, this.#tools.registerSet(this.#ownerId(server.id), []))
       }
     } catch (cause) {
-      for (const registration of additionRegistrations.values()) registration.dispose()
+      for (const [serverId, registration] of additionRegistrations) {
+        this.#trackCleanup(registration.dispose(), serverId)
+      }
       throw cause
     }
 
@@ -142,7 +144,7 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
       current.definitions = Object.freeze([])
 
       if (replacement === undefined) {
-        current.registration.dispose()
+        this.#trackCleanup(current.registration.dispose(), id)
       } else {
         const generation = new McpClientGeneration(this, replacement)
         const slot: ServerSlot = {
@@ -183,9 +185,11 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
     this.#disposed = true
     const slots = [...this.#servers.values()]
     this.#servers.clear()
-    for (const slot of slots) slot.registration.dispose()
 
-    const disposal = slots.map(slot => slot.generation.dispose())
+    const disposal = slots.flatMap(slot => [
+      slot.registration.dispose(),
+      slot.generation.dispose(),
+    ])
     const settlements = await Promise.allSettled([...disposal, ...this.#background])
     const failures = [...this.#cleanupFailures]
     for (const settlement of settlements) {

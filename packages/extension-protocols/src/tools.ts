@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { Context, Service, type Logger } from '@deepseek-ai/cordis'
+import { canonicalJson, cloneJsonValue, isJsonObjectPrototype, type JsonValue } from './json-value.ts'
 
-export type JsonPrimitive = boolean | number | string | null
-export type JsonValue = JsonPrimitive | { readonly [key: string]: JsonValue } | readonly JsonValue[]
+export type { JsonPrimitive, JsonValue } from './json-value.ts'
 
 export interface ToolApprovalRequirement {
   readonly policy: 'required'
@@ -79,12 +79,18 @@ export type ToolInvocationResult =
 
 export interface ToolRegistration {
   update(definition: ToolDefinition): void
-  dispose(): void
+  dispose(): Promise<void>
 }
 
 export interface ToolSetRegistration {
   replace(definitions: readonly ToolDefinition[]): void
-  dispose(): void
+  dispose(): Promise<void>
+}
+
+export interface ToolCatalogDiagnostic {
+  readonly code: 'TOOL_CATALOG_OBSERVER_FAILED'
+  readonly revision: string
+  readonly message: string
 }
 
 interface ValidatedToolDefinition extends ToolDefinition {
@@ -104,8 +110,12 @@ interface OwnedSet {
 }
 
 interface ActiveCall {
+  readonly ownerToken: symbol
+  readonly toolName: string
+  readonly toolRevision: string
   readonly controller: AbortController
   readonly settled: Promise<void>
+  cancellationSource?: 'host' | 'owner'
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -113,39 +123,17 @@ declare module '@deepseek-ai/cordis' {
     doppelgangerTools: ToolRegistry
   }
   interface Events {
-    'doppelganger/tools-changed'(revision: string): void
+    'doppelganger/tools-changed'(revision: string): void | Promise<void>
+    'doppelganger/tools-diagnostic'(diagnostic: ToolCatalogDiagnostic): void | Promise<void>
   }
 }
 
 const TOOL_NAME = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/
 const MAX_TOOL_APPROVAL_REASON_LENGTH = 1_024
+const TOOL_JSON_LIMITS = Object.freeze({ maximumBytes: 1024 * 1024, maximumDepth: 64 })
 
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const child of Object.values(value)) deepFreeze(child)
-    Object.freeze(value)
-  }
-  return value
-}
-
-function jsonClone(value: JsonValue, label: string): JsonValue {
-  let serialized: string | undefined
-  try {
-    serialized = JSON.stringify(value)
-  } catch (cause) {
-    throw new TypeError(`${label} must be JSON-serializable`, { cause })
-  }
-  if (serialized === undefined) throw new TypeError(`${label} must be JSON-serializable`)
-  return deepFreeze(JSON.parse(serialized) as JsonValue)
-}
-
-function canonicalJson(value: JsonValue): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  return `{${Object.entries(value)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
-    .join(',')}}`
+function jsonClone(value: unknown, label: string): JsonValue {
+  return cloneJsonValue(value, label, TOOL_JSON_LIMITS)
 }
 
 export function digestToolInput(input: JsonValue): string {
@@ -158,56 +146,72 @@ function nonEmpty(label: string, value: unknown): string {
   return value.trim()
 }
 
+function ownDataObject(value: unknown, label: string): Readonly<Record<string, unknown>> {
+  if (value === null || Array.isArray(value) || typeof value !== 'object') {
+    throw new TypeError(`${label} must be an object`)
+  }
+  const prototype = Object.getPrototypeOf(value)
+  if (!isJsonObjectPrototype(prototype)) throw new TypeError(`${label} must be a plain object`)
+  if (Object.getOwnPropertySymbols(value).length > 0) throw new TypeError(`${label} must not contain symbol properties`)
+  const result = Object.create(null) as Record<string, unknown>
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+    if (!('value' in descriptor)) throw new TypeError(`${label}.${key} must not be an accessor`)
+    if (descriptor.enumerable !== true) throw new TypeError(`${label}.${key} must be enumerable`)
+    Object.defineProperty(result, key, {
+      value: descriptor.value,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    })
+  }
+  return Object.freeze(result)
+}
+
 function validateApproval(
   input: ToolApprovalRequirement | undefined,
   name: string,
 ): ToolApprovalRequirement | undefined {
   if (input === undefined) return undefined
-  if (input === null || Array.isArray(input) || typeof input !== 'object') {
-    throw new TypeError(`tool "${name}" approval must be an object`)
-  }
-  const keys = Object.keys(input)
+  const candidate = ownDataObject(input, `tool "${name}" approval`)
+  const keys = Object.keys(candidate)
   if (keys.some(key => key !== 'policy' && key !== 'reason')) {
     throw new TypeError(`tool "${name}" approval contains unsupported fields`)
   }
-  if (input.policy !== 'required') throw new TypeError(`tool "${name}" approval policy must be "required"`)
+  if (candidate.policy !== 'required') throw new TypeError(`tool "${name}" approval policy must be "required"`)
   let reason: string | undefined
-  if (input.reason !== undefined) {
-    reason = nonEmpty(`tool "${name}" approval reason`, input.reason)
+  if (candidate.reason !== undefined) {
+    reason = nonEmpty(`tool "${name}" approval reason`, candidate.reason)
     if (reason.length > MAX_TOOL_APPROVAL_REASON_LENGTH) {
       throw new TypeError(`tool "${name}" approval reason must contain 1-${MAX_TOOL_APPROVAL_REASON_LENGTH} characters`)
     }
   }
   return Object.freeze({ policy: 'required', ...(reason === undefined ? {} : { reason }) })
-
 }
 
 function validateDefinition(definition: ToolDefinition): ValidatedToolDefinition {
-  if (definition === null || Array.isArray(definition) || typeof definition !== 'object') {
-    throw new TypeError('tool definition must be an object')
-  }
-  const name = nonEmpty('tool name', definition.name)
+  const candidate = ownDataObject(definition, 'tool definition')
+  const name = nonEmpty('tool name', candidate.name)
   if (!TOOL_NAME.test(name)) {
     throw new TypeError('tool name must be a lowercase plugin-qualified name such as "memory.search"')
   }
-  const label = definition.label === undefined ? name : nonEmpty(`tool "${name}" label`, definition.label)
-  const description = nonEmpty(`tool "${name}" description`, definition.description)
-  const inputSchema = jsonClone(definition.inputSchema, `tool "${name}" input schema`)
+  const label = candidate.label === undefined ? name : nonEmpty(`tool "${name}" label`, candidate.label)
+  const description = nonEmpty(`tool "${name}" description`, candidate.description)
+  const inputSchema = jsonClone(candidate.inputSchema, `tool "${name}" input schema`)
   if (inputSchema === null || Array.isArray(inputSchema) || typeof inputSchema !== 'object') {
     throw new TypeError(`tool "${name}" input schema must be a JSON object`)
   }
-  if (typeof definition.invoke !== 'function') throw new TypeError(`tool "${name}" invoke must be a function`)
-  if (definition.available !== undefined && typeof definition.available !== 'boolean') {
+  if (typeof candidate.invoke !== 'function') throw new TypeError(`tool "${name}" invoke must be a function`)
+  if (candidate.available !== undefined && typeof candidate.available !== 'boolean') {
     throw new TypeError(`tool "${name}" available must be a boolean`)
   }
-  const approval = validateApproval(definition.approval, name)
+  const approval = validateApproval(candidate.approval as ToolApprovalRequirement | undefined, name)
   return Object.freeze({
     name,
     label,
     description,
     inputSchema: inputSchema as { readonly [key: string]: JsonValue },
-    available: definition.available ?? true,
-    invoke: definition.invoke,
+    available: candidate.available ?? true,
+    invoke: candidate.invoke as ToolDefinition['invoke'],
     ...(approval === undefined ? {} : { approval }),
   })
 }
@@ -283,7 +287,7 @@ export class ToolRegistry extends Service {
     return `tool:${++this.toolSequence}`
   }
 
-  private rebuildSnapshot(): string {
+  private commitSnapshot(): string {
     const descriptors = [...this.ownerSets.values()]
       .flatMap(owner => [...owner.tools.values()])
       .map(({ definition, revision }) => Object.freeze({
@@ -298,9 +302,34 @@ export class ToolRegistry extends Service {
       .sort((left, right) => left.name.localeCompare(right.name))
     const revision = `catalog:${++this.catalogSequence}`
     this.currentSnapshot = Object.freeze({ revision, tools: Object.freeze(descriptors) })
-    this.ctx.emit('doppelganger/tools-changed', revision)
     this.logger.debug('tools.catalog.changed tools=%d revision=%s', descriptors.length, revision)
     return revision
+  }
+
+  private notifyCatalogChanged(revision: string): void {
+    void this.ctx.parallel('doppelganger/tools-changed', revision).catch(async cause => {
+      const message = cause instanceof AggregateError
+        ? cause.errors.map(error => error instanceof Error ? error.message : String(error)).join('; ')
+        : cause instanceof Error ? cause.message : String(cause)
+      const diagnostic: ToolCatalogDiagnostic = Object.freeze({
+        code: 'TOOL_CATALOG_OBSERVER_FAILED',
+        revision,
+        message,
+      })
+      try {
+        await this.ctx.parallel('doppelganger/tools-diagnostic', diagnostic)
+      } catch {
+        // Diagnostics must not reintroduce observer failure into a committed catalog mutation.
+      }
+    })
+  }
+
+  private abortCalls(calls: readonly ActiveCall[], reason: string): void {
+    for (const active of calls) {
+      if (active.controller.signal.aborted) continue
+      active.cancellationSource = 'owner'
+      active.controller.abort(reason)
+    }
   }
 
   private replaceOwnedSet(owner: OwnedSet, definitions: readonly ToolDefinition[]): void {
@@ -330,8 +359,14 @@ export class ToolRegistry extends Service {
     const unchanged = candidate.size === owner.tools.size
       && [...candidate].every(([name, tool]) => owner.tools.get(name)?.revision === tool.revision)
     if (unchanged) return
+    const retired = [...this.activeCalls.values()].filter(active => (
+      active.ownerToken === owner.token
+      && candidate.get(active.toolName)?.revision !== active.toolRevision
+    ))
     owner.tools = candidate
-    this.rebuildSnapshot()
+    const revision = this.commitSnapshot()
+    this.abortCalls(retired, `tool set "${owner.ownerId}" replaced the active tool implementation`)
+    this.notifyCatalogChanged(revision)
   }
 
   registerSet(ownerIdInput: string, definitions: readonly ToolDefinition[]): ToolSetRegistration {
@@ -341,6 +376,7 @@ export class ToolRegistry extends Service {
     this.ownerSets.set(owner.token, owner)
     this.ownerIds.set(ownerId, owner.token)
     let disposed = false
+    let disposal: Promise<void> | undefined
     try {
       this.replaceOwnedSet(owner, definitions)
     } catch (cause) {
@@ -348,32 +384,44 @@ export class ToolRegistry extends Service {
       this.ownerIds.delete(ownerId)
       throw cause
     }
-    const disposeEffect = this.ctx.effect(() => () => {
+    const disposeOwner = () => disposal ??= (async () => {
       if (disposed) return
       disposed = true
+      const active = [...this.activeCalls.values()].filter(call => call.ownerToken === owner.token)
       this.ownerSets.delete(owner.token)
       this.ownerIds.delete(ownerId)
-      if (owner.tools.size > 0) this.rebuildSnapshot()
+      const changed = owner.tools.size > 0
       owner.tools = new Map()
-    }, `doppelgangerTools.registerSet(${ownerId})`)
+      const revision = changed ? this.commitSnapshot() : undefined
+      this.abortCalls(active, `tool set "${ownerId}" disposed`)
+      if (revision !== undefined) this.notifyCatalogChanged(revision)
+      await Promise.all(active.map(call => call.settled))
+    })()
+    const disposeEffect = this.ctx.effect(() => disposeOwner, `doppelgangerTools.registerSet(${ownerId})`)
 
     return Object.freeze({
       replace: (next: readonly ToolDefinition[]) => {
         if (disposed) throw new Error(`tool set "${ownerId}" is disposed`)
         this.replaceOwnedSet(owner, next)
       },
-      dispose: () => { void disposeEffect() },
+      dispose: () => {
+        if (disposal !== undefined) return disposal
+        const effectResult = disposeEffect()
+        return disposal ??= effectResult ?? Promise.resolve()
+      },
     })
   }
 
   register(definition: ToolDefinition): ToolRegistration {
-    const ownerId = `single:${++this.singleOwnerSequence}:${definition.name}`
-    const set = this.registerSet(ownerId, [definition])
+    let current = validateDefinition(definition)
+    const ownerId = `single:${++this.singleOwnerSequence}:${current.name}`
+    const set = this.registerSet(ownerId, [current])
     return Object.freeze({
       update: (next: ToolDefinition) => {
-        if (next.name.trim() !== definition.name.trim()) throw new Error('a tool registration cannot change its name')
-        set.replace([next])
-        definition = next
+        const validated = validateDefinition(next)
+        if (validated.name !== current.name) throw new Error('a tool registration cannot change its name')
+        set.replace([validated])
+        current = validated
       },
       dispose: set.dispose,
     })
@@ -384,18 +432,20 @@ export class ToolRegistry extends Service {
   }
 
   async invoke(request: ToolInvocationRequest, sessionIdInput: string): Promise<ToolInvocationResult> {
+    let candidate: ToolInvocationRequest
     let sessionId: string
     let callId: string
     let name: string
     let toolRevision: string
     let clonedInput: JsonValue
     try {
+      candidate = cloneJsonValue(request, 'tool invocation request', TOOL_JSON_LIMITS) as unknown as ToolInvocationRequest
       sessionId = nonEmpty('tool invocation sessionId', sessionIdInput)
-      callId = nonEmpty('tool invocation callId', request.callId)
-      name = nonEmpty('tool invocation name', request.name)
-      toolRevision = nonEmpty('tool invocation toolRevision', request.toolRevision)
-      if (request.turnId !== undefined) nonEmpty('tool invocation turnId', request.turnId)
-      clonedInput = jsonClone(request.input, `tool "${name}" input`)
+      callId = nonEmpty('tool invocation callId', candidate.callId)
+      name = nonEmpty('tool invocation name', candidate.name)
+      toolRevision = nonEmpty('tool invocation toolRevision', candidate.toolRevision)
+      if (candidate.turnId !== undefined) nonEmpty('tool invocation turnId', candidate.turnId)
+      clonedInput = jsonClone(candidate.input, `tool "${name}" input`)
     } catch (cause) {
       this.logger.warn('tools.invoke.rejected tool=unknown code=INVALID_INPUT')
       return failure('INVALID_INPUT', cause instanceof Error ? cause.message : String(cause))
@@ -405,27 +455,30 @@ export class ToolRegistry extends Service {
       this.logger.warn('tools.invoke.rejected tool=%s code=%s', name, code)
       return failure(code, message)
     }
-
-    this.logger.debug('tools.invoke.started tool=%s', name)
-    const current = [...this.ownerSets.values()].map(owner => owner.tools.get(name)).find(tool => tool !== undefined)
-    if (current === undefined) return rejected('TOOL_NOT_FOUND', `tool "${name}" is not registered`)
+    const owned = [...this.ownerSets.values()]
+      .map(owner => ({ owner, tool: owner.tools.get(name) }))
+      .find(candidate => candidate.tool !== undefined)
+    if (owned === undefined || owned.tool === undefined) return rejected('TOOL_NOT_FOUND', `tool "${name}" is not registered`)
+    const current = owned.tool
     if (current.revision !== toolRevision) {
       return rejected('TOOL_REVISION_STALE', `tool "${name}" revision is stale`)
     }
+
+    this.logger.debug('tools.invoke.started tool=%s', name)
     if (!current.definition.available) return rejected('TOOL_UNAVAILABLE', `tool "${name}" is unavailable`)
     if (this.activeCalls.has(callId)) return rejected('TOOL_CALL_ACTIVE', `tool call "${callId}" is already active`)
 
     if (current.definition.approval === undefined) {
-      if (request.approval !== undefined) {
+      if (candidate.approval !== undefined) {
         return rejected('TOOL_APPROVAL_INVALID', `tool "${name}" does not accept an approval grant`)
       }
     } else {
-      if (request.approval === undefined) {
+      if (candidate.approval === undefined) {
         return rejected('TOOL_APPROVAL_REQUIRED', `tool "${name}" requires explicit approval`)
       }
       let approval: ToolApprovalGrant
       try {
-        approval = validateGrant(request.approval)
+        approval = validateGrant(candidate.approval)
       } catch (cause) {
         return rejected('TOOL_APPROVAL_INVALID', cause instanceof Error ? cause.message : String(cause))
       }
@@ -442,23 +495,41 @@ export class ToolRegistry extends Service {
     const controller = new AbortController()
     let settle!: () => void
     const settled = new Promise<void>(resolve => { settle = resolve })
-    this.activeCalls.set(callId, { controller, settled })
+    this.activeCalls.set(callId, {
+      ownerToken: owned.owner.token,
+      toolName: name,
+      toolRevision,
+      controller,
+      settled,
+    })
     const invocationContext = Object.freeze({
       sessionId,
       callId,
-      ...(request.turnId === undefined ? {} : { turnId: request.turnId.trim() }),
+      ...(candidate.turnId === undefined ? {} : { turnId: candidate.turnId.trim() }),
       signal: controller.signal,
     })
     try {
-      const value = jsonClone(
-        await current.definition.invoke(clonedInput, invocationContext),
-        `tool "${name}" result`,
-      )
+      const result = await current.definition.invoke(clonedInput, invocationContext)
+      if (controller.signal.aborted) {
+        this.logger.warn('tools.invoke.completed tool=%s outcome=failed code=TOOL_CANCELLED', name)
+        return failure('TOOL_CANCELLED', `tool "${name}" was cancelled`)
+      }
+      const value = jsonClone(result, `tool "${name}" result`)
       this.logger.debug('tools.invoke.completed tool=%s outcome=completed', name)
       return Object.freeze({ ok: true, value })
     } catch (cause) {
-      this.logger.warn('tools.invoke.completed tool=%s outcome=failed code=%s', name, controller.signal.aborted ? 'TOOL_CANCELLED' : cause instanceof ToolInvocationError ? cause.code : 'TOOL_EXECUTION_FAILED')
-      if (controller.signal.aborted) return failure('TOOL_CANCELLED', `tool "${name}" was cancelled`)
+      const active = this.activeCalls.get(callId)
+      const code = active?.cancellationSource === 'host'
+        ? 'TOOL_CANCELLED'
+        : cause instanceof ToolInvocationError
+          ? cause.code
+          : controller.signal.aborted
+            ? 'TOOL_CANCELLED'
+            : 'TOOL_EXECUTION_FAILED'
+      this.logger.warn('tools.invoke.completed tool=%s outcome=failed code=%s', name, code)
+      if (active?.cancellationSource === 'host') {
+        return failure('TOOL_CANCELLED', `tool "${name}" was cancelled`)
+      }
       if (cause instanceof ToolInvocationError) {
         return failure(
           cause.code,
@@ -466,6 +537,7 @@ export class ToolRegistry extends Service {
           cause.data === undefined ? undefined : jsonClone(cause.data, `tool "${name}" error data`),
         )
       }
+      if (controller.signal.aborted) return failure('TOOL_CANCELLED', `tool "${name}" was cancelled`)
       return failure('TOOL_EXECUTION_FAILED', cause instanceof Error ? cause.message : String(cause))
     } finally {
       this.logger.debug('tools.invoke.settled tool=%s', name)
@@ -475,18 +547,22 @@ export class ToolRegistry extends Service {
   }
 
   cancel(request: ToolCancellationRequest): ToolCancellationResult {
-    const callId = nonEmpty('tool cancellation callId', request.callId)
-    if (request.reason !== undefined) nonEmpty('tool cancellation reason', request.reason)
+    const candidate = cloneJsonValue(request, 'tool cancellation request', TOOL_JSON_LIMITS) as unknown as ToolCancellationRequest
+    const callId = nonEmpty('tool cancellation callId', candidate.callId)
+    if (candidate.reason !== undefined) nonEmpty('tool cancellation reason', candidate.reason)
     const active = this.activeCalls.get(callId)
     if (active === undefined || active.controller.signal.aborted) return Object.freeze({ cancelled: false })
-    active.controller.abort(request.reason)
+    active.cancellationSource = 'host'
+    active.controller.abort(candidate.reason)
     return Object.freeze({ cancelled: true })
   }
 
   async disposeActiveCalls(reason: string): Promise<void> {
     const calls = [...this.activeCalls.values()]
     for (const active of calls) {
-      if (!active.controller.signal.aborted) active.controller.abort(reason)
+      if (active.controller.signal.aborted) continue
+      active.cancellationSource = 'owner'
+      active.controller.abort(reason)
     }
     await Promise.all(calls.map(active => active.settled))
   }

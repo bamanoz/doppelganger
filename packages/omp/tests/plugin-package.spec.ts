@@ -692,12 +692,15 @@ function projectedContext(run: LinkedOmpRun): string {
   const request = run.input.find(message => message.method === 'context.resolve')
   if (request?.id === undefined) throw new Error(`missing captured context.resolve request: ${run.stderr}`)
   const response = run.output.find(message => message.id === request.id)
-  if (response?.result === null || typeof response?.result !== 'object' || !('content' in response.result)) {
+  if (response?.result === null || typeof response?.result !== 'object'
+    || !('instructions' in response.result) || !('data' in response.result)) {
     throw new Error(`missing captured context.resolve response: ${run.stderr}`)
   }
-  const content = response.result.content
-  if (typeof content !== 'string') throw new Error('captured context content is not a string')
-  return content
+  const { instructions, data } = response.result
+  if (typeof instructions !== 'string' || typeof data !== 'string') {
+    throw new Error('captured context instructions or data are not strings')
+  }
+  return [instructions, data].filter(content => content.length > 0).join('\n')
 }
 
 afterEach(async () => {
@@ -1045,9 +1048,12 @@ describe('local OMP plugin package', () => {
           if (request?.id === undefined) return
           const output = await capturedMessages(fixture.captureRoot, '.out.bin')
           const response = output.find(message => message.id === request.id)
-          if (response?.result === null || typeof response?.result !== 'object' || !('content' in response.result)
-            || typeof response.result.content !== 'string') return
-          return response.result.content.includes('[Evolution reminder candidate;') ? undefined : true
+          if (response?.result === null || typeof response?.result !== 'object'
+            || !('instructions' in response.result) || !('data' in response.result)
+            || typeof response.result.instructions !== 'string' || typeof response.result.data !== 'string') return
+          return `${response.result.instructions}\n${response.result.data}`.includes('[Evolution reminder candidate;')
+            ? undefined
+            : true
         })
       })
       expect(activationRequest(run).params).toMatchObject({

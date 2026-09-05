@@ -1,5 +1,5 @@
 import { Ajv, type AnySchema, type ValidateFunction } from 'ajv'
-import type { JsonValue } from './tools.ts'
+import { cloneJsonValue, type JsonValue } from './json-value.ts'
 
 export const STRUCTURED_INFERENCE_SERVICE = 'doppelgangerInference' as const
 
@@ -156,50 +156,6 @@ function isAbortSignal(value: unknown): value is AbortSignal {
     && typeof (value as AbortSignal).removeEventListener === 'function'
 }
 
-function validateJsonValue(
-  value: unknown,
-  label: string,
-  maximumDepth: number,
-  seen = new WeakSet<object>(),
-  depth = 0,
-): asserts value is JsonValue {
-  if (depth > maximumDepth) throw new TypeError(`${label} exceeds maximum depth ${maximumDepth}`)
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new TypeError(`${label} contains a non-finite number`)
-    return
-  }
-  if (typeof value !== 'object') throw new TypeError(`${label} must be JSON-compatible`)
-  if (seen.has(value)) throw new TypeError(`${label} must not contain cycles`)
-  seen.add(value)
-  if (Array.isArray(value)) {
-    value.forEach((child, index) => validateJsonValue(child, `${label}[${index}]`, maximumDepth, seen, depth + 1))
-  } else {
-    const prototype = Object.getPrototypeOf(value)
-    if (prototype !== Object.prototype && prototype !== null) throw new TypeError(`${label} must contain only JSON objects`)
-    for (const [key, child] of Object.entries(value)) {
-      validateJsonValue(child, `${label}.${key}`, maximumDepth, seen, depth + 1)
-    }
-  }
-  seen.delete(value)
-}
-
-function jsonClone<T extends JsonValue>(value: T, label: string, maximumBytes: number): T {
-  validateJsonValue(value, label, MAX_OUTPUT_DEPTH)
-  const encoded = JSON.stringify(value)
-  if (Buffer.byteLength(encoded, 'utf8') > maximumBytes) {
-    throw new TypeError(`${label} exceeds ${maximumBytes} bytes`)
-  }
-  return deepFreeze(JSON.parse(encoded) as T)
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const child of Object.values(value)) deepFreeze(child)
-    Object.freeze(value)
-  }
-  return value
-}
 
 function schemaArray(value: unknown, path: string, allowEmpty = false): readonly unknown[] {
   if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
@@ -263,12 +219,8 @@ function validatePortableSchemaNode(schema: unknown, path: string, state: { node
   }
   for (const keyword of ['enum', 'examples'] as const) {
     if (node[keyword] !== undefined) {
-      const values = schemaArray(node[keyword], `${path}.${keyword}`, keyword === 'examples')
-      validateJsonValue(values, `${path}.${keyword}`, MAX_SCHEMA_DEPTH)
+      schemaArray(node[keyword], `${path}.${keyword}`, keyword === 'examples')
     }
-  }
-  for (const keyword of ['const', 'default'] as const) {
-    if (node[keyword] !== undefined) validateJsonValue(node[keyword], `${path}.${keyword}`, MAX_SCHEMA_DEPTH)
   }
   if (node.properties !== undefined) {
     const properties = object(node.properties, `${path}.properties`)
@@ -308,8 +260,10 @@ function validatePortableSchemaNode(schema: unknown, path: string, state: { node
 }
 
 function compileOutputSchema(value: unknown): { schema: Readonly<Record<string, JsonValue>>; validate: ValidateFunction } {
-  validateJsonValue(value, 'structured inference output schema', MAX_SCHEMA_DEPTH)
-  const schema = jsonClone(value as Record<string, JsonValue>, 'structured inference output schema', MAX_SCHEMA_BYTES)
+  const schema = cloneJsonValue<Record<string, JsonValue>>(value, 'structured inference output schema', {
+    maximumBytes: MAX_SCHEMA_BYTES,
+    maximumDepth: MAX_SCHEMA_DEPTH,
+  })
   if (schema === null || Array.isArray(schema) || typeof schema !== 'object') {
     throw new TypeError('structured inference output schema must be an object')
   }
@@ -404,13 +358,27 @@ export function createStructuredInference(provider: StructuredInferenceProvider)
       } catch (cause) {
         throw normalizeProviderError(cause)
       }
-      if (result === null || typeof result !== 'object' || !('value' in result)) {
+      let resultObject: Record<string, JsonValue>
+      try {
+        resultObject = cloneJsonValue<Record<string, JsonValue>>(result, 'structured inference result', {
+          maximumBytes: MAX_OUTPUT_BYTES + 4_096,
+          maximumDepth: MAX_OUTPUT_DEPTH + 2,
+        })
+      } catch (cause) {
+        throw new StructuredInferenceError(
+          'INVALID_OUTPUT',
+          cause instanceof Error ? cause.message : 'Structured inference result is invalid',
+        )
+      }
+      if (!Object.hasOwn(resultObject, 'value')) {
         throw new StructuredInferenceError('MISSING_OUTPUT', 'Structured inference provider returned no structured output')
       }
-      const resultObject = result as unknown as Record<string, unknown>
       try {
         exactKeys(resultObject, ['value'], ['usage'], 'structured inference result')
-        const value = jsonClone(resultObject.value as JsonValue, 'structured inference result value', MAX_OUTPUT_BYTES)
+        const value = cloneJsonValue<JsonValue>(resultObject.value, 'structured inference result value', {
+          maximumBytes: MAX_OUTPUT_BYTES,
+          maximumDepth: MAX_OUTPUT_DEPTH,
+        })
         if (!normalized.validate(value)) {
           throw new TypeError(`structured inference result does not match output schema: ${schemaValidator.errorsText(normalized.validate.errors)}`)
         }

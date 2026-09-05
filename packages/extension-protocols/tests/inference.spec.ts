@@ -134,6 +134,18 @@ describe('structured inference protocol', () => {
       value: { answer: 'x'.repeat(1024 * 1024), confidence: 1 },
     })).infer(request()), 'INVALID_OUTPUT')
     await expectError(service(async () => ({} as StructuredInferenceResult)).infer(request()), 'MISSING_OUTPUT')
+    const coercion = vi.fn(() => ({ answer: 'coerced', confidence: 1 }))
+    await expectError(service(async () => ({
+      value: { answer: 'unsafe', confidence: 1, toJSON: coercion } as never,
+    })).infer(request()), 'INVALID_OUTPUT')
+    expect(coercion).not.toHaveBeenCalled()
+
+    const getter = vi.fn(() => ({ answer: 'unsafe', confidence: 1 }))
+    await expectError(service(async () => Object.defineProperty({}, 'value', {
+      enumerable: true,
+      get: getter,
+    }) as StructuredInferenceResult).infer(request()), 'INVALID_OUTPUT')
+    expect(getter).not.toHaveBeenCalled()
   })
 
   it('honors pre-dispatch cancellation and preserves bounded shared errors', async () => {

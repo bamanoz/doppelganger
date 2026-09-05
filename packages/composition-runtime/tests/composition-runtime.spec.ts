@@ -487,6 +487,102 @@ describe('layered activation and session isolation', () => {
     await runtimeDisposal
   })
 
+  it('cleans the attempted session when watch registration fails after activation', async () => {
+    const context = new Context()
+    let registrations = 0
+    let watchDisposals = 0
+    let sessionDisposals = 0
+    const fakeHmrOwner = context.plugin({
+      name: 'failing-watch-acquisition',
+      apply(ctx) {
+        ctx.provide('hmr', {
+          async registerConfig() {
+            registrations += 1
+            if (registrations === 2) throw new Error('second watch registration failed')
+            return async () => { watchDisposals += 1 }
+          },
+        } as never)
+      },
+    })
+    await fakeHmrOwner.await()
+    const files = await composition([])
+    const patchPath = join(dirname(files.definition.loaderPath), 'runtime.patch.yml')
+    await writeFile(patchPath, '[]\n')
+    const definition = createCompositionDefinition({
+      ...files.definition,
+      patches: [{ source: 'watch failure fixture', filename: patchPath, optional: false }],
+    })
+    const runtime = createCompositionRuntime({ context })
+
+    await expect(runtime.activate({
+      composition: definition,
+      sessionId: 'watch-acquisition-failure',
+      runtimePlugins: {
+        effect: {
+          name: 'watch-acquisition-session-effect',
+          apply() { return () => { sessionDisposals += 1 } },
+        },
+      },
+    })).rejects.toThrow('second watch registration failed')
+    expect(watchDisposals).toBe(1)
+    expect(sessionDisposals).toBe(1)
+    await expect(runtime.dispose()).resolves.toBeUndefined()
+    expect(watchDisposals).toBe(1)
+    expect(sessionDisposals).toBe(1)
+    await context.fiber.dispose()
+  })
+
+  it('aggregates watch acquisition and attempted-session cleanup failures', async () => {
+    const context = new Context()
+    let registrations = 0
+    let siblingDisposals = 0
+    const fakeHmrOwner = context.plugin({
+      name: 'aggregate-watch-acquisition',
+      apply(ctx) {
+        ctx.provide('hmr', {
+          async registerConfig() {
+            registrations += 1
+            if (registrations === 2) throw new Error('watch acquisition failed')
+            return async () => { throw new Error('acquired watch cleanup failed') }
+          },
+        } as never)
+      },
+    })
+    await fakeHmrOwner.await()
+    const files = await composition([])
+    const patchPath = join(dirname(files.definition.loaderPath), 'aggregate.patch.yml')
+    await writeFile(patchPath, '[]\n')
+    const definition = createCompositionDefinition({
+      ...files.definition,
+      patches: [{ source: 'aggregate watch fixture', filename: patchPath, optional: false }],
+    })
+    const runtime = createCompositionRuntime({ context })
+
+    const failure = await runtime.activate({
+      composition: definition,
+      sessionId: 'aggregate-watch-failure',
+      runtimePlugins: {
+        failing: {
+          name: 'aggregate-watch-failing-effect',
+          apply() { return () => { throw new Error('attempted session cleanup failed') } },
+        },
+        sibling: {
+          name: 'aggregate-watch-sibling-effect',
+          apply() { return () => { siblingDisposals += 1 } },
+        },
+      },
+    }).catch(error => error)
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(failure.errors[0]).toMatchObject({ message: 'watch acquisition failed' })
+    expect(failure.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ message: 'acquired watch cleanup failed' }),
+      expect.objectContaining({ message: 'attempted session cleanup failed' }),
+    ]))
+    expect(siblingDisposals).toBe(1)
+    await expect(runtime.dispose()).resolves.toBeUndefined()
+    await context.fiber.dispose()
+  })
+
   it('exhausts session cleanup after plugin and watch disposers fail while preserving siblings and a caller-owned root', async () => {
     const context = new Context()
     let watchDisposals = 0

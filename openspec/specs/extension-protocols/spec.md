@@ -10,13 +10,13 @@ Feature plugins SHALL be able to register scoped context providers whose registr
 
 #### Scenario: Provider contributes context
 - **ID**: `extension-protocols.context.provider-contributes`
-- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::resolves turn-sensitive providers in deterministic priority order within budget`
+- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::assembles instruction and data authority without promotion`
 - **WHEN** a host requests context for a turn
 - **THEN** every active provider in the session scope can return context contributions for that request
 
 #### Scenario: Provider is disposed
 - **ID**: `extension-protocols.context.provider-disposed`
-- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::resolves turn-sensitive providers in deterministic priority order within budget`
+- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::assembles instruction and data authority without promotion`
 - **WHEN** the plugin owning a context provider is disposed or reloaded
 - **THEN** the provider is no longer included in subsequent context resolution
 
@@ -25,14 +25,14 @@ The context assembler SHALL combine active contributions deterministically and S
 
 #### Scenario: Contributions exceed budget
 - **ID**: `extension-protocols.context.budget-priority`
-- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::resolves turn-sensitive providers in deterministic priority order within budget`
+- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::assembles instruction and data authority without promotion`
 - **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::truncates opted-in contributions and omits lower-priority content`
 - **WHEN** resolved contributions exceed the available persona-context budget
 - **THEN** the assembler retains higher-priority configured contributions and excludes lower-priority content until the result fits the budget
 
 #### Scenario: Turn-sensitive provider
 - **ID**: `extension-protocols.context.turn-sensitive-provider`
-- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::resolves turn-sensitive providers in deterministic priority order within budget`
+- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::assembles instruction and data authority without promotion`
 - **WHEN** a provider uses the current turn to select relevant content
 - **THEN** the assembled result reflects the current request without changing the provider's registration
 
@@ -87,7 +87,7 @@ Context providers SHALL return source-identified contributions with explicit aut
 
 #### Scenario: Multiple providers contribute context
 - **ID**: `extension-protocols.context.authority-aware-assembly`
-- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::resolves turn-sensitive providers in deterministic priority order within budget`
+- **EVIDENCE**: `packages/extension-protocols/tests/context-protocol.spec.ts::assembles instruction and data authority without promotion`
 - **WHEN** identity, traits, memory, and another extension resolve context for one turn
 - **THEN** their contributions are assembled deterministically by authority-aware priority within the host budget
 
@@ -261,7 +261,7 @@ Tool handlers SHALL receive the portable invocation context and return structure
 
 #### Scenario: Handler returns a structured value
 - **ID**: `extension.protocols.handler-returns-a-structured-value`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::rejects non-plain tool input before cloning or approval digesting`
 - **WHEN** a registered handler returns a JSON-compatible value
 - **THEN** the invocation result returns that value separately from the tool definition and the descriptor remains immutable
 
@@ -273,7 +273,7 @@ Tool handlers SHALL receive the portable invocation context and return structure
 
 #### Scenario: Handler observes abort
 - **ID**: `extension.protocols.handler-observes-abort`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::rejects stale revisions, correlates active calls, and forwards cancellation context`
 - **WHEN** an active handler terminates because its supplied signal was aborted
 - **THEN** the invocation returns a structured cancelled outcome rather than a successful empty value
 
@@ -288,7 +288,7 @@ The tool contract SHALL support `approval.policy: "required"` with an optional b
 
 #### Scenario: Matching one-shot grant is supplied
 - **ID**: `extension.protocols.matching-one-shot-grant-is-supplied`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::revalidates exact one-shot approval grants and rejects replay or unexpected authority`
 - **WHEN** the native host obtains explicit user approval for the exact projected call and supplies a matching unused protected grant
 - **THEN** the bridge consumes the grant and invokes the handler once
 
@@ -318,13 +318,13 @@ The protocol package SHALL expose a frozen Runtime Session-scoped `doppelgangerH
 
 #### Scenario: Portable plugin inspects delivery guarantees
 - **ID**: `extension.protocols.portable-plugin-inspects-delivery-guarantees`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
 - **WHEN** a plugin needs context at a known session, turn, or request cadence or exact dynamic tool replacement
 - **THEN** it determines that semantic guarantee from the capability service without branching on the host package or process topology
 
 #### Scenario: Empty optional protocol stack
 - **ID**: `extension.protocols.empty-optional-protocol-stack`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
 - **WHEN** the capability profile permits context or tools but the selected Runtime Preset does not install those protocol services
 - **THEN** the shared bridge remains valid and exposes their canonical empty behavior
 
@@ -339,7 +339,7 @@ The shared Runtime Host plugin SHALL NOT construct, provide, require, or infer `
 
 #### Scenario: Generic preset uses the shared bridge
 - **ID**: `extension.protocols.generic-preset-uses-the-shared-bridge`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
 - **WHEN** an actor-independent Runtime Preset activates through a supported host
 - **THEN** the Runtime Host plugin provides no bound or synthetic actor and all actor-independent shared protocols remain usable
 
@@ -366,7 +366,7 @@ The public Runtime Host binding SHALL expose attachment, detachment, and the exp
 
 #### Scenario: Provider wants an unrelated outbound signal
 - **ID**: `extension.protocols.provider-wants-an-unrelated-outbound-signal`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::returns authority-separated context through the shared bridge`
 - **WHEN** a shared or host-specific provider needs to report another condition to the adapter
 - **THEN** it cannot send that condition through a generic Runtime Host notification channel
 
@@ -375,13 +375,13 @@ The tool registry SHALL support registering one owner-scoped set and atomically 
 
 #### Scenario: MCP list refresh succeeds
 - **ID**: `extension.protocols.mcp-list-refresh-succeeds`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::replaces complete owner sets atomically and preserves the old set on validation failure`
 - **WHEN** an MCP importer replaces ten old definitions with twelve valid new definitions
 - **THEN** observers see either the complete old set or the complete new set, one catalog revision is committed, and one change event is emitted
 
 #### Scenario: Replacement contains one invalid definition
 - **ID**: `extension.protocols.replacement-contains-one-invalid-definition`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::replaces complete owner sets atomically and preserves the old set on validation failure`
 - **WHEN** a replacement candidate contains a duplicate, invalid schema, invalid portable name, or cross-owner collision
 - **THEN** the entire replacement fails and the previous owner set remains active unchanged
 

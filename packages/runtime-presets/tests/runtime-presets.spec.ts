@@ -122,18 +122,77 @@ describe('Runtime Preset roster', () => {
 
   it('validates bare package subpath exports without depending on process cwd', async () => {
     const files = await fixture()
+    const packageDirectory = join(files.root, 'node_modules', 'runtime-export-fixture')
     const invalid = join(files.home, '.runtime-presets', 'invalid-export')
-    await mkdir(invalid, { recursive: true })
-    await writeFile(join(invalid, 'runtime.cordis.yml'), [
-      '- id: invalid-export',
-      '  name: "@doppelganger/doppelganger-protocols/not-exported"',
-      '',
-    ].join('\n'))
+    await Promise.all([
+      mkdir(packageDirectory, { recursive: true }),
+      mkdir(invalid, { recursive: true }),
+    ])
+    await Promise.all([
+      writeFile(join(packageDirectory, 'package.json'), JSON.stringify({
+        name: 'runtime-export-fixture',
+        type: 'module',
+        exports: { '.': './index.mjs' },
+      })),
+      writeFile(join(packageDirectory, 'index.mjs'), 'export default {}\n'),
+      writeFile(join(invalid, 'runtime.cordis.yml'), [
+        '- id: invalid-export',
+        '  name: runtime-export-fixture/not-exported',
+        '',
+      ].join('\n')),
+    ])
     expect((await files.roster.list()).find(preset => preset.id === 'invalid-export')).toMatchObject({
       status: 'broken',
       diagnostics: expect.arrayContaining([
-        expect.objectContaining({ message: expect.stringContaining('does not export') }),
+        expect.objectContaining({ message: expect.stringContaining('is not exported') }),
       ]),
+    })
+  })
+
+  it('marks nonexistent deep imports in packages without exports as broken', async () => {
+    const files = await fixture()
+    const packageDirectory = join(files.root, 'node_modules', 'legacy-runtime-fixture')
+    const presetDirectory = join(files.home, '.runtime-presets', 'legacy-deep-import')
+    await Promise.all([
+      mkdir(packageDirectory, { recursive: true }),
+      mkdir(presetDirectory, { recursive: true }),
+    ])
+    await Promise.all([
+      writeFile(join(packageDirectory, 'package.json'), JSON.stringify({ name: 'legacy-runtime-fixture', type: 'module', main: './index.mjs' })),
+      writeFile(join(packageDirectory, 'index.mjs'), 'export default {}\n'),
+      writeFile(join(presetDirectory, 'runtime.cordis.yml'), '- id: missing-deep\n  name: legacy-runtime-fixture/missing\n'),
+    ])
+
+    expect((await files.roster.list()).find(preset => preset.id === 'legacy-deep-import')).toMatchObject({
+      status: 'broken',
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining('Cannot resolve Runtime Preset import') }),
+      ]),
+    })
+  })
+
+  it('validates bare package targets with Node resolution independent of process cwd', async () => {
+    const files = await fixture()
+    const packageDirectory = join(files.root, 'node_modules', 'node-resolvable-runtime-fixture')
+    const presetDirectory = join(files.home, '.runtime-presets', 'node-resolvable')
+    await Promise.all([
+      mkdir(packageDirectory, { recursive: true }),
+      mkdir(presetDirectory, { recursive: true }),
+    ])
+    await Promise.all([
+      writeFile(join(packageDirectory, 'package.json'), JSON.stringify({
+        name: 'node-resolvable-runtime-fixture',
+        type: 'module',
+        exports: { '.': './index.mjs', './feature': './feature.mjs' },
+      })),
+      writeFile(join(packageDirectory, 'index.mjs'), 'export default {}\n'),
+      writeFile(join(packageDirectory, 'feature.mjs'), 'export default {}\n'),
+      writeFile(join(presetDirectory, 'runtime.cordis.yml'), '- id: feature\n  name: node-resolvable-runtime-fixture/feature\n'),
+    ])
+
+    expect((await files.roster.list()).find(preset => preset.id === 'node-resolvable')).toMatchObject({
+      status: 'healthy',
+      entries: [{ id: 'feature', name: 'node-resolvable-runtime-fixture/feature' }],
     })
   })
 
@@ -227,6 +286,28 @@ describe('Runtime Preset roster', () => {
     }).select()).resolves.toMatchObject({ source: 'deployment', preset: { id: 'zeta' } })
   })
 
+  it('explicit selection ignores malformed lower-precedence documents', async () => {
+    const files = await fixture()
+    await writeFile(files.userConfig, '[malformed')
+    await writeFile(files.manifest, '[malformed')
+
+    await expect(files.roster.select({
+      projectManifestPath: files.manifest,
+      explicitRuntimePreset: 'alpha',
+    })).resolves.toMatchObject({ source: 'explicit', preset: { id: 'alpha' } })
+  })
+
+  it('project selection ignores malformed lower-precedence user configuration', async () => {
+    const files = await fixture()
+    await writeFile(files.userConfig, '[malformed')
+    await writeFile(files.manifest, 'version: 1\nruntimePreset: zeta\n')
+
+    await expect(files.roster.select({ projectManifestPath: files.manifest })).resolves.toMatchObject({
+      source: 'project',
+      preset: { id: 'zeta' },
+    })
+  })
+
   it('does not fall through from a missing or broken winner', async () => {
     const files = await fixture()
     await writeFile(files.userConfig, 'version: 1\ndefaultRuntimePreset: alpha\n')
@@ -280,6 +361,11 @@ describe('Runtime Preset authoring', () => {
     await expect(readFile(join(destination, 'preset.yml'), 'utf8')).resolves.toBe(
       'name: Standard Copy Test\ndescription: Neutral personal and technical assistant with concise production-engineering guidance.\n',
     )
+    await expect(roster.resolve('standard-copy-test')).resolves.toMatchObject({
+      status: 'healthy',
+      trust: 'user',
+      name: 'Standard Copy Test',
+    })
   })
 
   it('fails explicitly without a writable root', async () => {

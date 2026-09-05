@@ -414,7 +414,6 @@ function registerTools(
       })
     },
   })
-
   ctx.effect(() => async () => {
     try {
       await mutationQueue
@@ -422,6 +421,7 @@ function registerTools(
       observer.dispose()
     }
   }, 'personaAuthoring.drainMutations')
+
 }
 
 export const PersonaAuthoringPlugin: Plugin<PersonaAuthoringConfig> = {

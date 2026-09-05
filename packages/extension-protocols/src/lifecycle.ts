@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { JsonValue } from './tools.ts'
+import { cloneJsonValue, isJsonObjectPrototype, type JsonValue } from './json-value.ts'
 
 export const LIFECYCLE_PROTOCOL_VERSION = 2 as const
 
@@ -124,16 +124,9 @@ const EVENT_NAMES = {
 } as const
 
 export function isLifecycleEventType(value: unknown): value is LifecycleEvent['type'] {
-  return typeof value === 'string' && value in EVENT_NAMES
+  return typeof value === 'string' && Object.hasOwn(EVENT_NAMES, value)
 }
 
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const child of Object.values(value)) deepFreeze(child)
-    Object.freeze(value)
-  }
-  return value
-}
 
 export function serializeLifecycleValue(
   input: unknown,
@@ -181,12 +174,49 @@ export function serializeLifecycleValue(
     ancestors.add(value)
     try {
       if (Array.isArray(value)) {
+        const descriptors = Object.getOwnPropertyDescriptors(value)
+        const propertyNames = Object.getOwnPropertyNames(value)
+        if (propertyNames.some(name => name !== 'length' && !/^(?:0|[1-9][0-9]*)$/u.test(name))) {
+          reasons.add('unsupported')
+        }
+        if (Object.getOwnPropertySymbols(value).length > 0) reasons.add('unsupported')
         if (value.length > maxEntries) reasons.add('entries')
-        return value.slice(0, maxEntries).map(item => visit(item, depth + 1))
+        const result: JsonValue[] = []
+        for (let index = 0; index < Math.min(value.length, maxEntries); index += 1) {
+          const descriptor = descriptors[String(index)]
+          if (descriptor === undefined || !('value' in descriptor) || descriptor.enumerable !== true) {
+            reasons.add('unsupported')
+            result.push(null)
+          } else {
+            result.push(visit(descriptor.value, depth + 1))
+          }
+        }
+        return Object.freeze(result)
       }
-      const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
-      if (entries.length > maxEntries) reasons.add('entries')
-      return Object.fromEntries(entries.slice(0, maxEntries).map(([key, item]) => [key, visit(item, depth + 1)]))
+
+      const prototype = Object.getPrototypeOf(value)
+      if (!isJsonObjectPrototype(prototype)) {
+        reasons.add('unsupported')
+        return null
+      }
+      if (Object.getOwnPropertySymbols(value).length > 0) reasons.add('unsupported')
+      const descriptors = Object.getOwnPropertyDescriptors(value)
+      const keys = Object.keys(descriptors).sort()
+      if (keys.length > maxEntries) reasons.add('entries')
+      const result = Object.create(null) as Record<string, JsonValue>
+      for (const key of keys.slice(0, maxEntries)) {
+        const descriptor = descriptors[key]!
+        const child = !('value' in descriptor) || descriptor.enumerable !== true
+          ? (reasons.add('unsupported'), null)
+          : visit(descriptor.value, depth + 1)
+        Object.defineProperty(result, key, {
+          value: child,
+          enumerable: true,
+          configurable: false,
+          writable: false,
+        })
+      }
+      return Object.freeze(result)
     } finally {
       ancestors.delete(value)
     }
@@ -198,48 +228,124 @@ export function serializeLifecycleValue(
     reasons.add('size')
     value = null
   }
-  return deepFreeze({
-    value,
-    ...(reasons.size === 0 ? {} : {
-      truncation: {
-        reasons: [...reasons].sort(),
+  const truncation = reasons.size === 0
+    ? undefined
+    : Object.freeze({
+        reasons: Object.freeze([...reasons].sort()),
         ...(reasons.has('size') ? { originalBytes } : {}),
-      },
-    }),
-  })
+      })
+  return Object.freeze({ value, ...(truncation === undefined ? {} : { truncation }) })
 }
 
-function nonEmpty(field: string, value: string): void {
-  if (typeof value !== 'string' || value.trim().length === 0) throw new TypeError(`${field} must be a non-empty string`)
+const LIFECYCLE_EVENT_LIMITS = Object.freeze({ maximumBytes: 1024 * 1024, maximumDepth: 16 })
+const LIFECYCLE_OUTCOMES: readonly LifecycleOutcome[] = ['cancelled', 'completed', 'failed']
+const LIFECYCLE_TRUNCATION_REASONS: readonly LifecycleTruncationReason[] = [
+  'binary', 'circular', 'depth', 'entries', 'size', 'string', 'unsupported',
+]
+const LIFECYCLE_FIELDS = {
+  'pre-compaction': { required: ['material'], optional: ['turnId'] },
+  'session-completed': { required: ['outcome'], optional: ['error'] },
+  'session-disposed': { required: [], optional: ['reason'] },
+  'session-started': { required: [], optional: [] },
+  'tool-completed': { required: ['turnId', 'callId', 'name', 'outcome'], optional: ['result', 'error'] },
+  'tool-started': { required: ['turnId', 'callId', 'name', 'input'], optional: [] },
+  'turn-committed': { required: ['turnId', 'principalInput', 'assistantOutput', 'outcome'], optional: ['error'] },
+  'turn-started': { required: ['turnId'], optional: ['principalInput'] },
+} as const satisfies Record<LifecycleEvent['type'], {
+  readonly required: readonly string[]
+  readonly optional: readonly string[]
+}>
+const LIFECYCLE_BASE_FIELDS = ['protocolVersion', 'deliveryId', 'sessionId', 'timestamp', 'type'] as const
+
+function lifecycleRecord(value: JsonValue, label: string): Readonly<Record<string, JsonValue>> {
+  if (value === null || Array.isArray(value) || typeof value !== 'object') throw new TypeError(`${label} must be an object`)
+  return value as Readonly<Record<string, JsonValue>>
 }
 
-function assertOutcome(outcome: LifecycleOutcome): void {
-  if (!['cancelled', 'completed', 'failed'].includes(outcome)) throw new TypeError(`invalid lifecycle outcome "${outcome}"`)
+function exactLifecycleKeys(
+  value: Readonly<Record<string, JsonValue>>,
+  required: readonly string[],
+  optional: readonly string[],
+  label: string,
+): void {
+  const unsupported = Object.keys(value)
+    .filter(key => !required.includes(key) && !optional.includes(key))
+    .sort()
+  if (unsupported.length > 0) throw new TypeError(`${label} contains unsupported fields: ${unsupported.join(', ')}`)
+  const missing = required.filter(key => !Object.hasOwn(value, key))
+  if (missing.length > 0) throw new TypeError(`${label} is missing required fields: ${missing.join(', ')}`)
 }
 
-export function normalizeLifecycleEvent(event: LifecycleEvent): LifecycleEvent {
+function lifecycleText(value: JsonValue | undefined, label: string): void {
+  if (typeof value !== 'string' || value.trim().length === 0) throw new TypeError(`${label} must be a non-empty string`)
+}
+
+function validateBoundedLifecycleValue(value: JsonValue | undefined, label: string): void {
+  const bounded = lifecycleRecord(value ?? null, label)
+  exactLifecycleKeys(bounded, ['value'], ['truncation'], label)
+  if (bounded.truncation === undefined) return
+  const truncation = lifecycleRecord(bounded.truncation, `${label}.truncation`)
+  exactLifecycleKeys(truncation, ['reasons'], ['originalBytes'], `${label}.truncation`)
+  if (!Array.isArray(truncation.reasons) || truncation.reasons.length === 0) {
+    throw new TypeError(`${label}.truncation.reasons must be a non-empty array`)
+  }
+  const reasons = truncation.reasons
+  if (reasons.some(reason => typeof reason !== 'string' || !LIFECYCLE_TRUNCATION_REASONS.includes(reason as LifecycleTruncationReason))) {
+    throw new TypeError(`${label}.truncation.reasons contains an unsupported reason`)
+  }
+  if (new Set(reasons).size !== reasons.length) throw new TypeError(`${label}.truncation.reasons must not contain duplicates`)
+  const hasSize = reasons.includes('size')
+  if (hasSize !== (truncation.originalBytes !== undefined)) {
+    throw new TypeError(`${label}.truncation.originalBytes must be present exactly when size truncation is reported`)
+  }
+  if (truncation.originalBytes !== undefined
+    && (!Number.isSafeInteger(truncation.originalBytes) || (truncation.originalBytes as number) <= 0)) {
+    throw new TypeError(`${label}.truncation.originalBytes must be a positive safe integer`)
+  }
+}
+
+function validateLifecycleError(value: JsonValue | undefined, label: string): void {
+  const error = lifecycleRecord(value ?? null, label)
+  exactLifecycleKeys(error, ['code', 'message'], ['data'], label)
+  lifecycleText(error.code, `${label}.code`)
+  lifecycleText(error.message, `${label}.message`)
+  if (error.data !== undefined) validateBoundedLifecycleValue(error.data, `${label}.data`)
+}
+
+export function normalizeLifecycleEvent(input: unknown): LifecycleEvent {
+  const value = cloneJsonValue(input, 'lifecycle event', LIFECYCLE_EVENT_LIMITS)
+  const event = lifecycleRecord(value, 'lifecycle event')
   if (event.protocolVersion !== LIFECYCLE_PROTOCOL_VERSION) {
     throw new TypeError(`unsupported lifecycle protocol version ${String(event.protocolVersion)}`)
   }
-  nonEmpty('lifecycle deliveryId', event.deliveryId)
-  nonEmpty('lifecycle sessionId', event.sessionId)
-  if (!Number.isFinite(event.timestamp)) throw new TypeError('lifecycle timestamp must be finite')
-  if (event.type === 'turn-started' || event.type === 'turn-committed' || event.type === 'tool-started' || event.type === 'tool-completed') {
-    nonEmpty('lifecycle turnId', event.turnId)
+  if (!isLifecycleEventType(event.type)) throw new TypeError(`unsupported lifecycle event type ${String(event.type)}`)
+  const fields = LIFECYCLE_FIELDS[event.type]
+  exactLifecycleKeys(
+    event,
+    [...LIFECYCLE_BASE_FIELDS, ...fields.required],
+    fields.optional,
+    `lifecycle ${event.type}`,
+  )
+  lifecycleText(event.deliveryId, 'lifecycle deliveryId')
+  lifecycleText(event.sessionId, 'lifecycle sessionId')
+  if (typeof event.timestamp !== 'number' || !Number.isFinite(event.timestamp)) {
+    throw new TypeError('lifecycle timestamp must be finite')
   }
-  if (event.type === 'tool-started' || event.type === 'tool-completed') {
-    nonEmpty('lifecycle callId', event.callId)
-    nonEmpty('lifecycle tool name', event.name)
+  if (event.turnId !== undefined) lifecycleText(event.turnId, 'lifecycle turnId')
+  if (event.callId !== undefined) lifecycleText(event.callId, 'lifecycle callId')
+  if (event.name !== undefined) lifecycleText(event.name, 'lifecycle tool name')
+  if (event.reason !== undefined) lifecycleText(event.reason, 'lifecycle disposal reason')
+  if (event.outcome !== undefined
+    && (typeof event.outcome !== 'string' || !LIFECYCLE_OUTCOMES.includes(event.outcome as LifecycleOutcome))) {
+    throw new TypeError(`invalid lifecycle outcome "${String(event.outcome)}"`)
   }
-  if (event.type === 'session-completed' || event.type === 'turn-committed' || event.type === 'tool-completed') {
-    assertOutcome(event.outcome)
-  }
-  if (event.type === 'turn-committed' && 'toolOutcomes' in event) {
-    throw new TypeError('turn-committed toolOutcomes is not supported')
-  }
-  const encoded = JSON.stringify(event)
-  if (encoded === undefined) throw new TypeError('lifecycle event must be JSON-serializable')
-  return deepFreeze(JSON.parse(encoded) as LifecycleEvent)
+  if (event.principalInput !== undefined) validateBoundedLifecycleValue(event.principalInput, 'lifecycle principalInput')
+  if (event.assistantOutput !== undefined) validateBoundedLifecycleValue(event.assistantOutput, 'lifecycle assistantOutput')
+  if (event.input !== undefined) validateBoundedLifecycleValue(event.input, 'lifecycle tool input')
+  if (event.result !== undefined) validateBoundedLifecycleValue(event.result, 'lifecycle tool result')
+  if (event.material !== undefined) validateBoundedLifecycleValue(event.material, 'lifecycle compaction material')
+  if (event.error !== undefined) validateLifecycleError(event.error, 'lifecycle error')
+  return value as unknown as LifecycleEvent
 }
 
 export async function publishLifecycleEvent(

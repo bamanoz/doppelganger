@@ -1,5 +1,5 @@
 import type {
-  ContextContribution,
+  AssembledContext,
   ContextProvider,
   ContextResolveRequest,
   ToolCatalogSnapshot,
@@ -27,12 +27,7 @@ export interface DynamicRuntimeHttpService {
 export interface DynamicRuntimeCatalogContracts {
   readonly context: {
     register(provider: ContextProvider): () => void
-    resolve(request: ContextResolveRequest): Promise<{
-      readonly content: string
-      readonly contributions: readonly ContextContribution[]
-      readonly omittedSources: readonly string[]
-      readonly tokenCount: number
-    }>
+    resolve(request: ContextResolveRequest): Promise<AssembledContext>
   }
   readonly tools: {
     register(definition: ToolDefinition): () => void

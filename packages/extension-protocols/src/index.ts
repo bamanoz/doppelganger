@@ -9,6 +9,7 @@ export { ContextProtocolPlugin } from './context-plugin.ts'
 export { ToolRegistryPlugin } from './tools-plugin.ts'
 export {
   ContextProtocol,
+  defineAssembledContext,
   type AssembledContext,
   type ContextAuthority,
   type ContextContribution,
@@ -54,6 +55,7 @@ export {
   type ToolCancellationRequest,
   type ToolCancellationResult,
   type ToolCatalogSnapshot,
+  type ToolCatalogDiagnostic,
   type ToolDefinition,
   type ToolDescriptor,
   type ToolInvocationContext,

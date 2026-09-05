@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -15,6 +16,24 @@ async function put(root: string, path: string, content: string): Promise<void> {
   await mkdir(dirname(target), { recursive: true })
   await writeFile(target, content)
 }
+function git(root: string, ...args: string[]): void {
+  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stderr || `git ${args.join(' ')} failed`)
+}
+
+async function verificationFixture(): Promise<string> {
+  const root = await fixture()
+  await put(root, 'package.json', JSON.stringify({
+    scripts: {
+      'check:integrity': 'node scripts/check-repository-integrity.mjs',
+    },
+  }))
+  await put(root, 'scripts/check-repository-integrity.mjs', "import './lib/repository-integrity.mjs'\n")
+  await put(root, 'scripts/lib/repository-integrity.mjs', 'export const available = true\n')
+  git(root, 'init', '--quiet')
+  return root
+}
+
 
 async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'doppelganger-integrity-'))
@@ -106,5 +125,21 @@ describe('repository integrity checker', () => {
       '',
     ].join('\n'))
     await expect(checkRepositoryIntegrity(root)).resolves.toEqual([])
+  })
+
+  it('requires every repository-check helper in tracked source', async () => {
+    const root = await verificationFixture()
+    await rm(join(root, 'scripts/lib/repository-integrity.mjs'))
+    await expect(checkRepositoryIntegrity(root)).resolves.toContain(
+      'scripts/lib/repository-integrity.mjs: required verification source is missing',
+    )
+  })
+
+  it('reports executable verification helpers excluded by ignore rules', async () => {
+    const root = await verificationFixture()
+    await put(root, '.gitignore', 'scripts/lib/\n')
+    await expect(checkRepositoryIntegrity(root)).resolves.toContain(
+      'scripts/lib/repository-integrity.mjs: required verification source is ignored by Git',
+    )
   })
 })

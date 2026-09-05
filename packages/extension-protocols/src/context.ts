@@ -1,4 +1,5 @@
 import { Context, Service, type Logger } from '@deepseek-ai/cordis'
+import { cloneJsonValue, type JsonValue } from './json-value.ts'
 
 export type ContextAuthority = 'data' | 'instruction'
 
@@ -26,7 +27,8 @@ export interface ContextProvider {
 }
 
 export interface AssembledContext {
-  readonly content: string
+  readonly instructions: string
+  readonly data: string
   readonly contributions: readonly ContextContribution[]
   readonly omittedSources: readonly string[]
   readonly tokenCount: number
@@ -46,6 +48,64 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     doppelgangerContext: ContextProtocol
   }
+}
+
+const ASSEMBLED_CONTEXT_LIMITS = Object.freeze({ maximumBytes: 1024 * 1024, maximumDepth: 8 })
+
+function contextRecord(value: JsonValue, label: string): Readonly<Record<string, JsonValue>> {
+  if (value === null || Array.isArray(value) || typeof value !== 'object') {
+    throw new TypeError(`${label} must be an object`)
+  }
+  return value as Readonly<Record<string, JsonValue>>
+}
+
+function exactContextKeys(
+  value: Readonly<Record<string, JsonValue>>,
+  required: readonly string[],
+  optional: readonly string[],
+  label: string,
+): void {
+  const unsupported = Object.keys(value)
+    .filter(key => !required.includes(key) && !optional.includes(key))
+    .sort()
+  if (unsupported.length > 0) throw new TypeError(`${label} contains unsupported fields: ${unsupported.join(', ')}`)
+  const missing = required.filter(key => !Object.hasOwn(value, key))
+  if (missing.length > 0) throw new TypeError(`${label} is missing required fields: ${missing.join(', ')}`)
+}
+
+export function defineAssembledContext(input: unknown): AssembledContext {
+  const value = cloneJsonValue(input, 'assembled context', ASSEMBLED_CONTEXT_LIMITS)
+  const root = contextRecord(value, 'assembled context')
+  exactContextKeys(root, ['instructions', 'data', 'contributions', 'omittedSources', 'tokenCount'], [], 'assembled context')
+  if (typeof root.instructions !== 'string') throw new TypeError('assembled context.instructions must be a string')
+  if (typeof root.data !== 'string') throw new TypeError('assembled context.data must be a string')
+  if (!Array.isArray(root.contributions)) throw new TypeError('assembled context.contributions must be an array')
+  for (let index = 0; index < root.contributions.length; index += 1) {
+    const label = `assembled context.contributions[${index}]`
+    const contribution = contextRecord(root.contributions[index]!, label)
+    exactContextKeys(contribution, ['source', 'content', 'priority', 'authority'], ['truncate'], label)
+    if (typeof contribution.source !== 'string' || contribution.source.trim().length === 0) {
+      throw new TypeError(`${label}.source must be a non-empty string`)
+    }
+    if (typeof contribution.content !== 'string') throw new TypeError(`${label}.content must be a string`)
+    if (typeof contribution.priority !== 'number' || !Number.isFinite(contribution.priority)) {
+      throw new TypeError(`${label}.priority must be finite`)
+    }
+    if (contribution.authority !== 'instruction' && contribution.authority !== 'data') {
+      throw new TypeError(`${label}.authority must be "instruction" or "data"`)
+    }
+    if (contribution.truncate !== undefined && typeof contribution.truncate !== 'boolean') {
+      throw new TypeError(`${label}.truncate must be a boolean`)
+    }
+  }
+  if (!Array.isArray(root.omittedSources)
+    || root.omittedSources.some(source => typeof source !== 'string' || source.trim().length === 0)) {
+    throw new TypeError('assembled context.omittedSources must contain non-empty strings')
+  }
+  if (!Number.isSafeInteger(root.tokenCount) || (root.tokenCount as number) < 0) {
+    throw new TypeError('assembled context.tokenCount must be a non-negative safe integer')
+  }
+  return value as unknown as AssembledContext
 }
 
 export class ContextProtocol extends Service {
@@ -116,12 +176,14 @@ export class ContextProtocol extends Service {
 
     const accepted: ContextContribution[] = []
     const omittedSources: string[] = []
-    let content = ''
+    let accountingContent = ''
     for (const { contribution } of ranked) {
-      const candidate = content.length === 0 ? contribution.content : `${content}\n\n${contribution.content}`
+      const candidate = accountingContent.length === 0
+        ? contribution.content
+        : `${accountingContent}\n\n${contribution.content}`
       if (this.estimateTokens(candidate) <= request.tokenBudget) {
         accepted.push(Object.freeze({ ...contribution }))
-        content = candidate
+        accountingContent = candidate
         continue
       }
       if (contribution.truncate !== true) {
@@ -129,7 +191,7 @@ export class ContextProtocol extends Service {
         continue
       }
 
-      const prefix = content.length === 0 ? '' : `${content}\n\n`
+      const prefix = accountingContent.length === 0 ? '' : `${accountingContent}\n\n`
       let low = 0
       let high = contribution.content.length
       let truncated = ''
@@ -149,14 +211,23 @@ export class ContextProtocol extends Service {
       }
       const acceptedContribution = Object.freeze({ ...contribution, content: truncated })
       accepted.push(acceptedContribution)
-      content = `${prefix}${truncated}`
+      accountingContent = `${prefix}${truncated}`
     }
 
+    const instructions = accepted
+      .filter(contribution => contribution.authority === 'instruction')
+      .map(contribution => contribution.content)
+      .join('\n\n')
+    const data = accepted
+      .filter(contribution => contribution.authority === 'data')
+      .map(contribution => contribution.content)
+      .join('\n\n')
     const result = Object.freeze({
-      content,
+      instructions,
+      data,
       contributions: Object.freeze(accepted),
       omittedSources: Object.freeze(omittedSources),
-      tokenCount: this.estimateTokens(content),
+      tokenCount: this.estimateTokens(accountingContent),
     })
     this.logger.debug('context.resolve.completed accepted=%d omitted=%d', accepted.length, omittedSources.length)
     return result

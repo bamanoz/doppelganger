@@ -68,13 +68,13 @@ Each context request SHALL carry a non-empty adapter-minted request identity, cu
 
 #### Scenario: Host resolves every model request
 - **ID**: `host.runtime.api.host-resolves-every-model-request`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::returns authority-separated context through the shared bridge`
 - **WHEN** a host advertising per-request context performs multiple model requests in one turn
 - **THEN** each request has its own request ID and resolves the current registered providers under the supplied turn identity and budget
 
 #### Scenario: Context protocol is absent
 - **ID**: `host.runtime.api.context-protocol-is-absent`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::resolves installed context, snapshots tools, and emits one revision callback per commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
 - **WHEN** the active Runtime Preset does not install the context protocol
 - **THEN** the bridge returns the canonical empty assembly without inventing stale context
 

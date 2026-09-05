@@ -101,17 +101,17 @@ describe('traits plugin', () => {
     await writeFile(engineerPath, 'Prefer verified interfaces.')
     notify(engineerUrl)
     await changed
-    expect((await resolver()).content).toContain('verified interfaces')
+    expect((await resolver()).instructions).toContain('verified interfaces')
     changed = observe(engineerUrl, 'failed')
     await writeFile(engineerPath, '')
     notify(engineerUrl)
     await changed
-    expect((await resolver()).content).toContain('verified interfaces')
+    expect((await resolver()).instructions).toContain('verified interfaces')
     changed = observe(engineerUrl, 'success')
     await writeFile(engineerPath, 'Prefer recoverable interfaces.')
     notify(engineerUrl)
     await changed
-    expect((await resolver()).content).toContain('recoverable interfaces')
+    expect((await resolver()).instructions).toContain('recoverable interfaces')
 
     await session.dispose()
     await runtime.dispose()

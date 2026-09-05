@@ -81,6 +81,7 @@ function validateEntryList(
     diagnostics.push({ path, message: 'must be an array of Loader entries' })
     return false
   }
+  const initialDiagnosticCount = diagnostics.length
   value.forEach((candidate, index) => {
     const entryPath = `${path}[${index}]`
     const entry = record(candidate)
@@ -99,7 +100,7 @@ function validateEntryList(
       validateEntryList(entry.config, source, `${entryPath}.config`, diagnostics, checkReserved)
     }
   })
-  return true
+  return diagnostics.length === initialDiagnosticCount
 }
 
 function anchorInsertedEntries(entries: EntryOptions[], baseUrl: string): void {

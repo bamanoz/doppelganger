@@ -268,10 +268,10 @@ async function resolveContext(connection: OmpChildConnection): Promise<string> {
     turn: { input: 'Review this implementation.', turnId: 'turn-one' },
     tokenBudget: 2000,
   })
-  if (raw === null || typeof raw !== 'object' || !('content' in raw) || typeof raw.content !== 'string') {
+  if (raw === null || typeof raw !== 'object' || !('instructions' in raw) || typeof raw.instructions !== 'string') {
     throw new Error('context.resolve returned an invalid result')
   }
-  return raw.content
+  return raw.instructions
 }
 
 

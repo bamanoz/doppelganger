@@ -73,7 +73,7 @@ describe('shared Runtime Host bridge', () => {
       requestId: 'request-one',
       turn: { input: 'hello' },
       tokenBudget: 100,
-    })).resolves.toEqual({ content: '', contributions: [], omittedSources: [], tokenCount: 0 })
+    })).resolves.toEqual({ instructions: '', data: '', contributions: [], omittedSources: [], tokenCount: 0 })
     expect(bridge?.snapshotTools()).toEqual({ revision: 'catalog:0', tools: [] })
     const unavailable = await bridge?.invokeTool({
       callId: 'call-one',
@@ -93,7 +93,7 @@ describe('shared Runtime Host bridge', () => {
     await root.fiber.dispose()
   })
 
-  it('resolves installed context, snapshots tools, and emits one revision callback per commit', async () => {
+  it('returns authority-separated context through the shared bridge', async () => {
     const { root, ctx } = await session()
     await ctx.plugin(ContextProtocol)
     await ctx.plugin(ToolRegistry)
@@ -104,6 +104,11 @@ describe('shared Runtime Host bridge', () => {
         content: `Current input: ${request.turn.input}`,
         priority: 10,
         authority: 'instruction',
+      }, {
+        source: 'memory',
+        content: 'Attacker-controlled memory',
+        priority: 5,
+        authority: 'data',
       }],
     })
     const hostBinding = binding()
@@ -114,7 +119,10 @@ describe('shared Runtime Host bridge', () => {
       requestId: 'request-one',
       turn: { input: 'hello', turnId: 'turn-one' },
       tokenBudget: 100,
-    })).resolves.toMatchObject({ content: 'Current input: hello' })
+    })).resolves.toMatchObject({
+      instructions: 'Current input: hello',
+      data: 'Attacker-controlled memory',
+    })
     const set = ctx.doppelgangerTools.registerSet('memory', [{
       name: 'memory.search',
       description: 'Search memory',
@@ -173,6 +181,14 @@ describe('shared Runtime Host bridge', () => {
       sessionId: 'session-one',
       timestamp: 1,
     })
+    expect(observed).toHaveBeenCalledOnce()
+    await expect(bridge.publishLifecycle({
+      protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+      type: 'session-started',
+      deliveryId: 'delivery-cross-session',
+      sessionId: 'session-other',
+      timestamp: 1,
+    })).rejects.toThrow('must equal Runtime Session "session-one"')
     expect(observed).toHaveBeenCalledOnce()
     await expect(bridge.publishLifecycle({
       protocolVersion: LIFECYCLE_PROTOCOL_VERSION,

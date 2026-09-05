@@ -76,9 +76,21 @@ export function runtimeHostConformance(label: string, factory: RuntimeHostConfor
         requestId: 'empty-request',
         turn: { input: 'nothing' },
         tokenBudget: 10,
-      })).resolves.toEqual({ content: '', contributions: [], omittedSources: [], tokenCount: 0 })
+      })).resolves.toEqual({ instructions: '', data: '', contributions: [], omittedSources: [], tokenCount: 0 })
       expect(empty.bridge.snapshotTools()).toEqual({ revision: 'catalog:0', tools: [] })
       await empty.dispose()
+    })
+
+    it('rejects cross-session lifecycle publication', async () => {
+      const session = await factory.create({ sessionId: 'conformance-lifecycle-session' })
+      await expect(session.bridge.publishLifecycle({
+        protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+        type: 'session-started',
+        deliveryId: 'cross-session-delivery',
+        sessionId: 'other-session',
+        timestamp: 1,
+      })).rejects.toThrow('must equal Runtime Session "conformance-lifecycle-session"')
+      await session.dispose()
     })
 
     it('rejects unknown capability fields before attachment', async () => {
@@ -177,6 +189,7 @@ export function runtimeHostConformance(label: string, factory: RuntimeHostConfor
 
     it('rejects undeclared lifecycle events and keeps actor identity independent', async () => {
       const restricted = await factory.create({
+        sessionId: 'conformance-session',
         capabilities: {
           ...FULL_CONFORMANCE_CAPABILITIES,
           lifecycle: { events: ['session-started'] },

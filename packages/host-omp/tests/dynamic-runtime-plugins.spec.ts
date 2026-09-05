@@ -301,13 +301,29 @@ async function shutdown(fixture: MountedExtension): Promise<void> {
   await fixture.handlers.get('session_shutdown')?.({ type: 'session_shutdown' }, fixture.context)
 }
 
-async function projectedContext(fixture: MountedExtension, prompt = 'Inspect generated behavior.'): Promise<string> {
+async function projectedContext(
+  fixture: MountedExtension,
+  prompt = 'Inspect generated behavior.',
+): Promise<{ readonly instructions: string; readonly data: string }> {
   const result = await fixture.handlers.get('before_agent_start')?.({
     type: 'before_agent_start',
     prompt,
     systemPrompt: [],
   }, fixture.context) as { readonly systemPrompt?: readonly string[] } | undefined
-  return result?.systemPrompt?.at(-1) ?? ''
+  const context = await fixture.handlers.get('context')?.({
+    type: 'context',
+    messages: [],
+  }, fixture.context) as { readonly messages?: readonly Record<string, unknown>[] } | undefined
+  const dataMessage = context?.messages?.find(message => (
+    message.role === 'user'
+    && message.synthetic === true
+    && typeof message.content === 'string'
+    && message.content.includes('[DOPPELGANGER RUNTIME DATA]')
+  ))
+  return {
+    instructions: result?.systemPrompt?.at(-1) ?? '',
+    data: typeof dataMessage?.content === 'string' ? dataMessage.content : '',
+  }
 }
 
 function runInvocationCount(factory: RecordingFactory): number {
@@ -413,8 +429,9 @@ describe('OMP Dynamic Runtime Plugins integration', () => {
       expect(runInvocationCount(factory)).toBe(1)
       expect(firstRun.prompt).toContain(String(first.sourceDigest))
       await waitForTool(fixture, 'generated.one', true)
-      expect(await projectedContext(fixture)).toContain('Generated one context.')
-      expect(await projectedContext(fixture)).toContain('Base OMP context.')
+      const projected = await projectedContext(fixture)
+      expect(projected.instructions).toContain('Generated one context.')
+      expect(projected.data).toContain('Base OMP context.')
       const staleOne = fixture.tools.get(proxyName('generated.one'))!
       expect(await execute(fixture, 'generated.one', {})).toMatchObject({ details: { version: 'one' } })
 
@@ -434,7 +451,7 @@ describe('OMP Dynamic Runtime Plugins integration', () => {
         details: { stopped: true, wasRunning: true },
       })
       await waitForTool(fixture, 'generated.two', false)
-      expect(await projectedContext(fixture)).not.toContain('Generated two context.')
+      expect((await projectedContext(fixture)).instructions).not.toContain('Generated two context.')
       const restart = await approvedRun(fixture, second, 'run')
       expect(restart.result.isError).not.toBe(true)
       expect(runInvocationCount(factory)).toBe(3)
@@ -533,7 +550,7 @@ describe('OMP Dynamic Runtime Plugins integration', () => {
         details: { code: 'PACKAGE_APPLY_FAILED', message: expect.stringContaining('generated apply failed') },
       })
       expect(await execute(first, 'base.echo', {})).toMatchObject({ details: { base: true } })
-      expect(await projectedContext(first)).toContain('Base OMP context.')
+      expect((await projectedContext(first)).data).toContain('Base OMP context.')
 
       const crash = await define(first, [
         'return {',
@@ -546,7 +563,7 @@ describe('OMP Dynamic Runtime Plugins integration', () => {
       await vi.waitFor(() => expect(first.errors.join('\n')).toContain('runtime child exited unexpectedly'))
       await vi.waitFor(() => expect(first.activeTools()).toEqual(['read', 'bash']))
       expect(await execute(second, 'base.echo', {})).toMatchObject({ details: { base: true } })
-      expect(await projectedContext(second)).toContain('Base OMP context.')
+      expect((await projectedContext(second)).data).toContain('Base OMP context.')
     } finally {
       await Promise.all([shutdown(first), shutdown(second)])
     }
@@ -604,7 +621,7 @@ describe('OMP Dynamic Runtime Plugins integration', () => {
       const first = await define(fixture, generatedSource('project-one'), undefined, 'project')
       expect((await approvedRun(fixture, first, 'run')).result.isError).not.toBe(true)
       await waitForTool(fixture, 'generated.project-one', true)
-      expect(await projectedContext(fixture)).toContain('Generated project-one context.')
+      expect((await projectedContext(fixture)).instructions).toContain('Generated project-one context.')
 
       const second = await define(fixture, generatedSource('project-two'), first.pluginId, 'project')
       expect((await approvedRun(fixture, second, 'update')).result.isError).not.toBe(true)
@@ -614,7 +631,7 @@ describe('OMP Dynamic Runtime Plugins integration', () => {
         details: { stopped: true, wasRunning: true },
       })
       await waitForTool(fixture, 'generated.project-two', false)
-      expect(await projectedContext(fixture, 'Continue after stopping the temporary plugin.')).toContain('Base OMP context.')
+      expect((await projectedContext(fixture, 'Continue after stopping the temporary plugin.')).data).toContain('Base OMP context.')
       expect(await execute(fixture, 'base.echo', {})).toMatchObject({ details: { base: true } })
     } finally {
       await shutdown(fixture)

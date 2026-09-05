@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import {
   access,
   chmod,
@@ -16,6 +17,7 @@ import { dirname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
+import enhancedResolve from 'enhanced-resolve'
 import { dump, load } from 'js-yaml'
 
 export const RUNTIME_PRESET_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
@@ -353,90 +355,60 @@ export async function loadRuntimePresetEntries(filename: string): Promise<readon
   return validateEntries(value, absolute)
 }
 
-function barePackageIdentity(specifier: string): { packageName: string; exportKey: string } {
-  const segments = specifier.split('/')
-  const packageSegmentCount = specifier.startsWith('@') ? 2 : 1
-  const packageName = segments.slice(0, packageSegmentCount).join('/')
-  const subpath = segments.slice(packageSegmentCount).join('/')
-  return { packageName, exportKey: subpath.length === 0 ? '.' : `./${subpath}` }
+function barePackageName(specifier: string): string | undefined {
+  if (specifier.startsWith('@')) {
+    const [scope, name] = specifier.split('/', 3)
+    return scope !== undefined && name !== undefined ? `${scope}/${name}` : undefined
+  }
+  const [name] = specifier.split('/', 1)
+  return name === undefined || name.startsWith('#') ? undefined : name
 }
 
-function conditionalExportTarget(value: unknown): string | undefined {
-  if (typeof value === 'string') return value
-  if (Array.isArray(value)) {
-    for (const candidate of value) {
-      const target = conditionalExportTarget(candidate)
-      if (target !== undefined) return target
-    }
-    return
-  }
-  const object = record(value)
-  if (object === undefined) return
-  for (const condition of ['import', 'node', 'default']) {
-    const target = conditionalExportTarget(object[condition])
-    if (target !== undefined) return target
-  }
-}
-
-function packageExportTarget(exports: unknown, exportKey: string): string | undefined {
-  const object = record(exports)
-  if (object === undefined || !Object.keys(object).some(key => key.startsWith('.'))) {
-    return exportKey === '.' ? conditionalExportTarget(exports) : undefined
-  }
-  const exact = conditionalExportTarget(object[exportKey])
-  if (exact !== undefined) return exact
-  for (const [key, value] of Object.entries(object)) {
-    const star = key.indexOf('*')
-    if (star < 0 || exportKey.length < key.length - 1) continue
-    const prefix = key.slice(0, star)
-    const suffix = key.slice(star + 1)
-    if (!exportKey.startsWith(prefix) || !exportKey.endsWith(suffix)) continue
-    const matched = exportKey.slice(prefix.length, exportKey.length - suffix.length)
-    const target = conditionalExportTarget(value)
-    if (target !== undefined) return target.replace('*', matched)
-  }
-}
-
-async function findBarePackageManifest(packageName: string): Promise<string | undefined> {
-  let directory = dirname(fileURLToPath(import.meta.url))
+function findPackageDirectory(packageName: string, baseUrl: string | URL): string | undefined {
+  let directory = dirname(fileURLToPath(baseUrl))
+  const packagePath = packageName.split('/')
   while (true) {
-    const candidate = join(directory, 'node_modules', packageName, 'package.json')
-    try {
-      await access(candidate)
-      return candidate
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
-    }
+    const candidate = join(directory, 'node_modules', ...packagePath)
+    if (existsSync(join(candidate, 'package.json'))) return candidate
     const parent = dirname(directory)
-    if (parent === directory) return
+    if (parent === directory) return undefined
     directory = parent
   }
 }
 
-async function validateBareImport(specifier: string): Promise<void> {
-  const { packageName, exportKey } = barePackageIdentity(specifier)
-  const packageJsonPath = await findBarePackageManifest(packageName)
-  if (packageJsonPath === undefined) throw new Error(`Cannot find package ${JSON.stringify(packageName)}`)
-  const manifest = record(JSON.parse(await readFile(packageJsonPath, 'utf8')))
-  if (manifest === undefined) throw new Error(`Invalid package manifest at ${packageJsonPath}`)
-  if (manifest.exports === undefined) return
-  const target = packageExportTarget(manifest.exports, exportKey)
-  if (target === undefined) throw new Error(`Package ${JSON.stringify(packageName)} does not export ${JSON.stringify(exportKey)}`)
-  if (target.startsWith('./')) await access(join(dirname(packageJsonPath), target))
+const resolvePackageImport = enhancedResolve.create.sync({
+  conditionNames: ['import', 'node', 'default'],
+  extensions: ['.ts', '.mts', '.cts', '.mjs', '.js', '.json', '.node'],
+  mainFields: ['module', 'main'],
+})
+
+function resolveBareImport(name: string, baseUrl: string | URL): string {
+  const resolved = resolvePackageImport(dirname(fileURLToPath(baseUrl)), name)
+  if (resolved === false) throw new Error(`Package import ${JSON.stringify(name)} was ignored by the resolver`)
+  return pathToFileURL(resolved).href
+}
+
+export function resolveRuntimePresetImport(name: string, authoredBaseUrl: string | URL): string {
+  if (name.startsWith('cordis:')) return name
+  if (name.startsWith('.')) return new URL(name, authoredBaseUrl).href
+  if (name.startsWith('/')) return pathToFileURL(name).href
+  if (/^[a-z][a-z0-9+.-]*:/iu.test(name)) return name
+  const packageName = barePackageName(name)
+  const baseUrl = packageName !== undefined && findPackageDirectory(packageName, authoredBaseUrl) !== undefined
+    ? authoredBaseUrl
+    : import.meta.url
+  return resolveBareImport(name, baseUrl)
 }
 
 async function validateImport(name: string, loaderPath: string): Promise<void> {
   if (name.startsWith('cordis:')) return
-  if (name.startsWith('.') || name.startsWith('/')) {
-    const filename = name.startsWith('/') ? name : fileURLToPath(new URL(name, pathToFileURL(loaderPath)))
-    await access(filename)
-    return
+  try {
+    const resolved = resolveRuntimePresetImport(name, pathToFileURL(loaderPath))
+    if (resolved.startsWith('file:')) await access(fileURLToPath(resolved))
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new Error(`Cannot resolve Runtime Preset import ${JSON.stringify(name)} from ${JSON.stringify(loaderPath)}: ${detail}`, { cause })
   }
-  if (/^[a-z][a-z0-9+.-]*:/iu.test(name)) {
-    if (name.startsWith('file:')) await access(fileURLToPath(name))
-    return
-  }
-  await validateBareImport(name)
 }
 
 async function validateEntryImports(entries: readonly EntryOptions[], loaderPath: string): Promise<void> {
@@ -592,40 +564,43 @@ export class RuntimePresetRoster {
   async select(request: RuntimePresetSelectionRequest = {}): Promise<ResolvedRuntimePresetSelection | undefined> {
     await this.#initializeHome()
     const userConfigPath = join(this.home, 'config.yaml')
-    const user = await loadRuntimeUserConfig(userConfigPath)
-    const project: RuntimeProjectManifest = request.projectManifestPath === undefined
-      ? Object.freeze({ version: 1 as const })
-      : await loadRuntimeProjectManifest(request.projectManifestPath)
-    const choice = request.explicitRuntimePreset === undefined
-      ? project.runtimePreset === undefined
-        ? user.defaultRuntimePreset === undefined
-          ? this.defaultRuntimePreset === undefined
-            ? undefined
-            : { id: this.defaultRuntimePreset, source: 'deployment' as const }
-          : { id: user.defaultRuntimePreset, source: 'user' as const }
-        : { id: project.runtimePreset, source: 'project' as const }
-      : { id: request.explicitRuntimePreset, source: 'explicit' as const }
-    if (choice === undefined) return
-    const diagnostics: RuntimeConfigurationDiagnostic[] = []
-    const id = runtimePresetId(choice.id, '$.runtimePreset', diagnostics)
-    if (id === undefined) {
-      throw new RuntimeConfigurationError(
-        choice.source === 'project' && request.projectManifestPath !== undefined
-          ? request.projectManifestPath
-          : userConfigPath,
-        diagnostics,
-      )
+    const resolveSelection = async (
+      choice: unknown,
+      source: ResolvedRuntimePresetSelection['source'],
+      filename: string,
+      path: string,
+    ): Promise<ResolvedRuntimePresetSelection> => {
+      const diagnostics: RuntimeConfigurationDiagnostic[] = []
+      const id = runtimePresetId(choice, path, diagnostics)
+      if (id === undefined) throw new RuntimeConfigurationError(filename, diagnostics)
+      const preset = await this.resolve(id)
+      return Object.freeze({
+        home: this.home,
+        source,
+        preset,
+        userPatchPath: join(this.home, 'runtime.cordis.patch.yml'),
+        ...(request.projectManifestPath === undefined
+          ? {}
+          : { projectPatchPath: join(dirname(request.projectManifestPath), 'runtime.cordis.patch.yml') }),
+      })
     }
-    const preset = await this.resolve(id)
-    return Object.freeze({
-      home: this.home,
-      source: choice.source,
-      preset,
-      userPatchPath: join(this.home, 'runtime.cordis.patch.yml'),
-      ...(request.projectManifestPath === undefined
-        ? {}
-        : { projectPatchPath: join(dirname(request.projectManifestPath), 'runtime.cordis.patch.yml') }),
-    })
+
+    if (request.explicitRuntimePreset !== undefined) {
+      return resolveSelection(request.explicitRuntimePreset, 'explicit', 'explicit Runtime Preset selection', '$.explicitRuntimePreset')
+    }
+    if (request.projectManifestPath !== undefined) {
+      const project = await loadRuntimeProjectManifest(request.projectManifestPath)
+      if (project.runtimePreset !== undefined) {
+        return resolveSelection(project.runtimePreset, 'project', request.projectManifestPath, '$.runtimePreset')
+      }
+    }
+    const user = await loadRuntimeUserConfig(userConfigPath)
+    if (user.defaultRuntimePreset !== undefined) {
+      return resolveSelection(user.defaultRuntimePreset, 'user', userConfigPath, '$.defaultRuntimePreset')
+    }
+    if (this.defaultRuntimePreset !== undefined) {
+      return resolveSelection(this.defaultRuntimePreset, 'deployment', 'deployment Runtime Preset default', '$.defaultRuntimePreset')
+    }
   }
 
   writableRoot(): string {

@@ -11,11 +11,11 @@ import {
 import {
   createActorIdentityPlugin,
   createRuntimeHostPlugin,
-  type LifecycleEvent,
   type RuntimeHostBridge,
 } from '@doppelganger/doppelganger-protocols'
 import {
   OMP_RPC_PROTOCOL_VERSION,
+  defineLifecycleEvent,
   defineHostContextRequest,
   defineSessionActivateParams,
   defineToolCancellationRequest,
@@ -38,12 +38,6 @@ export interface OmpRuntimeChildOptions {
   ) => void | Promise<void>
 }
 
-function objectParams<T>(value: unknown, method: string): T {
-  if (value === null || Array.isArray(value) || typeof value !== 'object') {
-    throw new TypeError(`${method} params must be an object`)
-  }
-  return value as T
-}
 
 function materializeComposition(input: CanonicalCompositionDefinition) {
   return createCompositionDefinition({
@@ -166,7 +160,7 @@ export function serveOmpRuntime(
   })
   peer.expose('event.publish', async (value) => {
     if (bridge === undefined) throw new Error('runtime session is not active')
-    await bridge.publishLifecycle(objectParams<LifecycleEvent>(value, 'event.publish'))
+    await bridge.publishLifecycle(defineLifecycleEvent(value))
     return null
   })
   peer.expose('omp.todo-reminder', async (value) => {

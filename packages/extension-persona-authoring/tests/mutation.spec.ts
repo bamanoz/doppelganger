@@ -223,7 +223,7 @@ describe('Persona mutation engine', () => {
     await unconfirmed.ctx.fiber.dispose()
   })
 
-  it('drains an in-flight mutation before plugin disposal completes', async () => {
+  it('drains an in-flight mutation while owner disposal cancels the retired call', async () => {
     const { ctx, authoring, writable, writableUrl } = await setup()
     const expected = await inspectRevision(ctx)
     const replacement = 'Dispose-safe profile.\n'
@@ -234,8 +234,9 @@ describe('Persona mutation engine', () => {
     await delay(20)
     expect(disposed).toBe(false)
     emit(ctx, { url: writableUrl, outcome: 'success', revision: revision(replacement) })
-    await expect(operation).resolves.toMatchObject({ ok: true, value: { status: 'applied' } })
+    await expect(operation).resolves.toMatchObject({ ok: false, error: { code: 'TOOL_CANCELLED' } })
     await disposal
+    await expect(readFile(writable, 'utf8')).resolves.toBe(replacement)
     expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
     await ctx.fiber.dispose()
   })

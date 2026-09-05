@@ -9,7 +9,7 @@ import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
 import Loader, { type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import Timer from '@deepseek-ai/cordis-plugin-timer'
-import { loadRuntimePresetEntries } from '@doppelganger/doppelganger-runtime-presets'
+import { loadRuntimePresetEntries, resolveRuntimePresetImport } from '@doppelganger/doppelganger-runtime-presets'
 import {
   CompositionActivationError,
   activationFailures,
@@ -269,7 +269,7 @@ function sessionTree(
       if (name.startsWith('.') || name.startsWith('/') || /^[a-z][a-z0-9+.-]*:/iu.test(name)) {
         return super.import(name, getOuterStack)
       }
-      return super.import(import.meta.resolve(name), getOuterStack)
+      return super.import(resolveRuntimePresetImport(name, this.ctx.baseUrl!), getOuterStack)
     }
 
     override write(): void {
@@ -489,20 +489,28 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
         return task
       }
 
-      const watchedPaths = [
+      const watchedPaths = [...new Set([
         request.composition.loaderPath,
         ...request.composition.patches.flatMap(input => 'filename' in input ? [input.filename] : []),
-      ]
+      ])]
+      const joinedWatchPaths: string[] = []
       const removeInputWatches = async () => {
-        for (const filename of watchedPaths) {
-          const registrationTask = inputWatches.get(filename)
-          if (registrationTask === undefined) continue
-          const registration = await registrationTask
-          registration.sessions.delete(session)
-          if (registration.sessions.size > 0) continue
-          if (inputWatches.get(filename) === registrationTask) inputWatches.delete(filename)
-          await registration.dispose()
+        const failures: unknown[] = []
+        const seen = new Set<unknown>()
+        for (const filename of joinedWatchPaths.splice(0).reverse()) {
+          try {
+            const registrationTask = inputWatches.get(filename)
+            if (registrationTask === undefined) continue
+            const registration = await registrationTask
+            registration.sessions.delete(session)
+            if (registration.sessions.size > 0) continue
+            if (inputWatches.get(filename) === registrationTask) inputWatches.delete(filename)
+            await registration.dispose()
+          } catch (error) {
+            collectCleanupFailure(failures, seen, error)
+          }
         }
+        if (failures.length > 0) throw new AggregateError(failures, 'failed to remove composition input watches')
       }
 
       session = {
@@ -538,20 +546,31 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
                 }).then(dispose => ({ sessions: watchedSessions, dispose }))
                 inputWatches.set(filename, registrationTask)
               }
-              const registration = await registrationTask
+              let registration: Awaited<typeof registrationTask>
+              try {
+                registration = await registrationTask
+              } catch (error) {
+                if (inputWatches.get(filename) === registrationTask) inputWatches.delete(filename)
+                throw error
+              }
               registration.sessions.add(session)
+              joinedWatchPaths.push(filename)
               logger.debug('runtime.session.watch.registered')
             }
           } catch (error) {
             logger.error('runtime.session.watch.failed reason=%s', error instanceof Error ? error.name : typeof error)
-            let failure = error
+            let cleanupFailure: unknown
             try {
-              await settleCleanup([removeInputWatches, disposeSessionOwner], `failed to clean up composition watch setup ${request.sessionId}`)
-            } catch (cleanupError) {
-              failure = new AggregateError([error, cleanupError], `failed to register composition watches ${request.sessionId}`)
+              await session.dispose()
+            } catch (cause) {
+              cleanupFailure = cause
             }
-            sessions.delete(session)
-            throw failure
+            if (cleanupFailure !== undefined) {
+              const failures: unknown[] = [error]
+              collectCleanupFailure(failures, new Set<unknown>([error]), cleanupFailure)
+              throw new AggregateError(failures, `composition watch acquisition failed for ${request.sessionId}`)
+            }
+            throw error
           }
         }
       }

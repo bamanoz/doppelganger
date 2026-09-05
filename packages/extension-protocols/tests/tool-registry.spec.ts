@@ -69,10 +69,107 @@ describe('tool registry', () => {
       .not.toBe(initial.tools.find(tool => tool.name === 'zeta.read')?.revision)
     expect(changed).toEqual([initial.revision, afterUnrelated.revision, replaced.revision])
 
-    first.dispose()
-    first.dispose()
-    second.dispose()
+    const firstDisposal = first.dispose()
+    expect(first.dispose()).toBe(firstDisposal)
+    await Promise.all([firstDisposal, second.dispose()])
     expect(context.doppelgangerTools.snapshot().tools).toEqual([])
+    await context.fiber.dispose()
+  })
+
+  it('contains catalog observer failure after an atomic commit', async () => {
+    const context = await setup()
+    const observed: string[] = []
+    const diagnostics: Array<{ code: string; revision: string; message: string }> = []
+    context.on('doppelganger/tools-changed', () => { throw new Error('observer failed') })
+    context.on('doppelganger/tools-changed', revision => { observed.push(revision) })
+    context.on('doppelganger/tools-diagnostic', diagnostic => { diagnostics.push(diagnostic) })
+
+    const registration = context.doppelgangerTools.registerSet('contained-owner', [
+      definition('contained.read', () => ({ committed: true })),
+    ])
+    const committed = context.doppelgangerTools.snapshot()
+    expect(committed.tools.map(tool => tool.name)).toEqual(['contained.read'])
+    await vi.waitFor(() => {
+      expect(observed).toEqual([committed.revision])
+      expect(diagnostics).toEqual([expect.objectContaining({
+        code: 'TOOL_CATALOG_OBSERVER_FAILED',
+        revision: committed.revision,
+        message: expect.stringContaining('observer failed'),
+      })])
+    })
+
+    await registration.dispose()
+    await context.fiber.dispose()
+  })
+
+  it('aborts and settles active calls when their owner is disposed', async () => {
+    const context = await setup()
+    const started = Promise.withResolvers<AbortSignal>()
+    const release = Promise.withResolvers<void>()
+    const registration = context.doppelgangerTools.registerSet('retiring-owner', [
+      definition('worker.retire', async (_input, invocation) => {
+        started.resolve(invocation.signal)
+        await release.promise
+        return { stale: true }
+      }),
+    ])
+    const running = context.doppelgangerTools.invoke(request(context.doppelgangerTools, 'worker.retire'), 'session-one')
+    const signal = await started.promise
+
+    const disposal = registration.dispose()
+    expect(registration.dispose()).toBe(disposal)
+    expect(context.doppelgangerTools.snapshot().tools).toEqual([])
+    expect(signal.aborted).toBe(true)
+    let disposed = false
+    void disposal.then(() => { disposed = true })
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+
+    release.resolve()
+    await expect(running).resolves.toMatchObject({ ok: false, error: { code: 'TOOL_CANCELLED' } })
+    await expect(disposal).resolves.toBeUndefined()
+    await context.fiber.dispose()
+  })
+
+  it('retains active calls only for unchanged definitions during owner replacement', async () => {
+    const context = await setup()
+    const stableStarted = Promise.withResolvers<AbortSignal>()
+    const revisedStarted = Promise.withResolvers<AbortSignal>()
+    const stableRelease = Promise.withResolvers<void>()
+    const revisedRelease = Promise.withResolvers<void>()
+    const stableHandler: ToolDefinition['invoke'] = async (_input, invocation) => {
+      stableStarted.resolve(invocation.signal)
+      await stableRelease.promise
+      return { stable: true }
+    }
+    const revisedHandler: ToolDefinition['invoke'] = async (_input, invocation) => {
+      revisedStarted.resolve(invocation.signal)
+      await revisedRelease.promise
+      return { stale: true }
+    }
+    const registration = context.doppelgangerTools.registerSet('replacement-owner', [
+      definition('worker.stable', stableHandler),
+      definition('worker.revised', revisedHandler),
+    ])
+    const stable = context.doppelgangerTools.invoke(request(context.doppelgangerTools, 'worker.stable'), 'session-one')
+    const revised = context.doppelgangerTools.invoke(
+      request(context.doppelgangerTools, 'worker.revised', {}, 'call-two'),
+      'session-one',
+    )
+    const [stableSignal, revisedSignal] = await Promise.all([stableStarted.promise, revisedStarted.promise])
+
+    registration.replace([
+      definition('worker.stable', stableHandler),
+      definition('worker.revised', () => ({ replacement: true })),
+    ])
+    expect(stableSignal.aborted).toBe(false)
+    expect(revisedSignal.aborted).toBe(true)
+
+    stableRelease.resolve()
+    revisedRelease.resolve()
+    await expect(stable).resolves.toEqual({ ok: true, value: { stable: true } })
+    await expect(revised).resolves.toMatchObject({ ok: false, error: { code: 'TOOL_CANCELLED' } })
+    await registration.dispose()
     await context.fiber.dispose()
   })
 
@@ -127,6 +224,7 @@ describe('tool registry', () => {
     await expect(context.doppelgangerTools.invoke({ ...invocation, callId: 'call-two', toolRevision: stale }, 'session-one'))
       .resolves.toMatchObject({ ok: false, error: { code: 'TOOL_REVISION_STALE' } })
     expect(observed).toHaveBeenCalledOnce()
+    await registration.dispose()
     await context.fiber.dispose()
   })
 
@@ -156,7 +254,7 @@ describe('tool registry', () => {
     const plain = request(context.doppelgangerTools, 'memory.search', {})
     await expect(context.doppelgangerTools.invoke({ ...plain, approval: { ...approval, callId: plain.callId } }, 'session-one'))
       .resolves.toMatchObject({ ok: false, error: { code: 'TOOL_APPROVAL_INVALID' } })
-    unprotected.dispose()
+    await unprotected.dispose()
     await context.fiber.dispose()
   })
 
@@ -172,6 +270,65 @@ describe('tool registry', () => {
     expect(() => context.doppelgangerTools.register(candidate({ policy: 'required', reason: 'x'.repeat(1_025) }))).toThrow('1-1024')
     expect(() => context.doppelgangerTools.register(candidate({ policy: 'required', prompt: true }))).toThrow('unsupported fields')
     expect(context.doppelgangerTools.snapshot().tools).toEqual([])
+    const schemaGetter = vi.fn(() => ({ type: 'object' }))
+    const withSchemaGetter = Object.defineProperty(definition('memory.inspect', () => null), 'inputSchema', {
+      enumerable: true,
+      get: schemaGetter,
+    })
+    expect(() => context.doppelgangerTools.register(withSchemaGetter)).toThrow('accessor')
+    expect(schemaGetter).not.toHaveBeenCalled()
+
+    const approvalGetter = vi.fn(() => 'required')
+    const withApprovalGetter = {
+      ...definition('memory.inspect', () => null),
+      approval: Object.defineProperty({}, 'policy', { enumerable: true, get: approvalGetter }),
+    } as ToolDefinition
+    expect(() => context.doppelgangerTools.register(withApprovalGetter)).toThrow('accessor')
+    expect(approvalGetter).not.toHaveBeenCalled()
+    await context.fiber.dispose()
+  })
+
+  it('rejects non-plain tool input before cloning or approval digesting', async () => {
+    const context = await setup()
+    const invoked = vi.fn((input: ToolInvocationRequest['input']) => {
+      expect(Object.isFrozen(input)).toBe(true)
+      return input
+    })
+    context.doppelgangerTools.register(definition('memory.inspect', invoked))
+
+    const coercion = vi.fn(() => ({ approved: true }))
+    const withCoercion = { value: 1, toJSON: coercion } as unknown as ToolInvocationRequest['input']
+    await expect(context.doppelgangerTools.invoke(request(context.doppelgangerTools, 'memory.inspect', withCoercion), 'session-one'))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
+    expect(() => digestToolInput(withCoercion)).toThrow('must be JSON-compatible')
+    expect(coercion).not.toHaveBeenCalled()
+
+    const getter = vi.fn(() => 'secret')
+    const withGetter = Object.defineProperty({ value: 1 }, 'secret', { enumerable: true, get: getter })
+    expect(() => digestToolInput(withGetter as never)).toThrow('accessor')
+    expect(getter).not.toHaveBeenCalled()
+
+    class CustomValue { readonly value = 1 }
+    const cycle: Record<string, unknown> = {}
+    cycle.self = cycle
+    const nonEnumerable = Object.defineProperty({ visible: true }, 'hidden', { value: true })
+    const withSymbol = { visible: true } as Record<PropertyKey, unknown>
+    withSymbol[Symbol('hidden')] = true
+    const deep = Array.from({ length: 66 }).reduce<Record<string, unknown>>(value => ({ value }), {})
+    const invalid = [
+      new CustomValue(), cycle, nonEnumerable, withSymbol, [1, , 3], { value: Number.NaN }, deep,
+    ]
+    for (const candidate of invalid) expect(() => digestToolInput(candidate as never)).toThrow()
+    expect(() => digestToolInput({ value: 'x'.repeat(1024 * 1024) })).toThrow('exceeds')
+
+    expect(digestToolInput({ alpha: 1, beta: [true, null] }))
+      .toBe(digestToolInput({ beta: [true, null], alpha: 1 }))
+    const valid = request(context.doppelgangerTools, 'memory.inspect', { nested: { value: 1 } }, 'call-valid')
+    await expect(context.doppelgangerTools.invoke(valid, 'session-one')).resolves.toEqual({
+      ok: true,
+      value: { nested: { value: 1 } },
+    })
+    expect(invoked).toHaveBeenCalledOnce()
     await context.fiber.dispose()
   })
 

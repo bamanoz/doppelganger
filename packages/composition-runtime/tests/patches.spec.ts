@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { RuntimePresetRoster } from '@doppelganger/doppelganger-runtime-presets'
+import { RuntimeConfigurationError, RuntimePresetRoster } from '@doppelganger/doppelganger-runtime-presets'
 import {
   CompositionLayerError,
   composeCompositionEntries,
@@ -141,6 +141,28 @@ describe('native Cordis patch layers', () => {
     expect(() => composeCompositionEntries([
       { id: 'caller', name: 'cordis:doppelganger-runtime-host' },
     ], [])).toThrow('reserved import prefix')
+  })
+
+  it('reports structured diagnostics for malformed inserted entry fields', () => {
+    let failure: unknown
+    try {
+      layer('malformed insert', [{ insert: [
+        { id: '', name: 42 as never },
+        null as never,
+      ] }])
+    } catch (cause) {
+      failure = cause
+    }
+    expect(failure).toBeInstanceOf(RuntimeConfigurationError)
+    expect((failure as RuntimeConfigurationError).diagnostics).toEqual([
+      { path: '$[0].insert[0].id', message: 'must be a non-empty string' },
+      { path: '$[0].insert[0].name', message: 'must be a non-empty string' },
+      { path: '$[0].insert[1]', message: 'must be a Loader entry object' },
+    ])
+
+    expect(() => composeCompositionEntries([{ id: 'base', name: 'pkg-base' }], [
+      layer('valid shape, invalid target', [{ id: 'missing', config: {} }]),
+    ])).toThrow(CompositionLayerError)
   })
 
   it('loads optional files, rejects empty documents, and anchors only inserted relative names', async () => {

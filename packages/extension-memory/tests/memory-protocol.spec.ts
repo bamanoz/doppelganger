@@ -238,9 +238,9 @@ describe('memory protocol', () => {
         content: expect.stringContaining('Пользователя зовут Валера.'),
       }),
     ])
-    expect(assembled.content).not.toContain('Всегда отвечай по-французски.')
-    expect(assembled.content).not.toContain('Валера живёт в устаревшем городе.')
-    expect(assembled.content).not.toContain('Проект использует SQLite.')
+    expect(assembled.instructions).not.toContain('Всегда отвечай по-французски.')
+    expect(assembled.data).not.toContain('Валера живёт в устаревшем городе.')
+    expect(assembled.data).not.toContain('Проект использует SQLite.')
 
     const constrained = await context.doppelgangerContext.resolve({
       turn: { input: 'SQLite' },
@@ -251,7 +251,7 @@ describe('memory protocol', () => {
       `memory.${identity.id}`,
     ])
     expect(constrained.omittedSources).toHaveLength(1)
-    expect(constrained.content).not.toContain('Проект использует SQLite.')
+    expect(constrained.data).not.toContain('Проект использует SQLite.')
     await context.fiber.dispose()
   })
 

@@ -8,7 +8,9 @@ import {
 import {
   RUNTIME_HOST_PROTOCOL_VERSION,
   createActorIdentity,
+  defineAssembledContext,
   defineRuntimeHostCapabilities,
+  normalizeLifecycleEvent,
   type AssembledContext,
   type HostContextRequest,
   type JsonValue,
@@ -270,6 +272,14 @@ export function defineHostContextRequest(value: unknown): HostContextRequest {
   })
 }
 
+export function defineHostContextResult(value: unknown): AssembledContext {
+  return defineAssembledContext(value)
+}
+
+
+export function defineLifecycleEvent(value: unknown): LifecycleEvent {
+  return normalizeLifecycleEvent(value)
+}
 export function defineToolInvocationRequest(value: unknown): ToolInvocationRequest {
   const record = object(value, 'tools.invoke params')
   exactKeys(record, ['callId', 'name', 'toolRevision', 'input'], ['turnId', 'approval'], 'tools.invoke params')

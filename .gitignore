@@ -1,6 +1,6 @@
 # Dependencies and build output
 node_modules/
-lib/
+/packages/*/lib/
 dist/
 coverage/
 .nyc_output/

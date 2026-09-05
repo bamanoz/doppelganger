@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   HOST_CAPABILITIES_SERVICE,
   RUNTIME_HOST_PROTOCOL_VERSION,
@@ -56,5 +56,24 @@ describe('Runtime Host capabilities', () => {
     })).toThrow('must not contain duplicates')
     expect(() => defineRuntimeHostCapabilities({ ...valid(), protocolVersion: 3 }))
       .toThrow('unsupported Runtime Host protocol version 3')
+  })
+
+  it('rejects inherited object property names as lifecycle events', () => {
+    for (const event of ['constructor', 'toString', '__proto__']) {
+      expect(() => defineRuntimeHostCapabilities({
+        ...valid(), lifecycle: { events: [event] },
+      })).toThrow('is not a supported lifecycle event')
+    }
+  })
+
+  it('rejects non-plain capability values without executing accessors or coercion hooks', () => {
+    const getter = vi.fn(() => ({ delivery: 'per-turn' }))
+    const withGetter = Object.defineProperty(valid(), 'context', { enumerable: true, get: getter })
+    expect(() => defineRuntimeHostCapabilities(withGetter)).toThrow('accessor')
+    expect(getter).not.toHaveBeenCalled()
+
+    const coercion = vi.fn(() => valid())
+    expect(() => defineRuntimeHostCapabilities({ ...valid(), toJSON: coercion })).toThrow('JSON-compatible')
+    expect(coercion).not.toHaveBeenCalled()
   })
 })

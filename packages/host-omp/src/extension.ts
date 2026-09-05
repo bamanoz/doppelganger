@@ -11,6 +11,7 @@ import {
 } from '@doppelganger/doppelganger-runtime-presets'
 import {
   LIFECYCLE_PROTOCOL_VERSION,
+  cloneJsonValue,
   createActorIdentity,
   digestToolInput,
   serializeLifecycleValue,
@@ -167,7 +168,10 @@ function validateToolJsonSchema(schema: unknown, path = '$'): void {
 }
 
 function validationOnlyJsonSchema(schema: unknown): unknown {
-  const normalized = structuredClone(schema)
+  const normalized = structuredClone(cloneJsonValue(schema, 'tool input schema', {
+    maximumBytes: 1024 * 1024,
+    maximumDepth: 64,
+  }))
   const stripDefaults = (candidate: unknown): void => {
     if (typeof candidate === 'boolean') return
     const node = schemaObject(candidate, '$')
@@ -279,6 +283,7 @@ interface ActiveTurn {
 interface OmpRuntimeBinding {
   readonly generation: number
   readonly sessionId: string
+  readonly identityPrefix: string
   readonly cwd: string
   readonly adapter: OmpAdapterSession
   readonly activeDescriptors: Map<string, ToolDescriptor>
@@ -315,15 +320,22 @@ function canonicalJson(value: JsonValue): JsonValue {
 }
 
 function boundedApprovalArguments(value: unknown): string {
-  const encoded = JSON.stringify(canonicalJson(jsonValue(value)), null, 2)
+  const encoded = JSON.stringify(canonicalJson(cloneJsonValue(value, 'OMP approval arguments', {
+    maximumBytes: 1024 * 1024,
+    maximumDepth: 64,
+  })), null, 2)
   if (encoded.length <= APPROVAL_ARGUMENT_LIMIT) return encoded
   const omitted = encoded.length - APPROVAL_ARGUMENT_LIMIT
   return `${encoded.slice(0, APPROVAL_ARGUMENT_LIMIT)}[…${omitted}ch elided…]`
 }
 
 function jsonValue(value: unknown): JsonValue {
-  return JSON.parse(JSON.stringify(value)) as JsonValue
+  return cloneJsonValue(value, 'OMP tool invocation input', {
+    maximumBytes: 1024 * 1024,
+    maximumDepth: 64,
+  })
 }
+
 
 function textResult(value: unknown, isError = false) {
   return {
@@ -403,8 +415,8 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       if (ctx.hasUI) ctx.ui.notify(message, 'error')
     }
 
-    const deliveryId = (sessionId: string, type: string, identity = 'session') => (
-      `${sessionId}:${type}:${identity}`
+    const deliveryId = (binding: OmpRuntimeBinding, type: string, identity = 'session') => (
+      `${binding.identityPrefix}:${type}:${identity}`
     )
 
     const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -608,7 +620,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
         await withTimeout(connection.request('event.publish', {
           protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
           type: 'session-disposed',
-          deliveryId: deliveryId(binding.sessionId, 'session-disposed'),
+          deliveryId: deliveryId(binding, 'session-disposed'),
           sessionId: binding.sessionId,
           timestamp: Date.now(),
           reason,
@@ -683,6 +695,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       candidate = {
         generation: target.generation,
         sessionId: target.sessionId,
+        identityPrefix: `${target.sessionId}:${randomUUID()}`,
         cwd: target.cwd,
         adapter,
         activeDescriptors: new Map(),
@@ -718,7 +731,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       await publish(candidate, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'session-started',
-        deliveryId: deliveryId(candidate.sessionId, 'session-started'),
+        deliveryId: deliveryId(candidate, 'session-started'),
         sessionId: candidate.sessionId,
         timestamp: Date.now(),
       })
@@ -786,7 +799,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
         await connection.request('omp.todo-reminder', {
           protocolVersion: OMP_HOST_EVENT_PROTOCOL_VERSION,
           type: 'todo-reminder',
-          deliveryId: deliveryId(binding.sessionId, 'omp-todo-reminder', String(++binding.ompEventOrdinal)),
+          deliveryId: deliveryId(binding, 'omp-todo-reminder', String(++binding.ompEventOrdinal)),
           sessionId: binding.sessionId,
           timestamp: Date.now(),
           todos: event.todos.map(todo => ({
@@ -814,7 +827,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       const binding = await requestBinding(ctx)
       if (binding === undefined || !isCurrent(binding)) return
       const activeTurn: ActiveTurn = {
-        id: `${binding.sessionId}:turn:${++binding.turnOrdinal}`,
+        id: `${binding.identityPrefix}:turn:${++binding.turnOrdinal}`,
         principalInput: event.prompt,
         started: false,
       }
@@ -823,7 +836,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
         const connection = binding.adapter.connection()
         if (connection === undefined) return
         const assembled = defineHostContextResult(await connection.request('context.resolve', {
-          requestId: `${binding.sessionId}:context:${++binding.contextRequestOrdinal}`,
+          requestId: `${binding.identityPrefix}:context:${++binding.contextRequestOrdinal}`,
           turn: { input: activeTurn.principalInput, turnId: activeTurn.id },
           tokenBudget: options.tokenBudget ?? 4000,
         }))
@@ -874,7 +887,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'turn-started',
-        deliveryId: deliveryId(binding.sessionId, 'turn-started', activeTurn.id),
+        deliveryId: deliveryId(binding, 'turn-started', activeTurn.id),
         sessionId: binding.sessionId,
         turnId: activeTurn.id,
         timestamp: event.timestamp,
@@ -888,7 +901,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'tool-started',
-        deliveryId: deliveryId(binding.sessionId, 'tool-started', event.toolCallId),
+        deliveryId: deliveryId(binding, 'tool-started', event.toolCallId),
         sessionId: binding.sessionId,
         turnId: activeTurn.id,
         callId: event.toolCallId,
@@ -905,7 +918,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'tool-completed',
-        deliveryId: deliveryId(binding.sessionId, 'tool-completed', event.toolCallId),
+        deliveryId: deliveryId(binding, 'tool-completed', event.toolCallId),
         sessionId: binding.sessionId,
         turnId: activeTurn.id,
         callId: event.toolCallId,
@@ -928,7 +941,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'turn-committed',
-        deliveryId: deliveryId(binding.sessionId, 'turn-committed', activeTurn.id),
+        deliveryId: deliveryId(binding, 'turn-committed', activeTurn.id),
         sessionId: binding.sessionId,
         turnId: activeTurn.id,
         timestamp: messageTimestamp(event.message),
@@ -946,7 +959,7 @@ export function createDoppelgangerOmpExtension(options: DoppelgangerOmpExtension
       await publish(binding, {
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         type: 'pre-compaction',
-        deliveryId: deliveryId(binding.sessionId, 'pre-compaction', String(++binding.preCompactionOrdinal)),
+        deliveryId: deliveryId(binding, 'pre-compaction', String(++binding.preCompactionOrdinal)),
         sessionId: binding.sessionId,
         timestamp: Date.now(),
         ...(binding.turn === undefined ? {} : { turnId: binding.turn.id }),

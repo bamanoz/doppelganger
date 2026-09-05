@@ -1,10 +1,16 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
+import { ToolRegistry, digestToolInput, type ToolDefinition } from '@doppelganger/doppelganger-protocols'
+import { NodeOmpChildFactory } from '../src/process.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   OMP_RPC_PROTOCOL_VERSION,
   OMP_RUNTIME_HOST_CAPABILITIES,
+  defineToolCatalogSnapshot,
+  defineToolInvocationResult,
   type SerializedOmpActivation,
 } from '../src/contracts.ts'
 import {
@@ -255,5 +261,63 @@ describe('OMP adapter state machine', () => {
     await new Promise(resolve => setImmediate(resolve))
     expect(adapter.snapshot().catalog.revision).toBe('catalog:2')
     expect(observed).toEqual(['catalog:1', 'catalog:2'])
+  })
+})
+describe('OMP strict portable JSON admission', () => {
+  it('rejects non-JSON descriptors and results without coercion', () => {
+    const toJSON = vi.fn(() => ({ coerced: true }))
+    expect(() => defineToolCatalogSnapshot({
+      revision: 'catalog:1',
+      tools: [{
+        name: 'memory.search', label: 'Search', description: 'search', revision: 'tool:1', available: true,
+        inputSchema: { type: 'object', bad: NaN, toJSON },
+      }],
+    })).toThrow('non-finite number')
+    expect(toJSON).not.toHaveBeenCalled()
+    expect(() => defineToolInvocationResult({ ok: true, value: { missing: undefined } }))
+      .toThrow('tools.invoke result.value.missing must be JSON-compatible')
+    expect(() => defineToolInvocationResult({ ok: true, value: { get secret() { throw new Error('executed') } } }))
+      .toThrow('tools.invoke result.value.secret must not be an accessor')
+    const symbol = Symbol('unsupported')
+    expect(() => defineToolInvocationResult({ ok: true, value: { [symbol]: true } })).toThrow('symbol')
+    const sparse = [1, , 3]
+    expect(() => defineToolInvocationResult({ ok: true, value: sparse }))
+      .toThrow('tools.invoke result.value must contain a dense JSON array without extra properties')
+    const cycle: Record<string, unknown> = {}
+    cycle.self = cycle
+    expect(() => defineToolInvocationResult({ ok: true, value: cycle })).toThrow('cycles')
+  })
+  it('preserves exact valid JSON values through direct and transported invocation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-json-parity-'))
+    temporaryRoots.push(root)
+    const definition: ToolDefinition = {
+      name: 'parity.echo', description: 'Echo exact JSON', approval: { policy: 'required' },
+      inputSchema: { type: 'object', properties: { omitted: { type: 'array', default: [] } } },
+      invoke: input => input,
+    }
+    await writeFile(join(root, 'echo.mjs'), `export default { name: 'parity-echo', inject: ['doppelgangerTools'], apply(ctx) { ctx.doppelgangerTools.register({ ...${JSON.stringify(definition)}, invoke: input => input }) } }`)
+    await writeFile(join(root, 'runtime.cordis.yml'), JSON.stringify([
+      { id: 'tools', name: '@doppelganger/doppelganger-protocols/tools', isolate: { doppelgangerTools: 'session' } },
+      { id: 'echo', name: './echo.mjs', isolate: { doppelgangerTools: 'session' } },
+    ]))
+    const direct = new Context()
+    const adapter = new OmpAdapterSession({ activation: activation(root, 'parity'), childFactory: new NodeOmpChildFactory({ childPath: fileURLToPath(new URL('../src/child.ts', import.meta.url)) }) })
+    try {
+      await direct.plugin(ToolRegistry)
+      direct.doppelgangerTools.register(definition)
+      expect((await adapter.start()).state).toBe('active')
+      const input = { text: 'JSON: Ελληνικά 中文', array: [null, false, 0, 1.25, { nested: 'value' }], empty: {}, enabled: true }
+      const requestFor = (revision: string) => ({ callId: 'parity-call', name: definition.name, toolRevision: revision, input, approval: { kind: 'one-shot' as const, grantId: 'parity-grant', callId: 'parity-call', toolRevision: revision, inputDigest: digestToolInput(input) } })
+      const directResult = await direct.doppelgangerTools.invoke(requestFor(direct.doppelgangerTools.snapshot().tools[0]!.revision), 'parity')
+      const transported = defineToolInvocationResult(await adapter.connection()!.request('tools.invoke', requestFor(adapter.snapshot().catalog.tools[0]!.revision)))
+      expect(directResult).toEqual({ ok: true, value: input })
+      expect(transported).toEqual(directResult)
+      if (!transported.ok) throw new Error(transported.error.message)
+      expect(transported.value).not.toHaveProperty('omitted')
+      expect(digestToolInput(transported.value)).toBe(digestToolInput(input))
+    } finally {
+      await adapter.dispose()
+      await direct.fiber.dispose()
+    }
   })
 })

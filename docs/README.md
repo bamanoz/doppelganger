@@ -15,7 +15,7 @@ This tree is the navigation root and authoritative description of the currently 
 | Features | [Evolution](features/evolution.md) | Optional proposal ledger, state machines, storage, controls, reminders, consent, and executor boundaries |
 | Features | [MCP tool import](features/mcp-tool-import.md) | Runtime Preset-owned MCP transports, operator-owned acquisition, independent background startup, discovery, naming, invocation, approval, refresh, reload, diagnostics, trust, and disposal |
 | Features | [Memory](features/memory.md) | Canonical memory, candidates, retrieval, mutations, and semantic contracts |
-| Features | [Runtime logging](features/runtime-logging.md) | Default-off Cordis log routing, operational event vocabulary and component coverage, bounded session records and sink queues, rolling JSONL files, private Sentry delivery, reload/disposal, and host neutrality |
+| Features | [Runtime logging](features/runtime-logging.md) | Default-off Cordis log routing, operational event vocabulary and component coverage, bounded session records and sink queues, rolling JSONL files, opt-in activation retention and ownership coordination, private Sentry delivery, reload/disposal, and host neutrality |
 | Hosts | [Oh My Pi](hosts/oh-my-pi.md) | OMP pure-roster activation, child process, RPC, context/tool/approval projection, and failure behavior |
 | Hosts | [DeepSeek Harness](hosts/deepseek-harness.md) | Deferred host, mandatory source-research gate, planned approval projection, and current Agent Skill discovery seam |
 | Research | [Agent host extension surfaces](research/host-extension-surfaces/README.md) | Source-pinned host capability evidence, comparative portability boundary, adapter families, and deferred protocol candidates |

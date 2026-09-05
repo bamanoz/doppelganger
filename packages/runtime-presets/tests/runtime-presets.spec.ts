@@ -120,6 +120,34 @@ describe('Runtime Preset roster', () => {
     })
   })
 
+  it('validates Loader shape without interpreting ordinary plugin config', async () => {
+    const files = await fixture()
+    const valid = join(files.home, '.runtime-presets', 'nested')
+    await mkdir(valid, { recursive: true })
+    await writeFile(join(valid, 'ordinary.mjs'), 'export default { name: "ordinary", apply() {} }\n')
+    await writeFile(join(valid, 'runtime.cordis.yml'), [
+      '- id: group',
+      '  name: cordis:group',
+      '  group: true',
+      '  config:',
+      '    - id: child',
+      '      name: ./ordinary.mjs',
+      '      config: { arbitrary: true }',
+      '',
+    ].join('\n'))
+    expect((await files.roster.list()).find(preset => preset.id === 'nested')).toMatchObject({ status: 'healthy' })
+    await writeFile(join(valid, 'runtime.cordis.yml'), '- id: group\n  name: plugin\n- id: group\n  name: plugin\n')
+    expect((await files.roster.list()).find(preset => preset.id === 'nested')).toMatchObject({
+      status: 'broken',
+      diagnostics: expect.arrayContaining([expect.objectContaining({ path: '$[1].id', message: expect.stringContaining('duplicate') })]),
+    })
+    await writeFile(join(valid, 'runtime.cordis.yml'), '- id: group\n  name: plugin\n  group: true\n  config: {}\n')
+    expect((await files.roster.list()).find(preset => preset.id === 'nested')).toMatchObject({
+      status: 'broken',
+      diagnostics: expect.arrayContaining([expect.objectContaining({ path: '$[0].config', message: expect.stringContaining('array') })]),
+    })
+  })
+
   it('validates bare package subpath exports without depending on process cwd', async () => {
     const files = await fixture()
     const packageDirectory = join(files.root, 'node_modules', 'runtime-export-fixture')

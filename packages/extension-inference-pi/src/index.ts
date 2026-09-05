@@ -1,8 +1,8 @@
 export { default } from './plugin.ts'
 export {
   PiInferencePlugin,
-  PiInferencePluginConfigSchema,
 } from './plugin.ts'
+export { PiInferencePluginConfigSchema } from './config.ts'
 export {
   normalizePiInferencePluginConfig,
   type NormalizedPiInferencePluginConfig,

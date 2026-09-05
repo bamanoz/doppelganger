@@ -1,134 +1,126 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Plugin } from '@deepseek-ai/cordis'
+import { fileURLToPath } from 'node:url'
+import { it } from 'vitest'
+import { defineAssembledContext, type ActorIdentity, type RuntimeHostBridge } from '@doppelganger/doppelganger-protocols'
 import {
-  createActorIdentityPlugin,
-  createRuntimeHostPlugin,
-  defineRuntimeHostCapabilities,
-  type ActorIdentity,
-  type RuntimeHostBridge,
-  type RuntimeHostBinding,
-  type ToolRegistry,
-} from '@doppelganger/doppelganger-protocols'
-import {
-  runtimeHostConformance,
+  conformanceApproval, conformanceCallLifecycle, conformanceCatalog, runtimeHostConformance,
   type RuntimeHostConformanceFactory,
 } from '@doppelganger/doppelganger-protocols/test-support/runtime-host-conformance'
-import {
-  createCompositionDefinition,
-  createCompositionRuntime,
-} from '@doppelganger/doppelganger-composition-runtime'
-import { OMP_RUNTIME_HOST_CAPABILITIES } from '../src/contracts.ts'
+import { OmpAdapterSession, type OmpChildConnection } from '../src/adapter.ts'
+import { NodeOmpChildFactory } from '../src/process.ts'
+import { defineToolCancellationResult, defineToolInvocationResult } from '../src/contracts.ts'
+
+const childPath = fileURLToPath(new URL('../src/child.ts', import.meta.url))
+const controlPath = fileURLToPath(new URL('./fixtures/conformance-control.mjs', import.meta.url))
 
 const ompFactory: RuntimeHostConformanceFactory = {
+  actorStates: ['unbound', 'bound'],
+  fixedCapabilities: true,
   async create(options = {}) {
+    if (options.actor === 'absent') throw new Error('OMP always mounts an Actor Identity provider')
     const root = await mkdtemp(join(tmpdir(), 'doppelganger-omp-conformance-'))
     const loaderPath = join(root, 'runtime.cordis.yml')
+    const endpointPath = join(root, 'control.endpoint')
     const entries = [
-      ...(options.context === false
-        ? []
-        : [
-            '- id: conformance-context',
-            '  name: "@doppelganger/doppelganger-protocols/context"',
-            '  isolate:',
-            '    doppelgangerContext: session',
-          ]),
-      ...(options.tools === false
-        ? []
-        : [
-            '- id: conformance-tools',
-            '  name: "@doppelganger/doppelganger-protocols/tools"',
-            '  isolate:',
-            '    doppelgangerTools: session',
-          ]),
+      ...(options.context === false ? [] : [{ id: 'context', name: '@doppelganger/doppelganger-protocols/context', isolate: { doppelgangerContext: 'session' } }]),
+      ...(options.tools === false ? [] : [{ id: 'tools', name: '@doppelganger/doppelganger-protocols/tools', isolate: { doppelgangerTools: 'session' } }]),
+      { id: 'control', name: controlPath, config: { endpointPath }, isolate: { doppelgangerActor: 'session', doppelgangerTools: 'session' } },
     ]
-    await mkdir(root, { recursive: true })
-    await writeFile(loaderPath, entries.length === 0 ? '[]\n' : `${entries.join('\n')}\n`)
-
-    let bridge: RuntimeHostBridge | undefined
-    let registry: ToolRegistry | undefined
-    let actorIdentity: ActorIdentity | undefined
+    await writeFile(loaderPath, JSON.stringify(entries))
     const catalogChanges: string[] = []
-    const binding: RuntimeHostBinding = {
-      attach(candidate) {
-        if (bridge !== undefined) throw new Error('OMP conformance bridge is already attached')
-        bridge = candidate
+    const catalogWaiters = new Set<() => void>()
+    const realFactory = new NodeOmpChildFactory({ childPath, shutdownTimeoutMs: 2000 })
+    let disposed = false
+    const adapter = new OmpAdapterSession({
+      activation: {
+        composition: { id: 'omp-conformance', revision: 'one', loaderPath, patches: [] },
+        hostKind: 'omp', sessionId: options.sessionId ?? crypto.randomUUID(), workspaceRoot: root, watch: false,
+        ...(typeof options.actor === 'object' ? { actorId: options.actor.actorId } : {}),
       },
-      detach(candidate) {
-        if (bridge === candidate) bridge = undefined
+      childFactory: {
+        async start() {
+          const child = await realFactory.start()
+          // Malformed capability injection exercises the actual child handshake decoder.
+          if (options.capabilities === undefined) return child
+          return {
+            request(method, params) {
+              return child.request(method, method === 'session.activate' ? { ...(params as Record<string, unknown>), capabilities: options.capabilities } : params)
+            },
+            onNotification: (method, callback) => child.onNotification(method, callback),
+            dispose: () => child.dispose(),
+          } satisfies OmpChildConnection
+        },
       },
-      toolCatalogChanged(revision) {
-        catalogChanges.push(revision)
+      onCatalogChanged(catalog) {
+        if (disposed) return
+        catalogChanges.push(catalog.revision)
+        for (const wake of catalogWaiters) wake()
       },
+    })
+    const dispose = async () => {
+      if (disposed) return
+      disposed = true
+      try { await adapter.dispose() } finally { await rm(root, { recursive: true, force: true }) }
     }
-    const controlServices = [
-      ...(options.tools === false ? [] : ['doppelgangerTools']),
-      ...(options.actor === undefined || options.actor === 'absent' ? [] : ['doppelgangerActor']),
-    ]
-    const control: Plugin = {
-      name: 'omp-runtime-host-conformance-control',
-      inject: controlServices,
-      apply(ctx) {
-        registry = ctx.get('doppelgangerTools', false) as ToolRegistry | undefined
-        actorIdentity = ctx.get('doppelgangerActor', false) as ActorIdentity | undefined
-      },
-    }
-    const capabilities = defineRuntimeHostCapabilities(options.capabilities ?? OMP_RUNTIME_HOST_CAPABILITIES)
-    const runtime = createCompositionRuntime({ watch: false })
-    const actor = options.actor === 'unbound'
-      ? createActorIdentityPlugin()
-      : typeof options.actor === 'object'
-        ? createActorIdentityPlugin(options.actor.actorId)
-        : undefined
     try {
-      const session = await runtime.activate({
-        composition: createCompositionDefinition({
-          id: 'omp-runtime-host-conformance',
-          revision: 'conformance-one',
-          loaderPath,
-        }),
-        sessionId: options.sessionId ?? crypto.randomUUID(),
-        workspaceRoot: root,
-        runtimePlugins: {
-          ...(actor === undefined ? {} : { actor }),
-          'runtime-host': createRuntimeHostPlugin(binding, capabilities),
-          'conformance-control': control,
-        },
-        runtimePluginIsolation: {
-          ...(actor === undefined ? {} : { actor: ['doppelgangerActor'] }),
-          'runtime-host': [
-            'doppelgangerRuntimeSession',
-            'doppelgangerContext',
-            'doppelgangerHostCapabilities',
-            'doppelgangerLifecycle',
-            'doppelgangerTools',
-          ],
-          'conformance-control': controlServices,
-        },
-      })
-      if (bridge === undefined) throw new Error('OMP conformance bridge did not attach')
-      const attached = bridge
-      return {
-        bridge: attached,
-        actorIdentity,
-        catalogChanges,
-        registerSet(ownerId, definitions) {
-          if (registry === undefined) throw new Error('OMP conformance tools protocol is absent')
-          return registry.registerSet(ownerId, definitions)
-        },
-        async dispose() {
-          await session.dispose()
-          await runtime.dispose()
-          await rm(root, { recursive: true, force: true })
-        },
+      const started = await adapter.start()
+      if (started.state !== 'active' || started.capabilities === undefined) throw new Error(started.diagnostic?.message ?? 'OMP did not activate')
+      const connection = adapter.connection()!
+      if (connection.processId === undefined) throw new Error('conformance must own an actual child process')
+      const endpoint = await readFile(endpointPath, 'utf8')
+      async function control(command: Record<string, unknown>): Promise<{ revision: string; actor: ActorIdentity }> {
+        if (disposed) throw new Error('conformance session is disposed')
+        const response = await fetch(endpoint, { method: 'POST', body: JSON.stringify(command), signal: AbortSignal.timeout(5000) })
+        const result = await response.json() as { revision: string; actor: ActorIdentity; error?: string }
+        if (!response.ok) throw new Error(result.error)
+        return result
       }
-    } catch (cause) {
-      await runtime.dispose().catch(() => undefined)
-      await rm(root, { recursive: true, force: true })
-      throw cause
-    }
+      async function waitCatalog(revision: string): Promise<void> {
+        if (adapter.snapshot().catalog.revision === revision) return
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => { catalogWaiters.delete(wake); reject(new Error(`catalog ${revision} did not arrive`)) }, 5000)
+          const wake = () => {
+            if (adapter.snapshot().catalog.revision !== revision) return
+            clearTimeout(timer)
+            catalogWaiters.delete(wake)
+            resolve()
+          }
+          catalogWaiters.add(wake)
+          wake()
+        })
+      }
+      const observed = await control({ op: 'snapshot' })
+      catalogChanges.length = 0
+      const bridge: RuntimeHostBridge = {
+        capabilities: started.capabilities,
+        snapshotTools: () => adapter.snapshot().catalog,
+        resolveContext: async request => defineAssembledContext(await connection.request('context.resolve', request)),
+        invokeTool: async request => defineToolInvocationResult(await connection.request('tools.invoke', request)),
+        cancelTool: async request => defineToolCancellationResult(await connection.request('tools.cancel', request)),
+        publishLifecycle: async event => { await connection.request('event.publish', event) },
+      }
+      return {
+        bridge, actorIdentity: observed.actor, catalogChanges,
+        async registerSet(ownerId, definitions) {
+          const result = await control({ op: 'register', owner: ownerId, definitions })
+          await waitCatalog(result.revision)
+          return {
+            async replace(next) { const result = await control({ op: 'replace', owner: ownerId, definitions: next }); await waitCatalog(result.revision) },
+            async dispose() { const result = await control({ op: 'dispose-owner', owner: ownerId }); await waitCatalog(result.revision) },
+          }
+        },
+        async waitForCall(callId) { await control({ op: 'started', callId }) },
+        async releaseCall(callId) { await control({ op: 'release', callId }) },
+        dispose,
+      }
+    } catch (error) { await dispose(); throw error }
   },
 }
 
 runtimeHostConformance('OMP adapter', ompFactory)
+
+it('preserves catalog and stale-revision semantics through the real OMP adapter', async () => { await conformanceCatalog(ompFactory) })
+it('enforces one-shot approval through the real OMP adapter', async () => { await conformanceApproval(ompFactory) })
+it('settles cancellation and disposal through the real OMP adapter', async () => { await conformanceCallLifecycle(ompFactory) })

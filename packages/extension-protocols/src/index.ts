@@ -1,3 +1,4 @@
+export { cloneJsonValue, canonicalJson, isJsonObjectPrototype, type JsonValueLimits } from './json-value.ts'
 export {
   ACTOR_IDENTITY_SERVICE,
   createActorIdentity,

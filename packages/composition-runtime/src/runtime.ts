@@ -19,10 +19,9 @@ import {
 } from './activation-audit.ts'
 import type { CompositionDefinition } from './definition.ts'
 import {
-  composeCompositionEntries,
   defineCompositionPatchLayer,
-  flattenCompositionPatches,
   loadCompositionPatchFile,
+  prepareComposition,
   type CompositionPatchLayer,
 } from './patches.ts'
 import {
@@ -77,8 +76,6 @@ export interface CompositionRuntime {
 }
 
 interface CompositionGeneration {
-  readonly base: readonly EntryOptions[]
-  readonly layers: readonly CompositionPatchLayer[]
   readonly patches: readonly PatchOptions[]
   readonly effective: readonly EntryOptions[]
   readonly revision: string
@@ -120,6 +117,13 @@ async function settleCleanup(stages: readonly (() => Promise<void>)[], message: 
     const details = failures.map(error => error instanceof Error ? error.message : String(error)).join('; ')
     throw new AggregateError(failures, `${message}: ${details}`)
   }
+}
+
+function diagnosticFailureText(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const own = error.stack ?? error.message
+  if (error instanceof AggregateError) return [own, ...error.errors.map(diagnosticFailureText)].join('\nCaused by: ')
+  return error.cause === undefined ? own : `${own}\nCaused by: ${diagnosticFailureText(error.cause)}`
 }
 
 function validRuntimePlugins(input: Readonly<Record<string, Plugin>> | undefined): Readonly<Record<string, Plugin>> {
@@ -200,22 +204,16 @@ async function loadGeneration(
     if ('filename' in input) {
       const loaded = await loadCompositionPatchFile(input)
       if (loaded !== undefined) layers.push(loaded)
-    } else {
-      layers.push(defineCompositionPatchLayer(input))
-    }
+    } else layers.push(defineCompositionPatchLayer(input))
   }
   layers.push(trustedRuntimeLayer)
-  const patches = flattenCompositionPatches(base, layers)
-  const effective = composeCompositionEntries(base, layers)
+  const prepared = prepareComposition(base, layers)
   return Object.freeze({
-    base,
-    layers: Object.freeze(layers),
-    patches: Object.freeze(patches),
-    effective: Object.freeze(effective),
-    revision: generationRevision(effective),
+    patches: prepared.patches,
+    effective: prepared.effective,
+    revision: generationRevision(prepared.effective),
   })
 }
-
 interface SessionTreeMount {
   readonly plugin: typeof Include
   readonly trees: Include[]
@@ -452,28 +450,32 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
             logger.warn('runtime.session.reload.failed revision=%s reason=%s', previousGeneration.revision, error instanceof CompositionActivationError ? 'audit' : error instanceof Error ? error.name : typeof error)
             logger.info('runtime.session.rollback.started revision=%s', previousGeneration.revision)
             let failure = error
+            let restoredDiagnostics: CompositionDiagnostics | undefined
             try {
               await tree.root.update(structuredClone(previousGeneration.effective) as EntryOptions[])
               await tree.await()
+              restoredDiagnostics = await auditComposition(request.composition, previousGeneration.revision, tree)
+              logger.debug('runtime.session.rollback.audit.completed entries=%d failures=%d', restoredDiagnostics.entries.length, activationFailures(restoredDiagnostics).length)
+              if (activationFailures(restoredDiagnostics).length > 0) throw new CompositionActivationError(restoredDiagnostics)
               logger.info('runtime.session.rollback.completed revision=%s', previousGeneration.revision)
             } catch (rollbackError) {
               logger.error('runtime.session.rollback.failed revision=%s reason=%s', previousGeneration.revision, rollbackError instanceof Error ? rollbackError.name : typeof rollbackError)
-              failure = new AggregateError(
-                [error, rollbackError],
-                `failed to roll back composition ${request.composition.id}`,
-              )
+              failure = new AggregateError([error, rollbackError], `failed to roll back composition ${request.composition.id}`)
+              try {
+                restoredDiagnostics ??= await auditComposition(request.composition, previousGeneration.revision, tree)
+              } catch (auditError) {
+                restoredDiagnostics = failedCompositionDiagnostics(
+                  generationDefinition(request.composition, previousGeneration.revision),
+                  new AggregateError([rollbackError, auditError], 'restoration audit failed'),
+                )
+              }
             }
             currentGeneration = previousGeneration
             diagnostics = Object.freeze({
-              ...previousDiagnostics,
-              reload: Object.freeze({
-                state: 'failed' as const,
-                error: failure instanceof Error ? failure.stack ?? failure.message : String(failure),
-              }),
+              ...(restoredDiagnostics ?? previousDiagnostics),
+              reload: Object.freeze({ state: 'failed' as const, error: diagnosticFailureText(failure) }),
             })
-            if (watchSettleMs > 0) {
-              await new Promise<void>(resolve => setTimeout(resolve, watchSettleMs))
-            }
+            if (watchSettleMs > 0) await new Promise<void>(resolve => setTimeout(resolve, watchSettleMs))
             try {
               options.onReloadFailure?.(Object.freeze({
                 compositionId: request.composition.id,

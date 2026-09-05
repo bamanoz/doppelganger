@@ -43,7 +43,7 @@ Composition Runtime SHALL install one runtime logging router under each Runtime 
 - **THEN** any configured session exporter can consume the normalized record without changing that plugin
 
 ### Requirement: Normalized records are bounded and transport-neutral
-Each runtime log record SHALL contain only validated JSON-compatible fields: router sequence, timestamp, severity, logger name, rendered message, Runtime Session ID, Runtime Preset ID, and an optional bounded error description. Rendering SHALL handle cyclic, throwing, oversized, and non-JSON Cordis arguments without throwing from the source plugin call, and SHALL enforce configured repository-wide maximum lengths before a sink receives the record.
+Each runtime log record SHALL contain only validated JSON-compatible fields: runtime activation identity, router sequence, timestamp, severity, logger name, rendered message, Runtime Session ID, Runtime Preset ID, and an optional bounded error description. Rendering SHALL handle cyclic, throwing, oversized, and non-JSON Cordis arguments without throwing from the source plugin call, and SHALL enforce configured repository-wide maximum lengths before a sink receives the record. The record's `runtimeActivationId` SHALL equal the immutable activation identity exposed by the owning session's `doppelgangerLogging` scope.
 
 #### Scenario: Plugin logs hostile arguments
 - **ID**: `runtime.logging.record.hostile-arguments`
@@ -51,11 +51,11 @@ Each runtime log record SHALL contain only validated JSON-compatible fields: rou
 - **WHEN** a plugin logs cyclic objects, values with throwing inspection hooks, errors, symbols, functions, or oversized strings
 - **THEN** the router emits a bounded immutable JSON-compatible record or a bounded rendering marker without propagating an exception to the plugin
 
-#### Scenario: Record carries session correlation
+#### Scenario: Record carries session and activation correlation
 - **ID**: `runtime.logging.record.session-correlation`
 - **EVIDENCE**: `packages/composition-runtime/tests/runtime-logging.spec.ts::routes existing ctx.logger calls without a replacement logging facade`
 - **WHEN** a session-owned Cordis log message is normalized
-- **THEN** the record identifies the owning Runtime Session and Runtime Preset without adding logging fields to Runtime Session metadata
+- **THEN** the record identifies the concrete runtime activation, owning Runtime Session, and Runtime Preset without adding logging fields to general Runtime Session metadata
 
 ### Requirement: Early buffering is bounded and conditional
 Before successful activation settlement, the router SHALL retain only a bounded FIFO of normalized records from its Runtime Session. Every sink that registers during that activation window SHALL receive the currently retained records exactly once in sequence order before its live deliveries. After successful activation settlement, the router SHALL discard the early buffer; a sink registered by a later valid reload SHALL begin with records emitted after that registration. If no sink registered, later records SHALL not be retained until a sink exists.
@@ -101,6 +101,7 @@ A logging exporter SHALL register one sink through the same session-isolated `do
 
 ### Requirement: Exporter configuration is Loader-owned and strict
 Each first-party exporter SHALL be an independently mountable Cordis Loader plugin with closed, synchronously validated configuration. Exporter settings SHALL live only in Runtime Preset or Runtime Patch rows; Doppelganger home control configuration, project selection manifests, host options, Runtime Session metadata, and the Runtime Host API SHALL gain no logging destination fields.
+Each exporter SHALL have one canonical admission contract shared by its direct normalizer and Loader schema, including unknown fields, omissions, defaults, string units, numeric limits and paired destination fields. Direct calls SHALL enforce the existing Loader limits of 4096 characters for file path/pathTemplate and 256 characters for Sentry dsnEnv. Admission SHALL remain side-effect-free; credential resolution and destination acquisition SHALL remain activation-owned. Existing static path behavior, activation-derived templates and activation correlation SHALL remain intact.
 
 #### Scenario: Exporter configuration is malformed
 - **ID**: `runtime.logging.config.invalid`
@@ -114,6 +115,18 @@ Each first-party exporter SHALL be an independently mountable Cordis Loader plug
 - **WHEN** an ordered user or project Runtime Patch inserts a valid exporter row into the selected Runtime Preset
 - **THEN** the exporter activates for that Runtime Session without changing preset selection, host configuration, or another session
 
+#### Scenario: File configuration uses either public entrypoint
+- **ID**: `runtime.logging.config.file-admission-parity`
+- **EVIDENCE**: `packages/extension-logging-file/tests/file-exporter.spec.ts::uses identical direct and Loader file configuration admission`
+- **WHEN** the same valid or invalid file configuration enters through its direct normalizer and actual Loader schema
+- **THEN** both apply the same defaults, path/template constraints and bounds and reject malformed input before opening a destination
+
+#### Scenario: Sentry configuration uses either public entrypoint
+- **ID**: `runtime.logging.config.sentry-admission-parity`
+- **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::uses identical direct and Loader Sentry configuration admission`
+- **WHEN** the same valid or invalid Sentry configuration enters through its direct normalizer and actual Loader schema
+- **THEN** both apply the same omission/default rules and bounded credential-reference configuration without resolving credentials or opening a client during validation
+
 ### Requirement: Exporters apply independent severity and logger filters
 Every first-party exporter SHALL accept an explicit maximum verbosity plus optional ordered logger-name overrides. Severity SHALL follow Cordis's `error`, `info`, `warn`, and `debug` vocabulary while configuration SHALL use names rather than numeric levels. Filtering SHALL occur before destination queueing or network work.
 
@@ -125,22 +138,22 @@ Every first-party exporter SHALL accept an explicit maximum verbosity plus optio
 - **THEN** each destination receives exactly the records admitted by its own configuration
 
 ### Requirement: Rolling file exporter writes durable JSONL records
-`@doppelganger/doppelganger-logging-file` SHALL expose a Loader plugin that requires same-realm `doppelgangerLogging`, accepts an explicit absolute file path, creates only the required parent directory, and appends one complete normalized record per UTF-8 JSON line through a serialized writer. It SHALL reject directories, symlinks at the configured active path, and unsupported existing file types. The trusted operator explicitly owns the destination, so the exporter SHALL impose no hidden workspace or Doppelganger-home confinement policy.
+`@doppelganger/doppelganger-logging-file` SHALL expose a Loader plugin that requires same-realm `doppelgangerLogging`, accepts exactly one static absolute file `path` or activation `pathTemplate`, resolves any template before writer creation, creates only the required resolved parent directory, and appends one complete normalized record per UTF-8 JSON line through a serialized writer. It SHALL reject directories, symlinks at the resolved active path, and unsupported existing file types. The trusted operator explicitly owns the destination, so the exporter SHALL impose no hidden workspace or Doppelganger-home confinement policy.
 
 #### Scenario: Valid file exporter receives records
 - **ID**: `runtime.logging.file.append-jsonl`
 - **EVIDENCE**: `packages/extension-logging-file/tests/file-exporter.spec.ts::appends ordered complete JSONL records at an explicit absolute path`
-- **WHEN** a valid file exporter is composed and admitted records are emitted
-- **THEN** the configured file contains those immutable records as parseable newline-delimited JSON in delivery order
+- **WHEN** a valid static or activation-templated file exporter is composed and admitted records are emitted
+- **THEN** the resolved file contains those immutable records as parseable newline-delimited JSON in delivery order
 
-#### Scenario: Configured path is unsafe to open
+#### Scenario: Configured or resolved path is unsafe to open
 - **ID**: `runtime.logging.file.path-rejected`
 - **EVIDENCE**: `packages/extension-logging-file/tests/file-exporter.spec.ts::rejects relative directory symlink and unsupported destination paths`
-- **WHEN** the configured path is relative or resolves at open time to a directory, symlink, or unsupported file type
+- **WHEN** the configured path form is invalid or resolves at open time to a directory, symlink, or unsupported file type
 - **THEN** the exporter fails activation before accepting records and does not follow or replace the unsafe destination
 
 ### Requirement: File rotation is deterministic and bounded
-The file exporter SHALL rotate before appending a record that would make the active file exceed configured `maxBytes`, except that one individually bounded record MAY occupy an otherwise empty active file. Rotation SHALL close the active handle, shift retained files from `<path>.<n>` to `<path>.<n+1>`, move the prior active file to `<path>.1`, delete generations beyond configured `maxFiles`, and reopen a fresh active file. The configured retained-file count SHALL exclude the active file.
+The file exporter SHALL rotate before appending a record that would make the active file exceed configured `maxBytes`, except that one individually bounded record MAY occupy an otherwise empty active file. Rotation SHALL close the active handle, remove `<path>.<maxFiles>`, shift retained files from `<path>.<n>` to `<path>.<n+1>`, move the prior active file to `<path>.1`, and reopen a fresh active file. The configured retained-file count SHALL exclude the active file. Lowering `maxFiles` SHALL NOT imply retroactive pruning of higher existing suffixes; enabled cross-activation cleanup SHALL include such suffixes when removing an eligible family.
 
 #### Scenario: Append crosses the rotation threshold
 - **ID**: `runtime.logging.file.rotate-threshold`
@@ -188,13 +201,13 @@ The Sentry exporter SHALL require `dsnEnv` to name one environment variable and 
 - **THEN** the Sentry exporter row fails activation without sending a request or exposing the credential value
 
 ### Requirement: Sentry maps records to errors and breadcrumbs
-The Sentry exporter SHALL add each admitted non-error record as a bounded breadcrumb on its private scope and SHALL submit each admitted `error` record as one event with runtime session, Runtime Preset, logger, severity, and sequence metadata. When the normalized record carries an error description, the exporter SHALL preserve its bounded error semantics; otherwise it SHALL capture the rendered message. It SHALL not send raw Cordis arguments.
+The Sentry exporter SHALL add each admitted non-error record as a bounded breadcrumb carrying concrete runtime activation, Runtime Session, Runtime Preset, logger, severity, and sequence correlation. It SHALL submit each admitted `error` record as one event with the same correlation in tags or context. When the normalized record carries an error description, the exporter SHALL preserve its bounded error semantics; otherwise it SHALL capture the rendered message. It SHALL not send raw Cordis arguments.
 
 #### Scenario: Warning precedes an error
 - **ID**: `runtime.logging.sentry.breadcrumb-and-error`
 - **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::attaches admitted breadcrumbs and runtime correlation to an error event`
 - **WHEN** an admitted warning is followed by an admitted error in one Runtime Session
-- **THEN** the exporter sends one error event containing the warning breadcrumb and bounded runtime correlation without raw logger arguments
+- **THEN** the exporter sends one error event containing the warning breadcrumb and bounded activation, session, and Runtime Preset correlation without raw logger arguments
 
 #### Scenario: Network delivery fails
 - **ID**: `runtime.logging.sentry.delivery-contained`
@@ -202,6 +215,12 @@ The Sentry exporter SHALL add each admitted non-error record as a bounded breadc
 - **EVIDENCE**: `packages/composition-runtime/tests/runtime-logging.spec.ts::contains throwing and rejecting sinks without losing healthy siblings`
 - **WHEN** the private Sentry transport rejects or cannot deliver an accepted event
 - **THEN** the exporter contains the failure and does not fail the source logger call, Runtime Session, or sibling exporters
+
+#### Scenario: Separate activations share a logical session
+- **ID**: `runtime.logging.sentry.activation-correlation`
+- **EVIDENCE**: `packages/extension-logging-sentry/tests/sentry-exporter.spec.ts::keeps private clients and breadcrumbs isolated across activations sharing one logical session`
+- **WHEN** Sentry receives records from concrete activations that use the same host `sessionId`
+- **THEN** their breadcrumbs and error events remain distinguishable by `runtimeActivationId`
 
 ### Requirement: Sentry shutdown is bounded
 On exporter replacement, row removal, or Runtime Session disposal, the Sentry exporter SHALL stop accepting records and flush its private client for at most configured `flushTimeoutMs`. Timeout or flush failure SHALL be contained, and the exporter SHALL close only its own client resources.
@@ -223,7 +242,6 @@ The OMP adapter and child protocol SHALL add no ordinary runtime-log RPC method,
 
 #### Scenario: OMP child writes configured file logs
 - **ID**: `runtime.logging.omp.file-without-rpc`
-- **EVIDENCE**: `packages/host-omp/tests/runtime-logging.spec.ts::writes configured child file logs without changing framed RPC or host reports`
 - **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::runs configured logging through real project-local OMP without host output`
 - **WHEN** an OMP Runtime Session explicitly composes the file exporter and a plugin emits admitted records
 - **THEN** records reach the configured child-owned file without appearing in OMP output or adding a logging wire message
@@ -233,3 +251,159 @@ The OMP adapter and child protocol SHALL add no ordinary runtime-log RPC method,
 - **EVIDENCE**: `packages/host-omp/tests/runtime-logging.spec.ts::keeps exporter-omitting OMP sessions silent and preserves stdout framing`
 - **WHEN** an OMP Runtime Session uses the shipped standard preset or another exporter-omitting composition
 - **THEN** ordinary plugin logs neither corrupt stdout framing nor appear in the OMP conversation, terminal UI, or child stderr diagnostic history
+
+
+### Requirement: First-party Runtime Session components emit operational records
+Composition Runtime and every first-party component activated inside a Runtime Session SHALL emit stable native Cordis logger records for its material lifecycle and operational boundaries. The coverage SHALL include the core activation, audit, reload, rollback, watch, and disposal path plus actor binding, the protected Runtime Host bridge, context, tools, lifecycle publication, SQLite, Persona, Persona Authoring, memory and candidate capture, embedding, semantic vectors, Evolution, Dynamic Runtime Plugins, CodeGraph, MCP import, and structured inference components. Exporters SHALL NOT log through the routed service they consume.
+
+Operational records SHALL use `info` for state transitions, `debug` for bounded operation starts/results and counts, `warn` for contained degradation or rejected operations, and `error` only for failures that invalidate activation or cleanup. Records SHALL NOT include user-authored content, prompt or context bodies, memory content or subject keys, inference input/output, generated source, credentials, DSNs, endpoint URLs, filesystem paths, lifecycle payloads, or tool inputs/results.
+
+#### Scenario: Explicit file exporter observes core and component operations
+- **ID**: `runtime.logging.coverage.first-party-components`
+- **EVIDENCE**: `packages/composition-runtime/tests/runtime-logging.spec.ts::exports core and first-party component operational events without sensitive payloads`
+- **WHEN** a Runtime Session with an explicit file exporter activates and exercises first-party core and component operations
+- **THEN** the destination receives stable component logger names and lifecycle/operation event names without any prohibited payload material
+
+#### Scenario: Runtime Session disposal begins
+- **ID**: `runtime.logging.coverage.disposal-boundary`
+- **EVIDENCE**: `packages/composition-runtime/tests/runtime-logging.spec.ts::exports core and first-party component operational events without sensitive payloads`
+- **WHEN** Runtime Session disposal begins with a session-owned exporter
+- **THEN** the exporter can receive disposal-started and teardown-failure records, while no contract requires a final disposal-completed record after the exporter itself has been removed
+
+### Requirement: Runtime logging exposes one concrete activation identity
+Composition Runtime SHALL generate one opaque bounded path-component-safe `runtimeActivationId` for every Runtime Session activation. It SHALL expose an immutable logging scope containing `runtimeActivationId`, host `sessionId`, and Runtime Preset ID through the session-isolated `doppelgangerLogging` service before exporter rows activate. The activation ID SHALL remain stable across Loader reload, rollback, and exporter replacement for that session owner, while every newly activated Runtime Session SHALL receive a new value even when the host reuses a logical `sessionId`.
+
+#### Scenario: Loader generation reloads
+- **ID**: `runtime.logging.activation-correlation.reload-stable`
+- **EVIDENCE**: `packages/composition-runtime/tests/runtime-logging.spec.ts::activates a file exporter only through an explicit Runtime Patch`
+- **WHEN** a Runtime Session commits or rolls back one or more Loader generations
+- **THEN** `doppelgangerLogging.scope.runtimeActivationId` and every subsequent normalized record retain the activation ID created for that session owner
+
+#### Scenario: Logical session activates twice
+- **ID**: `runtime.logging.activation-correlation.new-activation`
+- **EVIDENCE**: `packages/composition-runtime/tests/runtime-logging.spec.ts::creates distinct activation identities when a logical session ID is reused`
+- **WHEN** two concrete Runtime Session activations use the same host `sessionId`
+- **THEN** they expose distinct `runtimeActivationId` values while preserving the common host session correlation
+
+### Requirement: File exporter resolves activation path templates safely
+The file exporter SHALL accept either the existing static absolute normalized `path` or a mutually exclusive absolute normalized `pathTemplate`. A template SHALL contain exactly one `{runtimeActivationId}` token and no other placeholder or unmatched placeholder syntax. During Loader activation, before opening the writer or registering its sink, the exporter SHALL replace that token with `doppelgangerLogging.scope.runtimeActivationId` and SHALL validate the resolved concrete path against the same absolute and normalization rules as a static path. All writer safety, rotation, failure, and disposal behavior SHALL apply to the resolved concrete path.
+
+#### Scenario: Concurrent Runtime Sessions use one authored template
+- **ID**: `runtime.logging.file.template-concurrent-sessions`
+- **EVIDENCE**: `packages/composition-runtime/tests/runtime-logging.spec.ts::resolves one path template to isolated files for concurrent Runtime Sessions`
+- **WHEN** concurrent Runtime Sessions compose the same valid `pathTemplate`
+- **THEN** each exporter opens and rotates a distinct concrete path derived from its own activation ID without sharing an active file
+
+#### Scenario: Concurrent OMP children use one authored template
+- **ID**: `runtime.logging.file.template-concurrent-processes`
+- **EVIDENCE**: `packages/host-omp/tests/runtime-logging.spec.ts::isolates concurrent OMP children using one authored path template and logical session ID`
+- **WHEN** separate OMP child processes activate Runtime Sessions from the same Runtime Preset and file path template
+- **THEN** each child writes complete records to its own activation-derived file without interprocess rotation coordination or RPC output
+
+#### Scenario: File template is malformed
+- **ID**: `runtime.logging.file.template-invalid`
+- **EVIDENCE**: `packages/extension-logging-file/tests/file-exporter.spec.ts::rejects unknown fields, invalid bounds, invalid levels, and invalid path forms`
+- **WHEN** file exporter configuration supplies both path forms, neither path form, a relative or non-normalized template, a missing or repeated activation token, an unknown token, or unmatched placeholder syntax
+- **THEN** synchronous configuration validation rejects the Loader generation before any destination file or sink is created
+
+#### Scenario: Static file path remains configured
+- **ID**: `runtime.logging.file.static-path-compatible`
+- **EVIDENCE**: `packages/extension-logging-file/tests/file-exporter.spec.ts::resolves one activation placeholder while preserving static paths`
+- **WHEN** a file exporter uses the existing `path` field without `pathTemplate`
+- **THEN** it opens the exact configured concrete path and retains the documented one-operating-system-process-per-concrete-path invariant
+
+
+### Requirement: File activation retention is explicit and bounded in scope
+The file exporter SHALL accept an optional closed `retention` object only with a `pathTemplate` whose activation token occurs in the basename. Explicit empty configuration SHALL default to `maxAgeDays: 7`, `maxTotalBytes: 536870912`, and `cleanupIntervalMs: 60000`. Integer bounds SHALL be 1–3650 days, 65536–Number.MAX_SAFE_INTEGER bytes, and 1000–86400000 milliseconds. Omission SHALL create no retention metadata, timer, scan, or cross-activation deletion. Direct normalization and Loader admission SHALL remain equivalent. The budget SHALL cover regular files matching the exact template and their positive numbered rotation suffixes within its fixed parent directory, not unrelated templates or registry bytes.
+
+#### Scenario: Retention configuration enters either admission path
+- **ID**: `runtime.logging.retention.config-parity`
+- **EVIDENCE**: `packages/extension-logging-file/tests/file-exporter.spec.ts::uses identical direct and Loader file configuration admission`
+- **WHEN** a file exporter supplies retention configuration through its public normalizer or Loader schema
+- **THEN** both paths apply the same defaults and bounds and reject unknown fields, a null block, static-path retention, and a token in a directory before opening files
+
+#### Scenario: Retention remains omitted
+- **ID**: `runtime.logging.retention.omission`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::rejects an unsafe registry and keeps retention omission free of metadata`
+- **EVIDENCE**: `packages/extension-logging-file/tests/file-exporter.spec.ts::keeps default-off retention cleanup compatible with close and reopen`
+- **WHEN** a file writer opens without a retention block
+- **THEN** existing append, close, and reopen behavior remains available without retention metadata or cleanup effects
+
+### Requirement: Retention deletes eligible activation families by age and total bytes
+An enabled exporter SHALL collect at startup before sink registration and periodically thereafter. It SHALL remove entire eligible families whose newest member is at least `maxAgeDays` old and SHALL prune eligible families oldest-first to meet the sampled aggregate byte budget, with deterministic basename tie-breaking. Active or uncertain owners SHALL remain protected even above budget. A writer SHALL expose an immutable last-successful `retentionStatus` containing `checkedAt`, `totalBytes`, `removedFiles`, `removedBytes`, `protectedBytes`, and `overBudgetBytes`. This SHALL be a best-effort cleanup budget, not a hard filesystem quota or free-space reservation.
+
+#### Scenario: Expired registered activation has exited
+- **ID**: `runtime.logging.retention.expired-family`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::removes expired exited-owner families and all numbered generations at startup`
+- **WHEN** startup cleanup finds an expired family whose registered owner has exited
+- **THEN** it removes the active basename and all numbered generations, including suffixes beyond the current rotation setting
+
+#### Scenario: Completed families exceed the shared template budget
+- **ID**: `runtime.logging.retention.aggregate-budget`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::evicts whole exited-owner families oldest first to meet the aggregate byte budget`
+- **WHEN** completed families together exceed the configured byte budget without age expiry
+- **THEN** cleanup evicts the oldest whole eligible families first and retains newer families once the sampled budget is met
+
+#### Scenario: Silent live owner dominates the budget
+- **ID**: `runtime.logging.retention.live-owner-protected`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::protects silent live owners across close and HMR gaps even above the budget`
+- **WHEN** old-looking log families belong to a still-live process even after its writer closes
+- **THEN** cleanup preserves those families through the reopen gap and reports remaining protected and over-budget bytes rather than deleting live logs
+
+### Requirement: Ownership claims and collection are coordinated across local processes
+Retained writers SHALL claim their activation family before opening its log file using a permanent plugin-owned local registry. Claims and filesystem deletion SHALL share one cross-process transaction lock. A claim SHALL use bounded asynchronous waiting; a busy collector SHALL skip without failing a healthy writer. Ownership SHALL survive exporter close and HMR until process exit. Only a validated same-host owner with an `ESRCH` process-existence result SHALL become eligible. Live or reused PIDs, uncertain errors, foreign hosts, unregistered legacy files, and unsafe family members SHALL be preserved. Managed base/rotation families SHALL NOT overlap, including conservative case-folded and normalization-equivalent aliases. The supported deployment SHALL use a trusted local directory in one host/PID namespace with no external writers targeting managed families.
+
+#### Scenario: Owner crashes while collectors compete
+- **ID**: `runtime.logging.retention.crash-concurrent-collectors`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::serializes competing collectors and recovers ownership after an abrupt process exit`
+- **WHEN** a registered writer process exits abruptly and multiple other processes collect its eligible logs
+- **THEN** they safely remove the dead family while retaining usable independent live destinations
+
+#### Scenario: Registry is busy
+- **ID**: `runtime.logging.retention.busy-coordination`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::skips a busy collector and waits for an ownership claim without blocking the event loop`
+- **WHEN** another transaction owns the local retention registry
+- **THEN** maintenance skips harmlessly and new ownership waits asynchronously until the bounded claim can proceed
+
+#### Scenario: Another template overlaps a managed rotation family
+- **ID**: `runtime.logging.retention.overlap-rejected`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::rejects overlapping managed families across templates before opening a writer`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::rejects case-equivalent owner aliases before opening an existing live family`
+- **WHEN** a retained writer attempts to claim a base or rotation path overlapping an existing managed family or its filesystem-equivalent alias
+- **THEN** activation rejects the claim before opening a conflicting destination
+
+#### Scenario: Ownership or file type is unsafe to infer
+- **ID**: `runtime.logging.retention.unknown-protected`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::preserves unregistered legacy logs unrelated files and unsafe families`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::preserves foreign-host unknown and reused-live-PID ownership`
+- **WHEN** collection encounters legacy unregistered families, unrelated files, unsafe family members, a foreign owner, or a reused live PID
+- **THEN** those files remain untouched rather than treating old modification time as proof of owner death
+
+#### Scenario: Registry destination is unsafe
+- **ID**: `runtime.logging.retention.registry-path-rejected`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::rejects an unsafe registry and keeps retention omission free of metadata`
+- **WHEN** retained activation encounters a symlink or nonregular registry destination
+- **THEN** it fails without following that destination or modifying its target
+
+### Requirement: Retention work is lifecycle-owned and failure-contained
+Periodic cleanup SHALL be coalesced and serialized with writer work. Cordis disposal SHALL stop scheduling before unregistering/draining the sink, settle maintenance, and close both the log handle and registry connection. Cleanup SHALL delete files before removing ownership metadata so interrupted filesystem work remains recoverable. The registry SHALL NOT be unlinked as a lock-release mechanism. Maintenance failure SHALL make only the destination inert and remain contained like a write failure; exporters SHALL NOT recursively log through their own router or add host output.
+
+#### Scenario: Owner exits after startup
+- **ID**: `runtime.logging.retention.periodic-disposal`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::periodically removes an exited family and stops maintenance on Cordis disposal`
+- **EVIDENCE**: `packages/extension-logging-file/tests/file-exporter.spec.ts::schedules retained cleanup and clears it before exhaustive disposal`
+- **WHEN** an expired owner exits while another retained exporter remains active and that exporter later disposes
+- **THEN** periodic cleanup removes the newly eligible family and disposal stops future maintenance and releases owned resources
+
+#### Scenario: Maintenance fails after activation
+- **ID**: `runtime.logging.retention.failure-contained`
+- **EVIDENCE**: `packages/extension-logging-file/tests/retention.spec.ts::contains maintenance failure and closes the failed writer registry on disposal`
+- **WHEN** a maintenance operation fails after the destination has opened
+- **THEN** that writer rejects further records and closes its resources on disposal without pretending cleanup succeeded
+
+#### Scenario: Actual OMP children use retained logging
+- **ID**: `runtime.logging.retention.omp-children`
+- **EVIDENCE**: `packages/host-omp/tests/runtime-logging.spec.ts::cleans an exited activation on real-child startup while retaining a concurrent live family and framed transport`
+- **EVIDENCE**: `packages/omp/tests/plugin-package.spec.ts::runs configured logging through real project-local OMP without host output`
+- **WHEN** real OMP sessions use activation-templated logging with retention enabled
+- **THEN** completed-owner cleanup preserves concurrent live JSONL families and the project-local extension keeps ordinary logs out of framed RPC, stderr, and host output

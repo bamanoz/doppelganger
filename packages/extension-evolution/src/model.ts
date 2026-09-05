@@ -648,6 +648,45 @@ export function applyMutation(
     case 'reminder': return recordReminder(proposal, command.request, context)
   }
 }
+
+export interface EvolutionPersistedMutation {
+  readonly proposal: EvolutionProposal
+  readonly revisions: readonly EvolutionProposal[]
+}
+
+export function applyPersistedMutation(
+  proposals: readonly EvolutionProposal[],
+  command: EvolutionMutationCommand,
+  context: EvolutionMutationContext,
+): EvolutionPersistedMutation {
+  if (command.kind === 'reminder') {
+    const stored = proposals.find(item => item.id === command.request.id)
+    if (
+      stored?.status === 'snoozed'
+      && stored.snoozedUntil !== undefined
+      && Date.parse(stored.snoozedUntil) <= Date.parse(context.now)
+    ) {
+      const resumed = resumeProposal(stored, {
+        operationId: command.request.operationId,
+        id: command.request.id,
+        expectedRevision: command.request.expectedRevision,
+      }, context)
+      const delivered = recordReminder(resumed, {
+        ...command.request,
+        expectedRevision: resumed.revision,
+      }, context)
+      return deepFreeze({
+        proposal: delivered,
+        revisions: Object.freeze(delivered === resumed ? [resumed] : [resumed, delivered]),
+      })
+    }
+  }
+  const proposal = applyMutation(proposals, command, context)
+  return deepFreeze({
+    proposal,
+    revisions: Object.freeze(proposals.includes(proposal) ? [] : [proposal]),
+  })
+}
 export function proposalIsReminderEligible(
   proposal: EvolutionProposal,
   now: Date,

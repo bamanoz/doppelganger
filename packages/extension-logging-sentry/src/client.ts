@@ -29,6 +29,7 @@ const sentrySeverity: Readonly<Record<RuntimeLogSeverity, SeverityLevel>> = Obje
 
 function runtimeContext(record: RuntimeLogRecord): Record<string, string | number> {
   return {
+    runtimeActivationId: record.runtimeActivationId,
     sessionId: record.sessionId,
     runtimePresetId: record.runtimePresetId,
     logger: record.logger,
@@ -55,6 +56,7 @@ function errorEvent(record: RuntimeLogRecord): Event {
       level: 'error',
       message: record.message,
       tags: {
+        runtime_activation_id: record.runtimeActivationId,
         runtime_session_id: record.sessionId,
         runtime_preset_id: record.runtimePresetId,
         logger: record.logger,
@@ -76,6 +78,7 @@ function errorEvent(record: RuntimeLogRecord): Event {
       }],
     },
     tags: {
+      runtime_activation_id: record.runtimeActivationId,
       runtime_session_id: record.sessionId,
       runtime_preset_id: record.runtimePresetId,
       logger: record.logger,
@@ -140,18 +143,4 @@ export function createOwnedSentryClient(
   transport: SentryTransportFactory = makeNodeTransport,
 ): OwnedSentryClient {
   return new NodeOwnedSentryClient(config, transport)
-}
-
-export type OwnedSentryClientFactory = (config: ResolvedSentryLoggingConfig) => OwnedSentryClient
-
-let ownedSentryClientFactory: OwnedSentryClientFactory = config => createOwnedSentryClient(config)
-
-export function currentOwnedSentryClientFactory(): OwnedSentryClientFactory {
-  return ownedSentryClientFactory
-}
-
-export function replaceOwnedSentryClientFactoryForTests(factory: OwnedSentryClientFactory): () => void {
-  const previous = ownedSentryClientFactory
-  ownedSentryClientFactory = factory
-  return () => { ownedSentryClientFactory = previous }
 }

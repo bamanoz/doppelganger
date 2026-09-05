@@ -76,13 +76,13 @@ The adapter SHALL serialize initial activation, committed OMP session rebinding,
 - **THEN** the previous binding remains disposed, Doppelganger stays unavailable for the new session with an actionable diagnostic, and ordinary OMP behavior remains usable
 
 ### Requirement: Runtime context projection
-Before each user-initiated OMP agent run, the adapter SHALL request current assembled context exactly once from the active binding using the direct principal input and a newly established stable turn identity. It SHALL append non-empty context to the existing OMP system prompt for that run without discarding host instructions or persisting synthetic conversation history. Every model continuation after tool calls in the same run SHALL use the same resolved snapshot and SHALL NOT trigger another context request.
+Before each user-initiated OMP agent run, the adapter SHALL request current authority-preserving assembled context exactly once from the active binding using the direct principal input and a newly established stable turn identity. It SHALL preserve existing host instructions, project instruction and data authority through distinct host-safe surfaces for that run, and SHALL NOT persist synthetic conversation history. Every model continuation after tool calls in the same run SHALL reuse the same authority-separated snapshot.
 
 #### Scenario: Runtime context changes between user turns
 - **ID**: `runtime.context.reload`
-- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::rebuilds ordered user/project layers and rejects stale tools after committed reload`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::resolves runtime context once per agent run and keeps one snapshot through tool continuations`
 - **WHEN** a valid composition or asset update reloads successfully
-- **THEN** the next user-initiated OMP agent run receives the current assembled context
+- **THEN** the next user-initiated OMP agent run receives the current instruction and data projections with their authority unchanged
 
 #### Scenario: Tool continuation reuses turn context
 - **ID**: `runtime.context.same-run-snapshot`
@@ -92,9 +92,9 @@ Before each user-initiated OMP agent run, the adapter SHALL request current asse
 
 #### Scenario: Existing host instructions are preserved
 - **ID**: `runtime.context.system-prompt-append`
-- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::preserves host prompts, projects exact schemas and tools, and forwards committed lifecycle payloads`
-- **WHEN** a non-empty Doppelganger assembly is resolved before an agent run
-- **THEN** the adapter appends it to the existing OMP system prompt rather than replacing host instructions or adding retained conversation messages
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::projects instruction-authority context while preserving host prompts`
+- **WHEN** non-empty Doppelganger context is resolved before an agent run
+- **THEN** only instruction-authority content is appended to the existing OMP system prompt while data-authority content remains separately delimited
 
 #### Scenario: Context resolution fails before an agent run
 - **ID**: `runtime.context.request-failure`
@@ -131,6 +131,14 @@ The adapter SHALL project the current immutable shared Runtime Host tool snapsho
 
 ### Requirement: Lifecycle event forwarding
 The adapter SHALL forward normalized session, turn, tool, and compaction observation events through the child connection owned by one immutable OMP session binding. Every forwarded `sessionId`, `turnId`, `callId`, and `deliveryId` SHALL derive from that binding and its active turn rather than mutable OMP session state read after asynchronous work begins. OMP agent-loop settlement SHALL NOT be reported as `session-completed`; replacement and shutdown without terminal outcome evidence SHALL use neutral `session-disposed`.
+Adapter-generated identifiers SHALL distinguish new work across fresh bindings for the same logical session. The adapter SHALL retain native session and call identities, keep each active turn correlated through context and lifecycle delivery, and preserve the original delivery identity when replaying an already-created event. Binding identity generation SHALL remain host-owned and SHALL NOT require Evolution, logging activation metadata, or new Runtime Session metadata.
+
+#### Scenario: OMP recreates a binding for a previously used session
+- **ID**: `lifecycle.same-session.resume-identities`
+- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::records distinct Evolution turns across fresh bindings for one resumed OMP session without duplicating replayed evidence`
+- **WHEN** OMP resumes the same logical session after its previous binding was disposed
+- **THEN** new committed turns have distinct turn and delivery identities, remain durably observable, and cannot collide with receipts for previous turns
+- **AND** exact replay of a previous committed event creates no additional durable evidence
 
 #### Scenario: OMP tool completes
 - **ID**: `lifecycle.tool.completion.forwarding`
@@ -275,6 +283,7 @@ Each active OMP session SHALL own a separate Doppelganger child process and comp
 
 ### Requirement: Adapter transport exposes the host-neutral runtime surface
 The OMP transport SHALL support composition activation with an optional host actor binding, disposal, context resolution, tool listing and invocation, lifecycle publication, and runtime notifications over framed request/response messages. Both endpoints SHALL validate the same actor-aware activation contract and reject malformed, version-mismatched, or out-of-state requests without corrupting the session.
+Both endpoints and host pre-transport projection SHALL reuse protocol-owned strict JSON admission for descriptor schemas, invocation inputs and portable results before cloning, approval digesting, or JSON serialization. They SHALL reject non-finite values, undefined members, executable coercion, accessors and other unsupported JSON shapes without transforming them. Valid JSON values SHALL retain their exact meaning, and invalid input SHALL not dispatch a handler or consume approval. Existing bounded host lifecycle observation projection remains a separate operation.
 
 #### Scenario: Context is requested before activation
 - **ID**: `transport.context.inactive.error`
@@ -288,6 +297,24 @@ The OMP transport SHALL support composition activation with an optional host act
 - **EVIDENCE**: `packages/host-omp/tests/vertical.spec.ts::applies valid preset updates, rolls invalid changes back, and preserves state across reload`
 - **WHEN** a valid composition reload changes context or tools
 - **THEN** the child notifies the OMP extension and the next model request observes the current context and tool set without changing the actor binding
+
+#### Scenario: Host receives an invalid native invocation value
+- **ID**: `host.omp.strict-json.before-transport`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::rejects invalid invocation values before transport or approval`
+- **WHEN** an OMP proxy receives a non-JSON-compatible input that JSON serialization would otherwise coerce or omit
+- **THEN** it rejects the original value without executing coercion hooks, acquiring a grant, sending the invocation, or calling the portable handler
+
+#### Scenario: Host admits a valid portable value
+- **ID**: `host.omp.strict-json.valid-value-parity`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::preserves exact valid JSON values through direct and transported invocation`
+- **WHEN** the same valid JSON input is invoked directly and through the OMP adapter
+- **THEN** both paths preserve the same value and approval digest semantics without materializing omitted schema defaults
+
+#### Scenario: Host receives an invalid portable descriptor or result
+- **ID**: `host.omp.strict-json.invalid-descriptor-result`
+- **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::rejects non-JSON descriptors and results without coercion`
+- **WHEN** an OMP boundary receives a descriptor schema or portable result containing unsupported runtime values
+- **THEN** the boundary rejects it with its structured diagnostic rather than projecting a coerced schema or a successful altered value
 
 ### Requirement: Projected OMP tools preserve supported schemas
 For each available runtime tool, the adapter SHALL register an OMP proxy whose validation reflects the supported subset of the tool's JSON Schema, including object properties, required fields, arrays, scalar types, enumerations, descriptions, and additional-property policy. JSON Schema defaults SHALL remain annotations rather than host-side argument transformations; mutable defaults SHALL NOT become shared OMP values. Unsupported schema constructs SHALL fail projection diagnostically rather than silently widening validation.
@@ -766,3 +793,19 @@ The OMP adapter SHALL pass the transport-independent Runtime Host conformance su
 - **EVIDENCE**: `packages/host-omp/tests/adapter.spec.ts::executes a generic serialized activation with the closed OMP capability profile`
 - **WHEN** an internal OMP transport or projection change is made
 - **THEN** the same shared conformance suite continues to prove the externally visible Runtime Host semantics
+
+### Requirement: OMP context projection retains runtime authority
+The OMP adapter SHALL project instruction-authority context only through OMP's system-instruction surface and SHALL project data-authority context through an explicitly delimited non-instruction data surface available to the same agent run. If OMP cannot preserve this distinction for a contribution, the adapter SHALL omit that contribution diagnostically rather than promote it.
+
+#### Scenario: Memory contributes attacker-influenced data
+- **ID**: `host.omp.context.data-authority-not-system-instruction`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::keeps data-authority runtime context out of system instructions`
+- **WHEN** memory, Evolution, or another provider contributes data-authority text containing instruction-like content
+- **THEN** OMP receives it only as delimited data for the active run and the text is not appended as a system instruction
+
+#### Scenario: Identity contributes runtime instructions
+- **ID**: `host.omp.context.instruction-authority-system-projection`
+- **EVIDENCE**: `packages/host-omp/tests/extension.spec.ts::projects instruction-authority context while preserving host prompts`
+- **WHEN** a trusted provider contributes instruction-authority context
+- **THEN** the adapter appends that instruction projection to the existing OMP system prompt without replacing host instructions or retaining conversation history
+

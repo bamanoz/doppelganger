@@ -7,6 +7,7 @@ import {
 } from '@doppelganger/doppelganger-composition-runtime'
 import {
   RUNTIME_HOST_PROTOCOL_VERSION,
+  cloneJsonValue,
   createActorIdentity,
   defineAssembledContext,
   defineRuntimeHostCapabilities,
@@ -89,16 +90,6 @@ export interface ToolCatalogChangedParams {
   readonly revision: string
 }
 
-export interface OmpRpcMethods {
-  'session.activate': { readonly params: SessionActivateParams; readonly result: SessionActivateResult }
-  'session.dispose': { readonly params: undefined; readonly result: null }
-  'runtime.diagnostics': { readonly params: undefined; readonly result: RuntimeDiagnosticsResult }
-  'context.resolve': { readonly params: HostContextRequest; readonly result: AssembledContext }
-  'tools.snapshot': { readonly params: undefined; readonly result: ToolCatalogSnapshot }
-  'tools.invoke': { readonly params: ToolInvocationRequest; readonly result: ToolInvocationResult }
-  'tools.cancel': { readonly params: ToolCancellationRequest; readonly result: ToolCancellationResult }
-  'event.publish': { readonly params: LifecycleEvent; readonly result: null }
-}
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (value === null || Array.isArray(value) || typeof value !== 'object') {
@@ -126,22 +117,7 @@ function nonEmpty(value: unknown, label: string): string {
 }
 
 function jsonClone(value: unknown, label: string): JsonValue {
-  let encoded: string | undefined
-  try {
-    encoded = JSON.stringify(value)
-  } catch (cause) {
-    throw new TypeError(`${label} must be JSON-compatible`, { cause })
-  }
-  if (encoded === undefined) throw new TypeError(`${label} must be JSON-compatible`)
-  return deepFreeze(JSON.parse(encoded) as JsonValue)
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const child of Object.values(value)) deepFreeze(child)
-    Object.freeze(value)
-  }
-  return value
+  return cloneJsonValue(value, label, { maximumBytes: 1024 * 1024, maximumDepth: 64 })
 }
 
 function approval(value: unknown, label: string): ToolDescriptor['approval'] {
@@ -171,7 +147,7 @@ function approvalGrant(value: unknown, label: string): ToolApprovalGrant {
 }
 
 export function defineSerializedOmpActivation(input: unknown): DefinedSerializedOmpActivation {
-  const record = object(input, 'activation')
+  const record = object(jsonClone(input, 'activation'), 'activation')
   exactKeys(record, ['composition', 'sessionId', 'hostKind'], ['workspaceRoot', 'watch', 'actorId'], 'activation')
   if (record.hostKind !== 'omp') throw new TypeError('activation.hostKind must equal "omp"')
   if (record.watch !== undefined && typeof record.watch !== 'boolean') throw new TypeError('activation.watch must be a boolean')
@@ -192,20 +168,11 @@ export function defineSerializedOmpActivation(input: unknown): DefinedSerialized
 }
 
 export function defineSessionActivateParams(value: unknown): DefinedSessionActivateParams {
-  const record = object(value, 'session.activate params')
-  exactKeys(
-    record,
-    ['protocolVersion', 'capabilities', 'composition', 'sessionId', 'hostKind'],
-    ['workspaceRoot', 'watch', 'actorId'],
-    'session.activate params',
-  )
-  if (record.protocolVersion !== OMP_RPC_PROTOCOL_VERSION) {
-    throw new TypeError(`unsupported OMP RPC protocol version ${String(record.protocolVersion)}`)
-  }
+  const record = object(jsonClone(value, 'session.activate params'), 'session.activate params')
+  exactKeys(record, ['protocolVersion', 'capabilities', 'composition', 'sessionId', 'hostKind'], ['workspaceRoot', 'watch', 'actorId'], 'session.activate params')
+  if (record.protocolVersion !== OMP_RPC_PROTOCOL_VERSION) throw new TypeError(`unsupported OMP RPC protocol version ${String(record.protocolVersion)}`)
   const capabilities = defineRuntimeHostCapabilities(record.capabilities)
-  if (JSON.stringify(capabilities) !== JSON.stringify(OMP_RUNTIME_HOST_CAPABILITIES)) {
-    throw new TypeError('session.activate capabilities do not match the OMP capability profile')
-  }
+  if (JSON.stringify(capabilities) !== JSON.stringify(OMP_RUNTIME_HOST_CAPABILITIES)) throw new TypeError('session.activate capabilities do not match the OMP capability profile')
   return Object.freeze({
     protocolVersion: OMP_RPC_PROTOCOL_VERSION,
     capabilities,
@@ -221,7 +188,7 @@ export function defineSessionActivateParams(value: unknown): DefinedSessionActiv
 }
 
 export function defineToolCatalogSnapshot(value: unknown, label = 'tool catalog'): ToolCatalogSnapshot {
-  const record = object(value, label)
+  const record = object(jsonClone(value, label), label)
   exactKeys(record, ['revision', 'tools'], [], label)
   if (!Array.isArray(record.tools)) throw new TypeError(`${label}.tools must be an array`)
   const names = new Set<string>()
@@ -233,20 +200,10 @@ export function defineToolCatalogSnapshot(value: unknown, label = 'tool catalog'
     if (names.has(name)) throw new TypeError(`${label} contains duplicate tool "${name}"`)
     names.add(name)
     const inputSchema = jsonClone(tool.inputSchema, `${toolLabel}.inputSchema`)
-    if (inputSchema === null || Array.isArray(inputSchema) || typeof inputSchema !== 'object') {
-      throw new TypeError(`${toolLabel}.inputSchema must be an object`)
-    }
+    if (inputSchema === null || Array.isArray(inputSchema) || typeof inputSchema !== 'object') throw new TypeError(`${toolLabel}.inputSchema must be an object`)
     if (typeof tool.available !== 'boolean') throw new TypeError(`${toolLabel}.available must be a boolean`)
     const requiredApproval = approval(tool.approval, `${toolLabel}.approval`)
-    return Object.freeze({
-      name,
-      label: nonEmpty(tool.label, `${toolLabel}.label`),
-      description: nonEmpty(tool.description, `${toolLabel}.description`),
-      inputSchema: inputSchema as { readonly [key: string]: JsonValue },
-      revision: nonEmpty(tool.revision, `${toolLabel}.revision`),
-      available: tool.available,
-      ...(requiredApproval === undefined ? {} : { approval: requiredApproval }),
-    })
+    return Object.freeze({ name, label: nonEmpty(tool.label, `${toolLabel}.label`), description: nonEmpty(tool.description, `${toolLabel}.description`), inputSchema: inputSchema as { readonly [key: string]: JsonValue }, revision: nonEmpty(tool.revision, `${toolLabel}.revision`), available: tool.available, ...(requiredApproval === undefined ? {} : { approval: requiredApproval }) })
   })
   const ordered = [...tools].sort((left, right) => left.name.localeCompare(right.name))
   if (tools.some((tool, index) => tool !== ordered[index])) throw new TypeError(`${label}.tools must be ordered by canonical name`)
@@ -254,56 +211,32 @@ export function defineToolCatalogSnapshot(value: unknown, label = 'tool catalog'
 }
 
 export function defineHostContextRequest(value: unknown): HostContextRequest {
-  const record = object(value, 'context.resolve params')
+  const record = object(jsonClone(value, 'context.resolve params'), 'context.resolve params')
   exactKeys(record, ['requestId', 'turn', 'tokenBudget'], [], 'context.resolve params')
   const turn = object(record.turn, 'context.resolve params.turn')
   exactKeys(turn, ['input'], ['turnId'], 'context.resolve params.turn')
   if (typeof turn.input !== 'string') throw new TypeError('context.resolve params.turn.input must be a string')
-  if (!Number.isSafeInteger(record.tokenBudget) || (record.tokenBudget as number) < 0) {
-    throw new TypeError('context.resolve params.tokenBudget must be a non-negative safe integer')
-  }
-  return Object.freeze({
-    requestId: nonEmpty(record.requestId, 'context.resolve params.requestId'),
-    turn: Object.freeze({
-      input: turn.input,
-      ...(turn.turnId === undefined ? {} : { turnId: nonEmpty(turn.turnId, 'context.resolve params.turn.turnId') }),
-    }),
-    tokenBudget: record.tokenBudget as number,
-  })
+  if (!Number.isSafeInteger(record.tokenBudget) || (record.tokenBudget as number) < 0) throw new TypeError('context.resolve params.tokenBudget must be a non-negative safe integer')
+  return Object.freeze({ requestId: nonEmpty(record.requestId, 'context.resolve params.requestId'), turn: Object.freeze({ input: turn.input, ...(turn.turnId === undefined ? {} : { turnId: nonEmpty(turn.turnId, 'context.resolve params.turn.turnId') }) }), tokenBudget: record.tokenBudget as number })
 }
 
-export function defineHostContextResult(value: unknown): AssembledContext {
-  return defineAssembledContext(value)
-}
+export function defineHostContextResult(value: unknown): AssembledContext { return defineAssembledContext(value) }
+export function defineLifecycleEvent(value: unknown): LifecycleEvent { return normalizeLifecycleEvent(value) }
 
-
-export function defineLifecycleEvent(value: unknown): LifecycleEvent {
-  return normalizeLifecycleEvent(value)
-}
 export function defineToolInvocationRequest(value: unknown): ToolInvocationRequest {
-  const record = object(value, 'tools.invoke params')
+  const record = object(jsonClone(value, 'tools.invoke params'), 'tools.invoke params')
   exactKeys(record, ['callId', 'name', 'toolRevision', 'input'], ['turnId', 'approval'], 'tools.invoke params')
-  return Object.freeze({
-    callId: nonEmpty(record.callId, 'tools.invoke params.callId'),
-    ...(record.turnId === undefined ? {} : { turnId: nonEmpty(record.turnId, 'tools.invoke params.turnId') }),
-    name: nonEmpty(record.name, 'tools.invoke params.name'),
-    toolRevision: nonEmpty(record.toolRevision, 'tools.invoke params.toolRevision'),
-    input: jsonClone(record.input, 'tools.invoke params.input'),
-    ...(record.approval === undefined ? {} : { approval: approvalGrant(record.approval, 'tools.invoke params.approval') }),
-  })
+  return Object.freeze({ callId: nonEmpty(record.callId, 'tools.invoke params.callId'), ...(record.turnId === undefined ? {} : { turnId: nonEmpty(record.turnId, 'tools.invoke params.turnId') }), name: nonEmpty(record.name, 'tools.invoke params.name'), toolRevision: nonEmpty(record.toolRevision, 'tools.invoke params.toolRevision'), input: jsonClone(record.input, 'tools.invoke params.input'), ...(record.approval === undefined ? {} : { approval: approvalGrant(record.approval, 'tools.invoke params.approval') }) })
 }
 
 export function defineToolCancellationRequest(value: unknown): ToolCancellationRequest {
-  const record = object(value, 'tools.cancel params')
+  const record = object(jsonClone(value, 'tools.cancel params'), 'tools.cancel params')
   exactKeys(record, ['callId'], ['reason'], 'tools.cancel params')
-  return Object.freeze({
-    callId: nonEmpty(record.callId, 'tools.cancel params.callId'),
-    ...(record.reason === undefined ? {} : { reason: nonEmpty(record.reason, 'tools.cancel params.reason') }),
-  })
+  return Object.freeze({ callId: nonEmpty(record.callId, 'tools.cancel params.callId'), ...(record.reason === undefined ? {} : { reason: nonEmpty(record.reason, 'tools.cancel params.reason') }) })
 }
 
 export function defineToolInvocationResult(value: unknown): ToolInvocationResult {
-  const record = object(value, 'tools.invoke result')
+  const record = object(jsonClone(value, 'tools.invoke result'), 'tools.invoke result')
   if (record.ok === true) {
     exactKeys(record, ['ok', 'value'], [], 'tools.invoke result')
     return Object.freeze({ ok: true, value: jsonClone(record.value, 'tools.invoke result.value') })
@@ -312,43 +245,26 @@ export function defineToolInvocationResult(value: unknown): ToolInvocationResult
   exactKeys(record, ['ok', 'error'], [], 'tools.invoke result')
   const error = object(record.error, 'tools.invoke result.error')
   exactKeys(error, ['code', 'message'], ['data'], 'tools.invoke result.error')
-  return Object.freeze({
-    ok: false,
-    error: Object.freeze({
-      code: nonEmpty(error.code, 'tools.invoke result.error.code'),
-      message: nonEmpty(error.message, 'tools.invoke result.error.message'),
-      ...(error.data === undefined ? {} : { data: jsonClone(error.data, 'tools.invoke result.error.data') }),
-    }),
-  })
+  return Object.freeze({ ok: false, error: Object.freeze({ code: nonEmpty(error.code, 'tools.invoke result.error.code'), message: nonEmpty(error.message, 'tools.invoke result.error.message'), ...(error.data === undefined ? {} : { data: jsonClone(error.data, 'tools.invoke result.error.data') }) }) })
 }
 
 export function defineSessionActivateResult(value: unknown): SessionActivateResult {
-  const record = object(value, 'session.activate result')
+  const record = object(jsonClone(value, 'session.activate result'), 'session.activate result')
   exactKeys(record, ['protocolVersion', 'capabilities', 'diagnostics', 'runtimeRevision', 'catalog'], [], 'session.activate result')
-  if (record.protocolVersion !== OMP_RPC_PROTOCOL_VERSION) {
-    throw new TypeError(`unsupported runtime RPC protocol version ${String(record.protocolVersion)}`)
-  }
+  if (record.protocolVersion !== OMP_RPC_PROTOCOL_VERSION) throw new TypeError(`unsupported runtime RPC protocol version ${String(record.protocolVersion)}`)
   const capabilities = defineRuntimeHostCapabilities(record.capabilities)
-  if (JSON.stringify(capabilities) !== JSON.stringify(OMP_RUNTIME_HOST_CAPABILITIES)) {
-    throw new TypeError('session.activate result capabilities do not match the OMP capability profile')
-  }
-  return Object.freeze({
-    protocolVersion: OMP_RPC_PROTOCOL_VERSION,
-    capabilities,
-    diagnostics: jsonClone(record.diagnostics, 'session.activate result.diagnostics'),
-    runtimeRevision: nonEmpty(record.runtimeRevision, 'session.activate result.runtimeRevision'),
-    catalog: defineToolCatalogSnapshot(record.catalog, 'session.activate result.catalog'),
-  })
+  if (JSON.stringify(capabilities) !== JSON.stringify(OMP_RUNTIME_HOST_CAPABILITIES)) throw new TypeError('session.activate result capabilities do not match the OMP capability profile')
+  return Object.freeze({ protocolVersion: OMP_RPC_PROTOCOL_VERSION, capabilities, diagnostics: jsonClone(record.diagnostics, 'session.activate result.diagnostics'), runtimeRevision: nonEmpty(record.runtimeRevision, 'session.activate result.runtimeRevision'), catalog: defineToolCatalogSnapshot(record.catalog, 'session.activate result.catalog') })
 }
 
 export function defineToolCatalogChangedParams(value: unknown): ToolCatalogChangedParams {
-  const record = object(value, 'toolCatalog.changed params')
+  const record = object(jsonClone(value, 'toolCatalog.changed params'), 'toolCatalog.changed params')
   exactKeys(record, ['revision'], [], 'toolCatalog.changed params')
   return Object.freeze({ revision: nonEmpty(record.revision, 'toolCatalog.changed params.revision') })
 }
 
 export function defineToolCancellationResult(value: unknown): ToolCancellationResult {
-  const record = object(value, 'tools.cancel result')
+  const record = object(jsonClone(value, 'tools.cancel result'), 'tools.cancel result')
   exactKeys(record, ['cancelled'], [], 'tools.cancel result')
   if (typeof record.cancelled !== 'boolean') throw new TypeError('tools.cancel result.cancelled must be a boolean')
   return Object.freeze({ cancelled: record.cancelled })

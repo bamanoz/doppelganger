@@ -7,7 +7,7 @@ import {
   resolveSentryLoggingConfig,
   type SentryLoggingConfig,
 } from './config.ts'
-import { currentOwnedSentryClientFactory } from './client.ts'
+import { createOwnedSentryClient } from './client.ts'
 
 export const SentryLoggingPlugin: Plugin<SentryLoggingConfig> = {
   name: 'doppelganger-logging-sentry',
@@ -15,7 +15,7 @@ export const SentryLoggingPlugin: Plugin<SentryLoggingConfig> = {
   Config: SentryLoggingConfigSchema as unknown as NonNullable<Plugin<SentryLoggingConfig>['Config']>,
   apply(ctx: Context, configured: SentryLoggingConfig) {
     const config = resolveSentryLoggingConfig(normalizeSentryLoggingConfig(configured))
-    const client = currentOwnedSentryClientFactory()(config)
+    const client = createOwnedSentryClient(config)
     let remove: (() => Promise<void>) | undefined
     try {
       remove = ctx.doppelgangerLogging.register(client, {

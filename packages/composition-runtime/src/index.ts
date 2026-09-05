@@ -29,6 +29,7 @@ export {
   truncateRuntimeLogUtf8,
   type RuntimeLogError,
   type RuntimeLoggingLimits,
+  type RuntimeLoggingScope,
   type RuntimeLoggingService,
   type RuntimeLogRecord,
   type RuntimeLogSeverity,
@@ -50,12 +51,14 @@ export {
   RUNTIME_IMPORT_PREFIX,
   composeCompositionEntries,
   flattenCompositionPatches,
+  prepareComposition,
   defineCompositionPatchLayer,
   loadCompositionPatchFile,
   validateCompositionEntries,
   type CompositionPatchFile,
   type CompositionPatchInput,
   type CompositionPatchLayer,
+  type CompositionPreflight,
 } from './patches.ts'
 export {
   RUNTIME_SESSION_SERVICE,

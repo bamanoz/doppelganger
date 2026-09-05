@@ -1,10 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Context, Logger } from '@deepseek-ai/cordis'
 import {
-  activeMemorySemanticGeneration,
-  completeMemoryProjectionDeletion,
-  completeMemoryProjectionUpsert,
-  loadMemoryProjectionSource,
   memorySemanticGenerationId,
   validateMemoryVector,
   type MemoryEmbedder,
@@ -21,7 +17,6 @@ import {
   type MemoryVectorMaintenanceResult,
 } from '@doppelganger/doppelganger-memory'
 import type { MemoryService } from '@doppelganger/doppelganger-memory'
-import type { InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
 
 export interface MemoryVectorCoordinatorConfig {
   readonly instanceId?: string
@@ -38,23 +33,10 @@ export interface MemoryVectorCoordinatorStatus extends MemorySemanticStatus {
 
 interface WorkRow {
   readonly id: string
-  readonly generation_id: string
-  readonly record_id: string
-  readonly revision_id: string
+  readonly generationId: string
+  readonly recordId: string
+  readonly revisionId: string
   readonly attempts: number
-}
-
-interface RebuildRow {
-  readonly id: string
-  readonly current_revision_id: string
-  readonly instance_id: string
-  readonly actor_id: string
-  readonly scope_kind: 'relationship' | 'project'
-  readonly project_id: string | null
-  readonly kind: MemoryVectorEntry['kind']
-  readonly subject_key: string
-  readonly status: 'active'
-  readonly content: string
 }
 
 function boundedInteger(name: string, value: number, maximum: number): number {
@@ -145,8 +127,8 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     return tracked
   }
 
-  private get database(): InstanceSqliteDatabase {
-    return this.memory.canonicalDatabase
+  private get projectionStore(): MemoryService['projectionStore'] {
+    return this.memory.projectionStore
   }
 
   private configuredGeneration(): string {
@@ -161,8 +143,8 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
 
   private async ensureGeneration(): Promise<void> {
     const generationId = this.configuredGeneration()
-    const active = activeMemorySemanticGeneration(this.database, this.instanceId)
-    const existing = this.database.prepare('SELECT state FROM memory_semantic_generations WHERE id = ? AND instance_id = ?').get(generationId, this.instanceId) as { state: string } | undefined
+    const active = this.projectionStore.activeGeneration(this.instanceId)
+    const existing = this.projectionStore.generation(generationId, this.instanceId)
     if (active === generationId && existing?.state === 'active') return
     try {
       await this.rebuild()
@@ -198,50 +180,38 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     this.logger.info('component.disposal.completed')
   }
 
-  private recoverLeases(timestamp: string): void {
-    for (const table of ['memory_vector_projection_work', 'memory_vector_deletions'] as const) {
-      this.database.prepare(`UPDATE ${table} SET state = 'pending', lease_until = NULL, available_at = ?, updated_at = ? WHERE state = 'leased' AND lease_until IS NOT NULL AND lease_until <= ?`).run(timestamp, timestamp, timestamp)
-    }
-  }
+  private recoverLeases(timestamp: string): void { this.projectionStore.recoverLeases(timestamp) }
 
   private claim(table: 'memory_vector_projection_work' | 'memory_vector_deletions'): WorkRow | undefined {
     const timestamp = now()
-    return this.database.transaction(storage => {
-      storage.prepare(`UPDATE ${table} SET state = 'pending', lease_until = NULL, available_at = ?, updated_at = ? WHERE state = 'leased' AND lease_until IS NOT NULL AND lease_until <= ?`).run(timestamp, timestamp, timestamp)
-      const row = storage.prepare(`SELECT id, generation_id, record_id, revision_id, attempts FROM ${table} WHERE state IN ('pending', 'failed') AND attempts < ? AND available_at <= ? ORDER BY created_at, id LIMIT 1`).get(this.maximumAttempts, timestamp) as WorkRow | undefined
-      if (row === undefined) return undefined
-      const leaseUntil = new Date(Date.now() + Math.max(this.retryBaseMs * 4, this.operationTimeoutMs * 2)).toISOString()
-      storage.prepare(`UPDATE ${table} SET state = 'leased', lease_until = ?, attempts = attempts + 1, updated_at = ? WHERE id = ? AND state IN ('pending', 'failed')`).run(leaseUntil, timestamp, row.id)
-      return row
-    })
+    const operation = table === 'memory_vector_deletions' ? 'delete' : 'upsert'
+    const leaseUntil = new Date(Date.now() + Math.max(this.retryBaseMs * 4, this.operationTimeoutMs * 2)).toISOString()
+    return this.projectionStore.claim(operation, this.maximumAttempts, leaseUntil, timestamp) as WorkRow | undefined
   }
 
   private retry(table: 'memory_vector_projection_work' | 'memory_vector_deletions', row: WorkRow, error: unknown): void {
     const attempts = row.attempts + 1
     const code = failureCode(error)
     const backoff = Math.min(this.retryBaseMs * (2 ** Math.min(Math.max(attempts - 1, 0), 10)), 300_000)
-    const availableAt = new Date(Date.now() + backoff).toISOString()
-    this.database.prepare(`UPDATE ${table} SET state = 'failed', available_at = ?, last_failure_code = ?, updated_at = ?, lease_until = NULL WHERE id = ? AND state = 'leased'`).run(availableAt, code, now(), row.id)
+    this.projectionStore.retry(table === 'memory_vector_deletions' ? 'delete' : 'upsert', row, new Date(Date.now() + backoff).toISOString(), code, now())
     this.lastFailure = safeFailure(code)
     this.logger.warn('semantic.projection.retry kind=%s attempt=%d code=%s', table === 'memory_vector_deletions' ? 'delete' : 'upsert', attempts, code)
   }
+
   private async deliverUpsert(row: WorkRow): Promise<void> {
-    const source = loadMemoryProjectionSource(this.database, row.id, now())
-    if (source === undefined) {
-      this.database.prepare('DELETE FROM memory_vector_projection_work WHERE id = ?').run(row.id)
-      return
-    }
+    const source = this.projectionStore.source(row.id, now())
+    if (source === undefined) { this.projectionStore.discardUpsert(row.id); return }
     const vectors = await bounded(this.track(this.embedder.embedDocuments([source.content])), this.operationTimeoutMs)
     const vector = vectors[0]
     if (vector === undefined) throw Object.assign(new Error('embedder returned no vector'), { code: 'dimension' })
     validateMemoryVector(vector, this.embedder.identity.dimensions)
     await bounded(this.track(this.index.upsert([entryFrom(source, vector)])), this.operationTimeoutMs)
-    completeMemoryProjectionUpsert(this.database, row.id, now())
+    this.projectionStore.acknowledgeUpsert(row.id, now())
   }
 
   private async deliverDelete(row: WorkRow): Promise<void> {
-    await bounded(this.track(this.index.delete([{ generationId: row.generation_id, recordId: row.record_id, revisionId: row.revision_id }])), this.operationTimeoutMs)
-    completeMemoryProjectionDeletion(this.database, row.id)
+    await bounded(this.track(this.index.delete([{ generationId: row.generationId, recordId: row.recordId, revisionId: row.revisionId }])), this.operationTimeoutMs)
+    this.projectionStore.acknowledgeDeletion(row.id)
   }
 
   private async drain(): Promise<void> {
@@ -282,94 +252,63 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
 
   private async performRebuild(): Promise<void> {
     const generationId = this.configuredGeneration()
-    const database = this.database
-    const activeGeneration = activeMemorySemanticGeneration(database, this.instanceId)
-    const activeRow = database.prepare('SELECT state FROM memory_semantic_generations WHERE id = ? AND instance_id = ?').get(generationId, this.instanceId) as { state: string } | undefined
+    const activeGeneration = this.projectionStore.activeGeneration(this.instanceId)
+    const activeRow = this.projectionStore.generation(generationId, this.instanceId)
     if (activeGeneration === generationId && activeRow?.state === 'active') return
+    const oldIndexed = this.projectionStore.indexed(generationId)
+    if (oldIndexed.length > 0) await bounded(this.track(this.index.delete(oldIndexed)), this.operationTimeoutMs)
     const timestamp = now()
-    const oldIndexed = database.prepare('SELECT generation_id, record_id, revision_id FROM memory_semantic_indexed_revisions WHERE generation_id = ?').all(generationId) as unknown as readonly { generation_id: string; record_id: string; revision_id: string }[]
-    if (oldIndexed.length > 0) {
-      await bounded(this.track(this.index.delete(oldIndexed.map(row => ({ generationId: row.generation_id, recordId: row.record_id, revisionId: row.revision_id })))), this.operationTimeoutMs)
+    if (!this.projectionStore.prepareGeneration(generationId, this.instanceId, JSON.stringify(this.embedder.identity), JSON.stringify(this.index.identity), timestamp)) {
+      throw Object.assign(new Error('semantic generation is not eligible for rebuild'), { code: 'identity' })
     }
-    database.transaction(storage => {
-      storage.prepare(`INSERT OR IGNORE INTO memory_semantic_generations(id, instance_id, embedder_identity_json, vector_index_identity_json, state, created_at) VALUES (?, ?, ?, ?, 'building', ?)`).run(generationId, this.instanceId, JSON.stringify(this.embedder.identity), JSON.stringify(this.index.identity), timestamp)
-      storage.prepare(`UPDATE memory_semantic_generations SET state = 'building', failure_code = NULL WHERE id = ? AND state != 'active'`).run(generationId)
-      storage.prepare(`DELETE FROM memory_semantic_indexed_revisions WHERE generation_id = ?`).run(generationId)
-    })
     try {
       let lastId: string | undefined
       for (;;) {
         if (this.stopped) throw Object.assign(new Error('semantic rebuild interrupted'), { code: 'timeout' })
-        const page = database.prepare(`SELECT r.id, r.current_revision_id, r.instance_id, r.actor_id, r.scope_kind, r.project_id, r.kind, r.subject_key, r.status, v.content FROM memory_records r JOIN memory_revisions v ON v.id = r.current_revision_id WHERE r.instance_id = ? AND r.status = 'active' AND (? IS NULL OR r.id > ?) ORDER BY r.id LIMIT ?`).all(this.instanceId, lastId ?? null, lastId ?? null, this.batchSize) as unknown as readonly RebuildRow[]
+        const page = this.projectionStore.rebuildPage(generationId, this.instanceId, lastId, this.batchSize)
         if (page.length === 0) break
         const vectors = await bounded(this.track(this.embedder.embedDocuments(page.map(row => row.content))), this.operationTimeoutMs)
         if (vectors.length !== page.length) throw Object.assign(new Error('rebuild vector count mismatch'), { code: 'dimension' })
         for (const vector of vectors) validateMemoryVector(vector!, this.embedder.identity.dimensions)
-        await bounded(this.track(this.index.upsert(page.map((row, index) => entryFrom({ generationId, recordId: row.id, revisionId: row.current_revision_id, instanceId: row.instance_id, actorId: row.actor_id, scopeKind: row.scope_kind, ...(row.project_id === null ? {} : { projectId: row.project_id }), kind: row.kind, subjectKey: row.subject_key, status: row.status, content: row.content }, vectors[index]!)))), this.operationTimeoutMs)
-        database.transaction(storage => {
-          const statement = storage.prepare(`INSERT INTO memory_semantic_indexed_revisions(generation_id, record_id, revision_id, indexed_at) VALUES (?, ?, ?, ?) ON CONFLICT(generation_id, record_id) DO UPDATE SET revision_id = excluded.revision_id, indexed_at = excluded.indexed_at`)
-          for (const row of page) statement.run(generationId, row.id, row.current_revision_id, now())
-        })
+        await bounded(this.track(this.index.upsert(page.map((source, index) => entryFrom(source, vectors[index]!)))), this.operationTimeoutMs)
+        this.projectionStore.markRebuildPage(generationId, page, now())
         lastId = page[page.length - 1]!.id
         if (page.length < this.batchSize) break
       }
-      const expected = database.prepare(`SELECT COUNT(*) AS count FROM memory_records WHERE instance_id = ? AND status = 'active'`).get(this.instanceId) as { count: number }
-      const verified = database.prepare(`SELECT COUNT(*) AS count FROM memory_semantic_indexed_revisions i JOIN memory_records r ON r.id = i.record_id AND r.current_revision_id = i.revision_id WHERE i.generation_id = ? AND r.instance_id = ? AND r.status = 'active'`).get(generationId, this.instanceId) as { count: number }
-      const stale = database.prepare(`SELECT COUNT(*) AS count FROM memory_semantic_indexed_revisions i LEFT JOIN memory_records r ON r.id = i.record_id AND r.current_revision_id = i.revision_id AND r.instance_id = ? AND r.status = 'active' WHERE i.generation_id = ? AND r.id IS NULL`).get(this.instanceId, generationId) as { count: number }
-      if (Number(expected.count) !== Number(verified.count) || Number(stale.count) !== 0) throw Object.assign(new Error('rebuild identity verification failed'), { code: 'identity' })
-      database.transaction(storage => {
-        const previous = activeMemorySemanticGeneration(storage, this.instanceId)
-        if (previous !== undefined && previous !== generationId) storage.prepare(`UPDATE memory_semantic_generations SET state = 'retained' WHERE id = ?`).run(previous)
-        storage.prepare(`UPDATE memory_semantic_generations SET state = 'active', activated_at = ?, completed_at = ?, failure_code = NULL WHERE id = ?`).run(now(), now(), generationId)
-        storage.prepare(`INSERT INTO memory_semantic_active_generation(instance_id, generation_id, updated_at) VALUES (?, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET generation_id = excluded.generation_id, updated_at = excluded.updated_at`).run(this.instanceId, generationId, now())
-      })
+      if (!this.projectionStore.verifyGeneration(generationId, this.instanceId)) throw Object.assign(new Error('rebuild identity verification failed'), { code: 'identity' })
+      if (!this.projectionStore.activateGeneration(generationId, this.instanceId, now())) throw Object.assign(new Error('semantic generation became obsolete before activation'), { code: 'identity' })
     } catch (error) {
-      database.prepare(`UPDATE memory_semantic_generations SET state = 'failed', failure_code = ? WHERE id = ? AND state = 'building'`).run(failureCode(error), generationId)
+      this.projectionStore.failGeneration(generationId, failureCode(error))
       throw error
     }
   }
   async rollback(generationId: string): Promise<void> {
     this.logger.info('semantic.rollback.started')
     if (typeof generationId !== 'string' || generationId.length === 0) throw new TypeError('generationId is required')
-    const row = this.database.prepare(`SELECT id, state, embedder_identity_json, vector_index_identity_json FROM memory_semantic_generations WHERE id = ? AND instance_id = ?`).get(generationId, this.instanceId) as { id: string; state: string; embedder_identity_json: string; vector_index_identity_json: string } | undefined
+    const row = this.projectionStore.generation(generationId, this.instanceId)
     if (row === undefined || row.state !== 'retained') throw new Error('generation is not retained for rollback')
     let embedderIdentity: unknown
     let indexIdentity: unknown
     try {
-      embedderIdentity = JSON.parse(row.embedder_identity_json)
-      indexIdentity = JSON.parse(row.vector_index_identity_json)
+      embedderIdentity = JSON.parse(row.embedderIdentityJson)
+      indexIdentity = JSON.parse(row.vectorIndexIdentityJson)
     } catch {
       throw Object.assign(new Error('generation identity is malformed'), { code: 'identity' })
     }
     const expectedGeneration = memorySemanticGenerationId(this.instanceId, embedderIdentity as MemoryEmbedder['identity'], indexIdentity as MemoryVectorIndex['identity'])
     if (expectedGeneration !== generationId || generationId !== this.configuredGeneration()) throw Object.assign(new Error('generation identity is incompatible with configured semantic stack'), { code: 'identity' })
-    const indexed = this.database.prepare(`SELECT generation_id, record_id, revision_id FROM memory_semantic_indexed_revisions WHERE generation_id = ?`).all(generationId) as unknown as readonly { generation_id: string; record_id: string; revision_id: string }[]
-    const timestamp = now()
-    this.database.transaction(storage => {
-      const active = activeMemorySemanticGeneration(storage, this.instanceId)
-      if (active !== undefined && active !== generationId) storage.prepare(`UPDATE memory_semantic_generations SET state = 'retained' WHERE id = ? AND instance_id = ?`).run(active, this.instanceId)
-      storage.prepare(`UPDATE memory_semantic_generations SET state = 'active', activated_at = ?, failure_code = NULL WHERE id = ? AND state = 'retained'`).run(timestamp, generationId)
-      storage.prepare(`INSERT INTO memory_semantic_active_generation(instance_id, generation_id, updated_at) VALUES (?, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET generation_id = excluded.generation_id, updated_at = excluded.updated_at`).run(this.instanceId, generationId, timestamp)
-      for (const entry of indexed) storage.prepare(`DELETE FROM memory_vector_projection_work WHERE generation_id = ? AND record_id = ? AND revision_id = ?`).run(entry.generation_id, entry.record_id, entry.revision_id)
-    })
+    if (!this.projectionStore.rollbackGeneration(generationId, this.instanceId, now())) throw new Error('generation became obsolete before rollback')
     this.logger.info('semantic.rollback.completed')
   }
 
   private eligibleHit(hit: { readonly generationId: string; readonly recordId: string; readonly revisionId: string }, request: MemorySemanticSearchRequest): boolean {
-    if (hit.generationId !== activeMemorySemanticGeneration(this.database, this.instanceId)) return false
-    if (typeof hit.recordId !== 'string' || typeof hit.revisionId !== 'string') return false
-    const row = this.database.prepare(`SELECT instance_id, actor_id, scope_kind, project_id, status, current_revision_id, valid_from, valid_until, expires_at FROM memory_records WHERE id = ? AND current_revision_id = ?`).get(hit.recordId, hit.revisionId) as { instance_id: string; actor_id: string; scope_kind: string; project_id: string | null; status: string; current_revision_id: string; valid_from: string | null; valid_until: string | null; expires_at: string | null } | undefined
-    if (row === undefined || row.instance_id !== request.instanceId || row.actor_id !== request.actorId || row.status !== 'active') return false
-    if (row.scope_kind === 'project' && (request.projectId === undefined || row.project_id !== request.projectId)) return false
-    if (row.scope_kind === 'relationship' && row.project_id !== null) return false
-    const timestamp = now()
-    return (row.valid_from === null || row.valid_from <= timestamp) && (row.valid_until === null || row.valid_until > timestamp) && (row.expires_at === null || row.expires_at > timestamp)
+    return this.projectionStore.eligibleHit(hit, request.instanceId, request.actorId, request.projectId, now())
   }
 
   async search(request: MemorySemanticSearchRequest): Promise<readonly MemorySemanticHit[]> {
     this.logger.debug('semantic.search.started limit=%d', request.limit)
     if (request.instanceId !== this.instanceId || request.limit <= 0) return Object.freeze([])
-    const generationId = activeMemorySemanticGeneration(this.database, this.instanceId)
+    const generationId = this.projectionStore.activeGeneration(this.instanceId)
     if (generationId === undefined) return Object.freeze([])
     try {
       const query = await bounded(this.track(this.embedder.embedQuery(request.query)), this.operationTimeoutMs)
@@ -400,17 +339,12 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
   }
 
   async status(): Promise<MemoryVectorCoordinatorStatus> {
-    const generationId = activeMemorySemanticGeneration(this.database, this.instanceId)
+    const generationId = this.projectionStore.activeGeneration(this.instanceId)
     let health: MemoryVectorHealth | undefined
     try { health = await bounded(this.track(this.index.health()), this.operationTimeoutMs) } catch (error) { this.rememberFailure(error) }
     const counts = generationId === undefined ? undefined : (() => {
-      const current = now()
-      const indexed = Number((this.database.prepare('SELECT COUNT(*) AS count FROM memory_semantic_indexed_revisions WHERE generation_id = ?').get(generationId) as { count: number }).count)
-      const eligible = Number((this.database.prepare(`SELECT COUNT(*) AS count FROM memory_records WHERE instance_id = ? AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?) AND (expires_at IS NULL OR expires_at > ?)`).get(this.instanceId, current, current, current) as { count: number }).count)
-      const currentIndexed = Number((this.database.prepare(`SELECT COUNT(*) AS count FROM memory_semantic_indexed_revisions i JOIN memory_records r ON r.id = i.record_id AND r.current_revision_id = i.revision_id WHERE i.generation_id = ? AND r.instance_id = ? AND r.status = 'active'`).get(generationId, this.instanceId) as { count: number }).count)
-      const pendingUpserts = Number((this.database.prepare(`SELECT COUNT(*) AS count FROM memory_vector_projection_work WHERE generation_id = ? AND state IN ('pending', 'leased', 'failed')`).get(generationId) as { count: number }).count)
-      const pendingDeletes = Number((this.database.prepare(`SELECT COUNT(*) AS count FROM memory_vector_deletions WHERE generation_id = ? AND state IN ('pending', 'leased', 'failed')`).get(generationId) as { count: number }).count)
-      return Object.freeze({ indexed, current: currentIndexed, stale: Math.max(0, indexed - currentIndexed), missing: Math.max(0, eligible - currentIndexed), pendingUpserts, pendingDeletes })
+      const current = this.projectionStore.statusCounts(generationId, this.instanceId, now())
+      return Object.freeze({ indexed: current.indexed, current: current.current, stale: Math.max(0, current.indexed - current.current), missing: Math.max(0, current.eligible - current.current), pendingUpserts: current.pendingUpserts, pendingDeletes: current.pendingDeletes })
     })()
     return Object.freeze({
       active: generationId !== undefined,
@@ -424,22 +358,17 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
       workerRunning: this.workerBusy,
     })
   }
-
   async maintenance(kind: MemoryVectorMaintenanceKind): Promise<MemoryVectorMaintenanceResult> {
     this.logger.info('semantic.maintenance.started kind=%s', kind)
     if (kind !== 'cleanup-generation') return bounded(this.track(this.index.maintenance(kind)), this.operationTimeoutMs)
     const startedAt = now()
-    const active = activeMemorySemanticGeneration(this.database, this.instanceId)
-    const retained = this.database.prepare(`SELECT id FROM memory_semantic_generations WHERE instance_id = ? AND state = 'retained' AND id != ? ORDER BY created_at, id`).all(this.instanceId, active ?? '') as unknown as readonly { id: string }[]
+    const active = this.projectionStore.activeGeneration(this.instanceId)
+    const retained = this.projectionStore.retainedGenerations(this.instanceId, active)
     if (retained.length === 0) return Object.freeze({ kind, outcome: 'noop', startedAt, completedAt: now() })
-    for (const generation of retained) {
-      const rows = this.database.prepare(`SELECT generation_id, record_id, revision_id FROM memory_semantic_indexed_revisions WHERE generation_id = ?`).all(generation.id) as unknown as readonly { generation_id: string; record_id: string; revision_id: string }[]
-      if (rows.length > 0) await bounded(this.track(this.index.delete(rows.map(row => ({ generationId: row.generation_id, recordId: row.record_id, revisionId: row.revision_id })))), this.operationTimeoutMs)
-      this.database.transaction(storage => {
-        storage.prepare('DELETE FROM memory_vector_projection_work WHERE generation_id = ?').run(generation.id)
-        storage.prepare('DELETE FROM memory_vector_deletions WHERE generation_id = ?').run(generation.id)
-        storage.prepare(`DELETE FROM memory_semantic_generations WHERE id = ? AND state = 'retained'`).run(generation.id)
-      })
+    for (const generationId of retained) {
+      const rows = this.projectionStore.indexed(generationId)
+      if (rows.length > 0) await bounded(this.track(this.index.delete(rows)), this.operationTimeoutMs)
+      this.projectionStore.removeRetainedGeneration(generationId)
     }
     return Object.freeze({ kind, outcome: 'ran', startedAt, completedAt: now() })
   }

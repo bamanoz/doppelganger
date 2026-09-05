@@ -51,9 +51,10 @@ Server endpoints and non-secret namespaces are authored Loader configuration. Ch
 
 ## Projection and generation lifecycle
 
-Canonical mutations enqueue identifier-only projection work in the same transaction. Every projection entry and backend filter includes the canonical `(instanceId, actorId)` partition. The coordinator reloads and revalidates current canonical content immediately before embedding, delivers idempotently, and records bounded failure/lag state.
+Canonical mutations enqueue identifier-only projection work in the same transaction. Every projection entry and backend filter includes the canonical `(instanceId, actorId)` partition. The memory module's bounded `MemoryProjectionStore` owns queue leasing/retry/acknowledgment, generation preparation/verification/activation/rollback/cleanup, and status counts through short synchronous transactions. The coordinator retains scheduling, deadlines, external embedding/index I/O, and cancellation; it has no canonical database seam and performs no canonical SQL. Acknowledgment reloads and revalidates current canonical content immediately after external work before certifying delivery.
 
 A model, backend, or partition-schema change builds a new generation from deterministic canonical pages, verifies identity and counts, then atomically switches the canonical active pointer. Candidate activation fails if the rebuild is incomplete, so the prior audited runtime and generation remain active. Vector stores hold deterministic identities, actor-named eligibility filter metadata, and normalized vectors only; they never authorize content.
+Generation preparation rejects reuse with another canonical owner or provider identity. Rebuild-page acknowledgment rechecks each record and revision atomically; a stale page cannot certify a candidate. Activation and rollback verify completeness within the pointer-change transaction, and retained-generation cleanup checks state before deleting any queued work.
 
 SQLite exact and pgvector persist an explicit vector schema version and transactionally rename supported `principal_id` artifacts to `actor_id`; the fingerprint also includes the partition-schema version. Chroma and Qdrant use actor-named metadata under a new generation identity. Incompatible or partially migrated derived state cannot become active results, and canonical actor-scoped lexical retrieval remains available during migration, rebuild, or backend failure.
 
@@ -71,7 +72,7 @@ An interrupted q8 build remains failed/incomplete and cannot become the active g
 
 Health is sanitized and bounded to backend kind/target, active generation, embedder identity, supported maintenance, indexed/current/stale/missing counts, pending upserts/deletes, and last failure category/time.
 
-Coordinator tools expose status, rebuild, rollback, and backend-declared maintenance. Maintenance is serialized; overlap reports `already-running`. SQLite supports compaction, pgvector supports explicit HNSW build/reindex, and generation cleanup removes retained derived data only.
+Coordinator tools expose status, rebuild, rollback, and backend-declared maintenance. Maintenance is serialized; controlled overlap reports `already-running`, while separately settled requests report their declared `ran` or `noop` result. Unsupported operations fail explicitly. SQLite supports compaction, pgvector supports explicit HNSW build/reindex, and generation cleanup removes retained derived data only. Adapter conformance must use a real supported exclusive-work boundary; a fixture-only assertion or unconditional sleep is not evidence of serialization.
 
 Pending remote deletion retains opaque identities until confirmation. Canonical absence suppresses stale hits; never delete tombstones or reintroduce deleted content manually to clear operational debt.
 

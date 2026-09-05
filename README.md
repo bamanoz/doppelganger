@@ -261,11 +261,15 @@ Plugins continue to use ordinary Cordis `ctx.logger`. Logging produces no destin
   inject: [doppelgangerLogging]
   isolate: { doppelgangerLogging: session }
   config:
-    path: "/absolute/path/doppelganger.jsonl"
+    pathTemplate: "/absolute/path/runtime-{runtimeActivationId}.jsonl"
     level: info
     maxBytes: 10485760
     maxFiles: 5
     maximumPendingRecords: 2048
+    retention:
+      maxAgeDays: 7
+      maxTotalBytes: 536870912
+      cleanupIntervalMs: 60000
 
 - id: runtime-logs-sentry
   name: "@doppelganger/doppelganger-logging-sentry/loader"
@@ -278,7 +282,9 @@ Plugins continue to use ordinary Cordis `ctx.logger`. Logging produces no destin
     maximumPendingRecords: 1024
 ```
 
-The file destination requires an absolute normalized operator-owned path and exactly one active operating-system writer per concrete path. `dsnEnv` references one environment variable; do not place the DSN in YAML. OMP keeps ordinary logs inside the child destination layer: stdout remains framed JSON-RPC and no log record is projected into reports, tools, context, or UI. See [Runtime logging](docs/features/runtime-logging.md) for filtering, bounds, rotation, failure containment, reload, and disposal.
+The file destination requires exactly one absolute normalized operator-owned `path` or `pathTemplate`. A template containing exactly one `{runtimeActivationId}` token creates a distinct file for every concrete Runtime Session activation, including concurrent OMP children and restarts that reuse a logical session ID. Static paths retain the one-active-operating-system-writer-per-concrete-path rule. Every normalized record and Sentry event carries the same activation ID alongside Runtime Session and Runtime Preset correlation. `dsnEnv` references one environment variable; do not place the DSN in YAML. OMP keeps ordinary logs inside the child destination layer: stdout remains framed JSON-RPC and no log record is projected into reports, tools, context, or UI. See [Runtime logging](docs/features/runtime-logging.md) for filtering, bounds, rotation, failure containment, reload, and disposal.
+
+The optional `retention` block cleans completed activation families at startup and periodically. It protects live processes and unregistered legacy logs; its budget is best-effort when protected files dominate, not a hard filesystem quota. Use a local log directory and an activation token in the filename. Omitting the block keeps cleanup disabled. Ownership, scope, migration, and operational limits are defined in [Runtime logging](docs/features/runtime-logging.md#cross-activation-retention).
 
 ### Optional full-stack user presets
 

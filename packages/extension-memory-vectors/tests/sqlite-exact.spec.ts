@@ -4,9 +4,31 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createSQLiteExactMemoryVectorIndex } from '../src/index.ts'
+import type { MemoryVectorMaintenanceResult } from '@doppelganger/doppelganger-memory'
 import { runMemoryVectorBackendConformance } from './conformance.ts'
 
-runMemoryVectorBackendConformance('SQLite exact', ({ root, dimensions }) => createSQLiteExactMemoryVectorIndex({ databasePath: join(root, 'vectors.sqlite'), dimensions }))
+runMemoryVectorBackendConformance('SQLite exact', ({ root, dimensions }) => createSQLiteExactMemoryVectorIndex({ databasePath: join(root, 'vectors.sqlite'), dimensions }), {}, async index => ({
+  kind: 'compact',
+  async run() {
+    let underlyingOperations = 0
+    let competing: Promise<MemoryVectorMaintenanceResult> | undefined
+    const originalExec = DatabaseSync.prototype.exec
+    DatabaseSync.prototype.exec = function exec(sql: string) {
+      if (sql === 'PRAGMA optimize') {
+        underlyingOperations += 1
+        competing = index.maintenance('compact')
+      }
+      return originalExec.call(this, sql)
+    }
+    try {
+      const first = await index.maintenance('compact')
+      if (competing === undefined) throw new Error('SQLite exclusive work did not execute')
+      return { first, competing: await competing, underlyingOperations }
+    } finally {
+      DatabaseSync.prototype.exec = originalExec
+    }
+  },
+}))
 
 const roots: string[] = []
 const identity = { generationId: 'generation.one', recordId: 'record.one', revisionId: 'revision.one' }

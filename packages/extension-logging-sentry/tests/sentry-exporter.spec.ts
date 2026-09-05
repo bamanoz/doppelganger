@@ -1,32 +1,57 @@
 import { readFile } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 import { getClient } from '@sentry/node'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
   RuntimeLoggingService,
   RuntimeLogRecord,
   RuntimeLogSink,
   RuntimeLogSinkOptions,
 } from '@doppelganger/doppelganger-composition-runtime'
+
+const sentryLoaderTransport = vi.hoisted(() => ({
+  envelopes: [] as unknown[],
+  events: [] as string[],
+  flushTimeouts: [] as Array<number | undefined>,
+}))
+
+vi.mock(import('@sentry/node'), async importOriginal => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    makeNodeTransport: () => ({
+      send(envelope: unknown) {
+        sentryLoaderTransport.envelopes.push(envelope)
+        return Promise.resolve({ statusCode: 200 })
+      },
+      flush(timeout?: number) {
+        sentryLoaderTransport.events.push('flush')
+        sentryLoaderTransport.flushTimeouts.push(timeout)
+        return Promise.resolve(true)
+      },
+    }),
+  }
+})
 import {
+  SentryLoggingConfigSchema,
   createSentryLoggingFilter,
   normalizeSentryLoggingConfig,
   resolveSentryLoggingConfig,
 } from '../src/index.ts'
 import {
   createOwnedSentryClient,
-  replaceOwnedSentryClientFactoryForTests,
-  type OwnedSentryClient,
   type SentryTransportFactory,
 } from '../src/client.ts'
 import SentryLoggingPlugin from '../src/plugin.ts'
 
 const validDsn = 'https://public@example.com/1'
-const cleanups: Array<() => void> = []
+const runtimeActivationId = '123e4567-e89b-42d3-a456-426614174000'
 
 afterEach(() => {
   delete process.env.DOPPELGANGER_TEST_SENTRY_DSN
-  for (const cleanup of cleanups.splice(0).reverse()) cleanup()
+  sentryLoaderTransport.envelopes.length = 0
+  sentryLoaderTransport.events.length = 0
+  sentryLoaderTransport.flushTimeouts.length = 0
 })
 
 function record(
@@ -37,6 +62,7 @@ function record(
   error?: RuntimeLogRecord['error'],
 ): RuntimeLogRecord {
   return Object.freeze({
+    runtimeActivationId,
     sequence,
     timestamp: 1_700_000_000_000 + sequence,
     severity,
@@ -116,12 +142,44 @@ describe('Sentry logging configuration', () => {
     expect(filter(record(2, 'debug', 'rejected', 'other'))).toBe(false)
     expect(filter(record(3, 'error', 'accepted', 'other'))).toBe(true)
   })
+  it('uses identical direct and Loader Sentry configuration admission', () => {
+    const valid = {
+      dsnEnv: 'DOPPELGANGER_TEST_SENTRY_DSN',
+      level: 'debug',
+      levels: { worker: 'warn' },
+      environment: 'production',
+      release: 'release-1',
+      flushTimeoutMs: 60_000,
+      maximumPendingRecords: 16_384,
+    }
+    const direct = normalizeSentryLoggingConfig(valid)
+    const admitted = SentryLoggingConfigSchema['~standard'].validate(valid)
+    expect('issues' in admitted ? admitted.issues : undefined).toBeUndefined()
+    if ('value' in admitted) expect(admitted.value).toEqual(direct)
+    expect(normalizeSentryLoggingConfig({ dsnEnv: 'X' })).toEqual({
+      dsnEnv: 'X', level: 'info', levels: {}, flushTimeoutMs: 2_000, maximumPendingRecords: 1_024,
+    })
+    const invalid = [
+      null,
+      { dsnEnv: 'X', unknown: true },
+      { dsnEnv: 'X'.repeat(257) },
+      { dsnEnv: 'not valid' },
+      { dsnEnv: 'X', level: 'trace' },
+      { dsnEnv: 'X', flushTimeoutMs: 99 },
+      { dsnEnv: 'X', maximumPendingRecords: 0 },
+    ]
+    for (const input of invalid) {
+      expect(() => normalizeSentryLoggingConfig(input)).toThrow()
+      expect(SentryLoggingConfigSchema['~standard'].validate(input)).toHaveProperty('issues')
+    }
+  })
 
   it('exposes public and Loader entries with pinned Sentry and one internal edge', async () => {
     const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
       readonly exports: Record<string, unknown>
       readonly dependencies: Record<string, string>
     }
+
     expect(Object.keys(manifest.exports).sort()).toEqual(['.', './loader'])
     expect(manifest.dependencies['@sentry/node']).toBe('10.73.0')
     expect(Object.keys(manifest.dependencies).filter(name => name.startsWith('@doppelganger/'))).toEqual([
@@ -158,6 +216,8 @@ describe('private Sentry client', () => {
     expect(payload).toContain('warning breadcrumb')
     expect(payload).toContain('bounded error')
     expect(payload).toContain('RuntimeFailure')
+    expect(payload).toContain(runtimeActivationId)
+    expect(payload).toContain('runtime_activation_id')
     expect(payload).toContain('sentry-session')
     expect(payload).toContain('sentry-preset')
     expect(payload).toContain('release-1')
@@ -207,19 +267,24 @@ describe('private Sentry client', () => {
     expect(Date.now() - started).toBeLessThan(500)
   })
 
-  it('keeps private clients and breadcrumbs isolated across concurrent Runtime Sessions', async () => {
+  it('keeps private clients and breadcrumbs isolated across activations sharing one logical session', async () => {
     const firstTransport = transportHarness()
     const secondTransport = transportHarness()
     const first = createOwnedSentryClient(resolved(), firstTransport.factory)
     const second = createOwnedSentryClient(resolved(), secondTransport.factory)
+    const secondActivationId = '123e4567-e89b-42d3-b456-426614174001'
     first.write(record(1, 'warn', 'first breadcrumb', 'first'))
-    second.write({ ...record(1, 'warn', 'second breadcrumb', 'second'), sessionId: 'second-session' })
+    second.write({ ...record(1, 'warn', 'second breadcrumb', 'second'), runtimeActivationId: secondActivationId })
     first.write(record(2, 'error', 'first error', 'first'))
-    second.write({ ...record(2, 'error', 'second error', 'second'), sessionId: 'second-session' })
+    second.write({ ...record(2, 'error', 'second error', 'second'), runtimeActivationId: secondActivationId })
     await Promise.all([first.close(100), second.close(100)])
 
     const firstPayload = JSON.stringify(firstTransport.envelopes)
     const secondPayload = JSON.stringify(secondTransport.envelopes)
+    expect(firstPayload).toContain(runtimeActivationId)
+    expect(firstPayload).not.toContain(secondActivationId)
+    expect(secondPayload).toContain(secondActivationId)
+    expect(secondPayload).not.toContain(runtimeActivationId)
     expect(firstPayload).toContain('first breadcrumb')
     expect(firstPayload).not.toContain('second breadcrumb')
     expect(secondPayload).toContain('second breadcrumb')
@@ -228,31 +293,23 @@ describe('private Sentry client', () => {
 })
 
 describe('Sentry Loader lifecycle', () => {
-  it('unregisters before bounded close and repeats disposal safely', async () => {
+  it('registers the actual private client, drains accepted records, flushes, and closes on disposal', async () => {
     process.env.DOPPELGANGER_TEST_SENTRY_DSN = validDsn
     const order: string[] = []
     let registeredSink: RuntimeLogSink | undefined
     let registeredOptions: RuntimeLogSinkOptions | undefined
     const logging: RuntimeLoggingService = {
+      scope: Object.freeze({
+        runtimeActivationId,
+        sessionId: 'sentry-session',
+        runtimePresetId: 'sentry-preset',
+      }),
       register(sink, options) {
         registeredSink = sink
         registeredOptions = options
         return async () => { order.push('unregister') }
       },
     }
-    let closeCount = 0
-    const fakeClient: OwnedSentryClient = {
-      write() { order.push('write') },
-      async close(timeoutMs) {
-        closeCount += 1
-        order.push(`close:${timeoutMs}`)
-        return true
-      },
-    }
-    cleanups.push(replaceOwnedSentryClientFactoryForTests(config => {
-      expect(config.dsn).toBe(validDsn)
-      return fakeClient
-    }))
     const root = new Context().isolate('doppelgangerLogging')
     root.provide('doppelgangerLogging', logging)
     const fiber = root.plugin(SentryLoggingPlugin, {
@@ -263,14 +320,20 @@ describe('Sentry Loader lifecycle', () => {
     })
     await fiber.await()
 
+    expect(registeredSink).toBeDefined()
     expect(registeredOptions?.maximumPendingRecords).toBe(7)
     expect(registeredOptions?.filter?.(record(1, 'info', 'filtered'))).toBe(false)
     registeredSink?.write(record(2, 'error', 'accepted'))
+    await settle()
+    expect(JSON.stringify(sentryLoaderTransport.envelopes)).toContain('accepted')
+
     await Promise.all([fiber.dispose(), fiber.dispose()])
     await settle()
 
-    expect(order).toEqual(['write', 'unregister', 'close:250'])
-    expect(closeCount).toBe(1)
+    expect(order).toEqual(['unregister'])
+    expect(sentryLoaderTransport.events).toEqual(['flush'])
+    expect(sentryLoaderTransport.flushTimeouts).toEqual([250])
+    expect(() => registeredSink!.write(record(3, 'error', 'late'))).toThrow('not accepting records')
     await root.fiber.dispose()
   })
 })

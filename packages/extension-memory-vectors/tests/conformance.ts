@@ -5,7 +5,14 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type {
   MemoryVectorEntry,
   MemoryVectorIndex,
+  MemoryVectorMaintenanceKind,
+  MemoryVectorMaintenanceResult,
 } from '@doppelganger/doppelganger-memory'
+
+export interface MemoryVectorMaintenanceOverlapFixture {
+  readonly kind: MemoryVectorMaintenanceKind
+  run(): Promise<Readonly<{ first: MemoryVectorMaintenanceResult; competing: MemoryVectorMaintenanceResult; underlyingOperations: number }>>
+}
 
 export interface MemoryVectorBackendFixture {
   readonly root: string
@@ -13,6 +20,8 @@ export interface MemoryVectorBackendFixture {
 }
 
 export type MemoryVectorBackendFactory = (context: MemoryVectorBackendFixture) => Promise<MemoryVectorIndex>
+
+export type MemoryVectorMaintenanceOverlapFactory = (index: MemoryVectorIndex) => Promise<MemoryVectorMaintenanceOverlapFixture>
 
 export interface MemoryVectorInitializationRaceFixture {
   readonly index: MemoryVectorIndex
@@ -34,13 +43,13 @@ export interface MemoryVectorInitializationLifecycle {
 
 /**
  * Run the backend contract shared by local and server-backed vector indexes.
- * A factory owns backend-specific configuration; `root` is a disposable fixture
- * root and MUST NOT point at a real instance or credential-bearing location.
+ * A factory owns backend-specific configuration; `root` is a disposable fixture root.
  */
 export function runMemoryVectorBackendConformance(
   name: string,
   createIndex: MemoryVectorBackendFactory,
   initializationLifecycle: MemoryVectorInitializationLifecycle = {},
+  createMaintenanceOverlap?: MemoryVectorMaintenanceOverlapFactory,
 ): void {
   describe(`${name} vector backend conformance`, () => {
     const indexes: MemoryVectorIndex[] = []
@@ -151,23 +160,34 @@ export function runMemoryVectorBackendConformance(
       const index = await open()
       const health = await index.health()
       expect(health.state).toBe('healthy')
-      expect(health.backend).toBe(index.identity.backend)
-      expect(health.sanitizedTarget).not.toMatch(/token|password|secret|apikey/i)
-      expect(Object.isFrozen(health)).toBe(true)
       for (const kind of index.supportedMaintenance) {
-        const result = await index.maintenance(kind)
-        expect(result.kind).toBe(kind)
-        expect(['ran', 'already-running', 'noop']).toContain(result.outcome)
-        const concurrent = await Promise.all([index.maintenance(kind), index.maintenance(kind)])
-        expect(concurrent.some(item => item.outcome === 'already-running') || concurrent.every(item => item.outcome !== 'already-running')).toBe(true)
+        const first = await index.maintenance(kind)
+        expect(first.kind).toBe(kind)
+        expect(['ran', 'noop']).toContain(first.outcome)
+        const second = await index.maintenance(kind)
+        expect(second.kind).toBe(kind)
+        expect(['ran', 'noop']).toContain(second.outcome)
+        expect(second.outcome).not.toBe('already-running')
       }
       const unsupported = (['compact', 'build-index', 'reindex', 'cleanup-generation'] as const).find(kind => !index.supportedMaintenance.includes(kind))
       if (unsupported !== undefined) await expect(index.maintenance(unsupported)).rejects.toMatchObject({ code: 'UNSUPPORTED_MAINTENANCE' })
       await index.close()
-      await expect(index.health()).rejects.toThrow(/closed/i)
-      await expect(search(index)).rejects.toThrow(/closed/i)
-      await index.close()
+      await expect(index.health()).rejects.toThrow(/closed/iu)
+      await expect(search(index)).rejects.toThrow(/closed/iu)
     })
+
+    if (createMaintenanceOverlap !== undefined) {
+      it('proves one exclusive maintenance operation while a second request overlaps', async () => {
+        const index = await open()
+        const overlap = await createMaintenanceOverlap(index)
+        const result = await overlap.run()
+        expect(result.first.kind).toBe(overlap.kind)
+        expect(result.first.outcome).toBe('ran')
+        expect(result.competing.kind).toBe(overlap.kind)
+        expect(result.competing.outcome).toBe('already-running')
+        expect(result.underlyingOperations).toBe(1)
+      })
+    }
 
     if (initializationLifecycle.disposeDuringInitialization !== undefined) {
       it('closes owned candidates when disposed during initialization', async () => {

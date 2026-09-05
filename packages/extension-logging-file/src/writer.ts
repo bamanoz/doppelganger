@@ -9,7 +9,8 @@ import {
 } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { RuntimeLogRecord, RuntimeLogSink } from '@doppelganger/doppelganger-composition-runtime'
-import type { NormalizedFileLoggingConfig } from './config.ts'
+import type { ResolvedFileLoggingConfig } from './config.ts'
+import { FileLogRetention, type FileLogRetentionStatus } from './retention.ts'
 
 const activePaths = new Set<string>()
 
@@ -49,32 +50,77 @@ async function renameIfPresent(source: string, destination: string): Promise<voi
 
 export class RollingJsonlWriter implements RuntimeLogSink {
   private handle: FileHandle | undefined
-  private readonly config: NormalizedFileLoggingConfig
+  private readonly config: ResolvedFileLoggingConfig
+  private readonly retention: FileLogRetention | undefined
   private size: number
   private accepting = true
   private failed = false
   private closed = false
   private tail = Promise.resolve()
+  private cleanupTask: Promise<void> | undefined
   private closeTask: Promise<void> | undefined
+  private currentRetentionStatus: FileLogRetentionStatus | undefined
 
-  private constructor(config: NormalizedFileLoggingConfig, handle: FileHandle, size: number) {
+  private constructor(
+    config: ResolvedFileLoggingConfig,
+    handle: FileHandle,
+    size: number,
+    retention: FileLogRetention | undefined,
+  ) {
     this.config = config
     this.handle = handle
     this.size = size
+    this.retention = retention
   }
 
-  static async open(config: NormalizedFileLoggingConfig): Promise<RollingJsonlWriter> {
+  static async open(config: ResolvedFileLoggingConfig): Promise<RollingJsonlWriter> {
     if (activePaths.has(config.path)) throw new Error(`file logging path already has an active writer: ${config.path}`)
     activePaths.add(config.path)
+    let retention: FileLogRetention | undefined
+    let handle: FileHandle | undefined
+    let writer: RollingJsonlWriter | undefined
     try {
       await mkdir(dirname(config.path), { recursive: true })
+      if (config.retention !== undefined) retention = await FileLogRetention.open(config)
       const size = await existingRegularFile(config.path) ?? 0
-      const handle = await openActive(config.path)
-      return new RollingJsonlWriter(config, handle, size)
+      handle = await openActive(config.path)
+      writer = new RollingJsonlWriter(config, handle, size, retention)
+      handle = undefined
+      retention = undefined
+      await writer.cleanup()
+      return writer
     } catch (error) {
-      activePaths.delete(config.path)
+      const cleanupErrors: unknown[] = []
+      if (writer !== undefined) {
+        try {
+          await writer.close()
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError)
+        }
+      } else {
+        if (handle !== undefined) {
+          try {
+            await handle.close()
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError)
+          }
+        }
+        if (retention !== undefined) {
+          try {
+            retention.close()
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError)
+          }
+        }
+        activePaths.delete(config.path)
+      }
+      if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors], 'file logging writer open and cleanup failed')
       throw error
     }
+  }
+
+  get retentionStatus(): FileLogRetentionStatus | undefined {
+    return this.currentRetentionStatus
   }
 
   write(record: RuntimeLogRecord): Promise<void> {
@@ -99,17 +145,52 @@ export class RollingJsonlWriter implements RuntimeLogSink {
     return task
   }
 
+  cleanup(): Promise<void> {
+    if (this.retention === undefined) return Promise.resolve()
+    if (!this.accepting || this.failed) return Promise.reject(new Error('file logging writer is not accepting maintenance'))
+    if (this.cleanupTask !== undefined) return this.cleanupTask
+    const task = this.tail.then(async () => {
+      if (this.failed) throw new Error('file logging writer is not accepting maintenance')
+      try {
+        const status = await this.retention?.collect()
+        if (status !== undefined) this.currentRetentionStatus = status
+      } catch (error) {
+        this.accepting = false
+        this.failed = true
+        await this.closeHandle()
+        throw error
+      }
+    })
+    this.tail = task.catch(() => undefined)
+    const cleanupTask = task.finally(() => {
+      if (this.cleanupTask === cleanupTask) this.cleanupTask = undefined
+    })
+    this.cleanupTask = cleanupTask
+    return cleanupTask
+  }
+
   close(): Promise<void> {
     return this.closeTask ??= (async () => {
       if (this.closed) return
       this.accepting = false
+      const errors: unknown[] = []
       try {
         await this.tail
         await this.closeHandle()
+      } catch (error) {
+        errors.push(error)
       } finally {
-        this.closed = true
-        activePaths.delete(this.config.path)
+        try {
+          this.retention?.close()
+        } catch (error) {
+          errors.push(error)
+        } finally {
+          this.closed = true
+          activePaths.delete(this.config.path)
+        }
       }
+      if (errors.length === 1) throw errors[0]
+      if (errors.length > 1) throw new AggregateError(errors, 'file logging writer close failed')
     })()
   }
 

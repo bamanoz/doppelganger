@@ -81,16 +81,11 @@ export {
   type MemoryVectorStatus,
 } from './semantic.ts'
 export {
-  activeMemorySemanticGeneration,
-  completeMemoryProjectionDeletion,
-  completeMemoryProjectionUpsert,
-  enqueueActiveMemoryProjection,
-  enqueueKnownMemoryProjectionDeletions,
-  enqueueMemoryProjectionDeletion,
-  enqueueMemoryProjectionUpsert,
-  enqueueMemoryRevisionReplacement,
-  loadMemoryProjectionSource,
+  MemoryProjectionStore,
+  type MemoryProjectionLease,
+  type MemoryProjectionRebuildSource,
   type MemoryProjectionSource,
+  type MemoryProjectionStatusCounts,
 } from './projection-store.ts'
 export {
   projectMemorySemanticQuery,

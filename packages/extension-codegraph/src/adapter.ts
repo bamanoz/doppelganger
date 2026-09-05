@@ -9,12 +9,11 @@ import {
   type CodeGraphProcessResult,
 } from './process.ts'
 import { classifyCodeGraphSafety, parseCodeGraphStatus, statusResult } from './status.ts'
-import {
-  CODEGRAPH_SUPPORTED_VERSION_RANGE,
-  type CodeGraphBinaryStatus,
-  type CodeGraphExploreResult,
-  type CodeGraphIndexStatus,
-  type CodeGraphStatus,
+import type {
+  CodeGraphBinaryStatus,
+  CodeGraphExploreResult,
+  CodeGraphIndexStatus,
+  CodeGraphStatus,
 } from './types.ts'
 
 interface QueueWaiter {
@@ -89,7 +88,7 @@ export class CodeGraphAdapter {
         compatible: false,
       }))
     }
-    const binary = await this.#discover(false)
+    const binary = await this.#discover()
     if (!binary.available || !binary.compatible) return statusResult(this.#workspaceRoot, binary)
     const index = await this.#readStatus(binary)
     return statusResult(this.#workspaceRoot, binary, index)
@@ -102,7 +101,9 @@ export class CodeGraphAdapter {
     if (!this.#accepting) throw new CodeGraphError('CODEGRAPH_DISPOSED', 'CodeGraph integration is disposing')
     await this.#acquireExploration()
     try {
-      const binary = await this.#discover(true)
+      const binary = await this.#discover()
+      if (!binary.available) throw new CodeGraphError('CODEGRAPH_BINARY_UNAVAILABLE', 'CodeGraph executable is unavailable')
+      if (!binary.compatible) throw new CodeGraphError('CODEGRAPH_BINARY_INCOMPATIBLE', `CodeGraph executable is outside the supported version range${binary.version === undefined ? '' : ` (${binary.version})`}`)
       let index = await this.#readStatus(binary)
       let safety = classifyCodeGraphSafety(this.#workspaceRoot, binary, index)
       if (safety.repairable) {
@@ -129,7 +130,7 @@ export class CodeGraphAdapter {
     }
   }
 
-  async #discover(required: boolean): Promise<CodeGraphBinaryStatus> {
+  async #discover(): Promise<CodeGraphBinaryStatus> {
     if (this.#binary !== undefined) return this.#binary
     this.#discovery ??= (async () => {
       try {
@@ -144,30 +145,16 @@ export class CodeGraphAdapter {
         })
         const version = result.stdout.trim()
         if (version.length === 0 || Buffer.byteLength(version, 'utf8') > 128) {
-          throw new CodeGraphError('CODEGRAPH_BINARY_INCOMPATIBLE', 'CodeGraph returned an invalid version')
+          return Object.freeze({ available: true, executable, version, compatible: false })
         }
-        const status = Object.freeze({
-          available: true,
-          executable,
-          version,
-          compatible: compatibleVersion(version),
-        })
-        if (!status.compatible && required) {
-          throw new CodeGraphError(
-            'CODEGRAPH_BINARY_INCOMPATIBLE',
-            `CodeGraph ${version} is unsupported; expected ${CODEGRAPH_SUPPORTED_VERSION_RANGE}`,
-          )
-        }
-        if (status.compatible) this.#binary = status
+        const status = Object.freeze({ available: true, executable, version, compatible: compatibleVersion(version) })
+        if (status.compatible && this.#accepting) this.#binary = status
         return status
       } catch (cause) {
-        if (cause instanceof CodeGraphError) throw cause
-        if (required) throw this.#processError(cause, 'CODEGRAPH_BINARY_UNAVAILABLE', 'binary discovery')
-        return Object.freeze({
-          available: false,
-          executable: this.#config.executable,
-          compatible: false,
-        })
+        if (cause instanceof CodeGraphProcessFailure && (cause.kind === 'timeout' || cause.kind === 'output-limit' || cause.kind === 'disposed')) {
+          throw this.#processError(cause, 'CODEGRAPH_BINARY_UNAVAILABLE', 'binary discovery')
+        }
+        return Object.freeze({ available: false, executable: this.#config.executable, compatible: false })
       }
     })()
     try {

@@ -1,4 +1,3 @@
-import Schema from '@deepseek-ai/schemastery'
 import {
   RUNTIME_LOGGING_LIMITS,
   runtimeLogLevelAllows,
@@ -36,19 +35,18 @@ export const SENTRY_LOGGING_DEFAULTS = Object.freeze({
   maximumPendingRecords: 1_024,
 })
 
-const severitySchema = Schema.union(['error', 'warn', 'info', 'debug'])
-
-export const SentryLoggingConfigSchema: Schema<SentryLoggingConfig> = Schema.object({
-  dsnEnv: Schema.string().min(1).max(256).required(),
-  level: severitySchema.default(SENTRY_LOGGING_DEFAULTS.level),
-  levels: Schema.dict(severitySchema).default({}),
-  environment: Schema.string().min(1).max(64),
-  release: Schema.string().min(1).max(200),
-  flushTimeoutMs: Schema.natural().min(100).max(60_000).default(SENTRY_LOGGING_DEFAULTS.flushTimeoutMs),
-  maximumPendingRecords: Schema.natural()
-    .min(RUNTIME_LOGGING_LIMITS.minimumPendingRecords)
-    .max(RUNTIME_LOGGING_LIMITS.maximumPendingRecords)
-    .default(SENTRY_LOGGING_DEFAULTS.maximumPendingRecords),
+export const SentryLoggingConfigSchema = Object.freeze({
+  '~standard': Object.freeze({
+    version: 1 as const,
+    vendor: 'doppelganger',
+    validate(value: unknown) {
+      try {
+        return { value: normalizeSentryLoggingConfig(value) }
+      } catch (cause) {
+        return { issues: [{ message: cause instanceof Error ? cause.message : String(cause) }] }
+      }
+    },
+  }),
 })
 
 const allowedKeys = new Set([
@@ -111,8 +109,8 @@ export function normalizeSentryLoggingConfig(input: unknown): NormalizedSentryLo
   for (const key of Object.keys(object)) {
     if (!allowedKeys.has(key)) throw new TypeError(`Sentry logging config contains unknown field "${key}"`)
   }
-  if (typeof object.dsnEnv !== 'string' || !environmentName.test(object.dsnEnv)) {
-    throw new TypeError('Sentry logging dsnEnv must name one environment variable')
+  if (typeof object.dsnEnv !== 'string' || object.dsnEnv.length > 256 || !environmentName.test(object.dsnEnv)) {
+    throw new TypeError('Sentry logging dsnEnv must name one environment variable of at most 256 characters')
   }
   const levelsInput = object.levels === undefined ? {} : plainObject(object.levels, 'Sentry logging levels')
   const levels: Record<string, RuntimeLogSeverity> = Object.create(null)

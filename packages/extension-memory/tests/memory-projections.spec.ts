@@ -6,12 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
 import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
 import { InstanceSqliteService, type InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
-import {
-  completeMemoryProjectionDeletion,
-  completeMemoryProjectionUpsert,
-  loadMemoryProjectionSource,
-  MemoryService,
-} from '../src/index.ts'
+import { MemoryService } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
 const now = '2026-08-29T00:00:00.000Z'
@@ -122,7 +117,7 @@ describe('memory vector projection lifecycle', () => {
       content: 'The project uses SQLite.',
     })
 
-    expect(loadMemoryProjectionSource(database, staleWorkId, now)).toBeUndefined()
+    expect(context.doppelgangerMemory.projectionStore.source(staleWorkId, now)).toBeUndefined()
     expect(deletions(database)).toEqual([
       expect.objectContaining({ record_id: initial.id, revision_id: initial.revision.id, state: 'pending' }),
     ])
@@ -132,14 +127,14 @@ describe('memory vector projection lifecycle', () => {
       record_id: corrected.id,
       revision_id: corrected.revision.id,
     }))
-    const source = loadMemoryProjectionSource(database, String(currentWork[0]?.id), now)
+    const source = context.doppelgangerMemory.projectionStore.source(String(currentWork[0]?.id), now)
     expect(source).toMatchObject({
       recordId: corrected.id,
       revisionId: corrected.revision.id,
       content: 'The project uses SQLite.',
       status: 'active',
     })
-    expect(completeMemoryProjectionUpsert(database, String(currentWork[0]?.id), now)).toBe(true)
+    expect(context.doppelgangerMemory.projectionStore.acknowledgeUpsert(String(currentWork[0]?.id), now)).toBe(true)
     expect(work(database)).toHaveLength(0)
     await context.fiber.dispose()
   })
@@ -154,7 +149,7 @@ describe('memory vector projection lifecycle', () => {
       expiresAt: '2026-08-28T00:00:00.000Z',
     })
     const expiredWorkId = String(work(database)[0]?.id)
-    expect(loadMemoryProjectionSource(database, expiredWorkId, now)).toBeUndefined()
+    expect(context.doppelgangerMemory.projectionStore.source(expiredWorkId, now)).toBeUndefined()
     expect(deletions(database)).toContainEqual(expect.objectContaining({
       record_id: expired.id,
       revision_id: expired.revision.id,
@@ -211,7 +206,7 @@ describe('memory vector projection lifecycle', () => {
     database.prepare(`
       INSERT INTO memory_embedding_cache VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run('embedder-one', record.id, record.revision.id, 'digest', 2, Buffer.from([1, 2]), now)
-    expect(completeMemoryProjectionUpsert(database, workId, now)).toBe(true)
+    expect(context.doppelgangerMemory.projectionStore.acknowledgeUpsert(workId, now)).toBe(true)
 
     expect(context.doppelgangerMemory.forget({ operationId: 'forget-deleted', id: record.id })).toBe(true)
     expect(context.doppelgangerMemory.get(record.id)).toBeUndefined()
@@ -229,8 +224,48 @@ describe('memory vector projection lifecycle', () => {
       }),
     ])
     expect(JSON.stringify(pending)).not.toContain('protected content')
-    expect(completeMemoryProjectionDeletion(database, String(pending[0]?.id))).toBe(true)
+    expect(context.doppelgangerMemory.projectionStore.acknowledgeDeletion(String(pending[0]?.id))).toBe(true)
     expect(deletions(database)).toHaveLength(0)
     await context.fiber.dispose()
+  })
+  it('revalidates canonical projection acknowledgments after external work', async () => {
+    const { context, database } = await fixture()
+    const record = context.doppelgangerMemory.remember({ operationId: 'ack-stale', subjectKey: 'project.ack.stale', kind: 'fact', content: 'Stale projection content.' })
+    const workId = String(work(database)[0]?.id)
+    database.prepare('UPDATE memory_records SET status = ? WHERE id = ?').run('rejected', record.id)
+    expect(context.doppelgangerMemory.projectionStore.acknowledgeUpsert(workId, now)).toBe(false)
+    expect(database.prepare('SELECT 1 FROM memory_semantic_indexed_revisions WHERE record_id = ?').get(record.id)).toBeUndefined()
+    await context.fiber.dispose()
+  })
+  it('rejects incomplete activation and active-generation cleanup without losing work', async () => {
+    const { context, database } = await fixture()
+    try {
+      const memory = context.doppelgangerMemory
+      memory.remember({ operationId: 'generation-record', subjectKey: 'project.generation', kind: 'fact', content: 'A generation needs its canonical revision.' })
+      const store = memory.projectionStore
+      const queued = work(database)
+      expect(store.prepareGeneration('candidate', 'aiden', '{}', '{}', now)).toBe(true)
+      expect(store.activateGeneration('candidate', 'aiden', now)).toBe(false)
+      expect(store.activeGeneration('aiden')).toBe('generation-one')
+      expect(store.removeRetainedGeneration('generation-one')).toBe(false)
+      expect(work(database)).toEqual(queued)
+    } finally { await context.fiber.dispose() }
+  })
+
+  it('rejects stale rebuild pages and mismatched generation identities atomically', async () => {
+    const { context, database } = await fixture()
+    try {
+      const memory = context.doppelgangerMemory
+      const record = memory.remember({ operationId: 'rebuild-record', subjectKey: 'project.rebuild', kind: 'fact', content: 'The original rebuild source.' })
+      const store = memory.projectionStore
+      expect(store.prepareGeneration('candidate', 'aiden', '{}', '{}', now)).toBe(true)
+      const page = store.rebuildPage('candidate', 'aiden', undefined, 10)
+      memory.correct({ operationId: 'correct-rebuild', id: record.id, expectedRevisionId: record.revision.id, content: 'The corrected rebuild source.' })
+      expect(() => store.markRebuildPage('candidate', page, now)).toThrow()
+      expect(store.indexed('candidate')).toEqual([])
+      expect(() => store.prepareGeneration('candidate', 'aiden', '{"model":"different"}', '{}', now)).toThrow()
+      expect(store.generation('candidate', 'aiden')).toMatchObject({ state: 'building', embedderIdentityJson: '{}' })
+      expect(database.prepare('SELECT generation_id FROM memory_semantic_active_generation').get()).toEqual({ generation_id: 'generation-one' })
+    } finally { await context.fiber.dispose() }
   })
 })

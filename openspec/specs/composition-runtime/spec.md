@@ -52,7 +52,7 @@ Each activated composition session SHALL own an isolated Cordis lifecycle scope 
 - **THEN** each session resolves only its own mounted implementations
 
 ### Requirement: Audited activation
-The runtime SHALL audit the complete Loader tree after dependency settlement and SHALL return a session only when every enabled entry is active.
+The runtime SHALL audit the complete Loader tree after dependency settlement and SHALL return a session only when every enabled entry is active and every required activation-owned watch has been registered. Any failure before return SHALL dispose the complete attempted session.
 
 #### Scenario: Missing dependency blocks activation
 - **ID**: `composition.runtime.audit.missing.dependency`
@@ -62,12 +62,12 @@ The runtime SHALL audit the complete Loader tree after dependency settlement and
 
 #### Scenario: Partial activation is cleaned up
 - **ID**: `composition.runtime.activation.partial.cleanup`
-- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::reports missing services and cleans partially activated resources`
-- **WHEN** any composition entry fails during activation
-- **THEN** the runtime disposes all resources created for that attempted session
+- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::cleans the attempted session when watch registration fails after activation`
+- **WHEN** any composition entry, audit step, or activation-owned watch registration fails
+- **THEN** the runtime disposes every resource created for that attempted session before rejecting activation
 
 ### Requirement: Transactional composition reload
-The runtime SHALL serialize reloads per session, commit only a fully audited update, and retain the last valid composition when an update fails.
+The runtime SHALL serialize reloads per session and commit only a fully audited update. On candidate failure it SHALL attempt to restore the last valid composition using the same settlement and acceptance audit as a candidate. It SHALL report successful rollback only when that restoration passes audit. If restoration fails or cannot be audited, the runtime SHALL expose observed restoration diagnostics and the candidate/restoration failure without replacing them with a stale healthy snapshot. The session owner SHALL remain available for explicit retry and exhaustive disposal; the runtime SHALL NOT claim the prior tree is usable when its restoration failed.
 
 #### Scenario: Valid update commits
 - **ID**: `composition.runtime.reload.valid.commit`
@@ -78,8 +78,20 @@ The runtime SHALL serialize reloads per session, commit only a fully audited upd
 #### Scenario: Invalid update rolls back
 - **ID**: `composition.runtime.reload.invalid.rollback`
 - **EVIDENCE**: `packages/composition-runtime/tests/reload.spec.ts::rebuilds edit/create/delete generations and rolls invalid layers back`
-- **WHEN** an update produces a failed, missing, or pending enabled entry
+- **WHEN** an update produces a failed, missing, or pending enabled entry and restoring the last valid tree passes audit
 - **THEN** the runtime restores the last valid tree and exposes reload diagnostics without terminating the session
+
+#### Scenario: Restored tree does not satisfy the activation audit
+- **ID**: `composition.runtime.reload.restoration-audit-failure`
+- **EVIDENCE**: `packages/composition-runtime/tests/reload.spec.ts::reports observed rollback audit failures without restoring stale healthy diagnostics`
+- **WHEN** an invalid candidate is rolled back but the restored tree contains an enabled failed or pending entry
+- **THEN** reload diagnostics report the actual restored entry state and restoration failure instead of a successful rollback or the previous healthy entry snapshot
+
+#### Scenario: Restoration update itself throws
+- **ID**: `composition.runtime.reload.restoration-update-failure`
+- **EVIDENCE**: `packages/composition-runtime/tests/reload.spec.ts::aggregates candidate and restoration errors while retaining disposal ownership`
+- **WHEN** restoring the prior effective tree throws after a candidate update fails
+- **THEN** the session exposes both failures without claiming recovery and still exhausts owned resources when explicitly disposed
 
 ### Requirement: Equivalent activation inputs share one canonicalizer
 Composition Definition construction and host adapter activation decoding SHALL use the Composition Runtime's one canonicalization contract for non-empty identifiers, absolute paths, immutable patch data, optional-field omission, and deterministic diagnostics. Concrete adapter fields such as host kind, transport options, and native capability profile SHALL be owned and validated by the host package rather than added to the domain-neutral Composition Runtime activation schema. Optional actor-provider configuration SHALL likewise remain outside the shared Runtime Host contract and be mounted only as a separate plugin.
@@ -211,3 +223,28 @@ When watching is enabled, creation or deletion of an optional user or project pa
 - **EVIDENCE**: `packages/composition-runtime/tests/reload.spec.ts::rebuilds edit/create/delete generations and rolls invalid layers back`
 - **WHEN** an optional user or project patch file is created or removed
 - **THEN** the runtime rebuilds using the new ordered set of layers
+
+### Requirement: Watch acquisition is part of session activation
+When watching is enabled, all required input-watch registrations SHALL be acquired as owned activation resources before the Runtime Session is returned. Failure to acquire any watch SHALL unwind previously acquired watches, dispose the attempted session Fiber to quiescence, unregister runtime ownership, and report the original failure together with any cleanup failures.
+
+#### Scenario: Watch registration rejects after plugins activate
+- **ID**: `composition.runtime.activation.watch-registration-failure-cleanup`
+- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::cleans the attempted session when watch registration fails after activation`
+- **WHEN** the Loader tree is active but one HMR input registration rejects
+- **THEN** activation rejects only after every acquired watch and session-owned effect has been disposed and no attempted session remains runtime-owned
+
+#### Scenario: Cleanup of a failed watch registration also fails
+- **ID**: `composition.runtime.activation.watch-registration-aggregate-cleanup`
+- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::aggregates watch acquisition and attempted-session cleanup failures`
+- **WHEN** watch acquisition rejects and one cleanup stage also rejects
+- **THEN** all remaining cleanup stages are attempted and the caller receives an aggregate failure preserving the acquisition cause
+
+### Requirement: Patch validation reports configuration diagnostics
+Composition patch validation SHALL validate entry field types before using them, collect all ordinary malformed-field diagnostics, and return `RuntimeConfigurationError` or `CompositionLayerError` at the patch seam rather than incidental JavaScript method or property errors.
+
+#### Scenario: Inserted entry has a non-string name
+- **ID**: `composition.runtime.patch.non-string-name-diagnostic`
+- **EVIDENCE**: `packages/composition-runtime/tests/patches.spec.ts::reports structured diagnostics for malformed inserted entry fields`
+- **WHEN** a patch inserts an entry whose `name` is not a non-empty string
+- **THEN** patch definition fails with a diagnostic identifying the exact entry path and does not invoke string operations on the invalid value
+

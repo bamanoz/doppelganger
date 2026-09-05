@@ -319,11 +319,13 @@ export async function loadRuntimeProjectManifest(filename: string): Promise<Runt
   return validateDocument(value, absolute, PROJECT_MANIFEST_FIELDS, 'runtimePreset') as RuntimeProjectManifest
 }
 
-function validateEntries(value: unknown, filename: string): readonly EntryOptions[] {
+/** Validate complete, portable Cordis Loader entry structure without interpreting plugin config. */
+export function validateLoaderEntries(value: unknown, filename: string, rootPath = '$'): readonly EntryOptions[] {
   const diagnostics: RuntimeConfigurationDiagnostic[] = []
   if (!Array.isArray(value)) {
-    throw new RuntimeConfigurationError(filename, [{ path: '$', message: 'must be a top-level Loader entry array' }])
+    throw new RuntimeConfigurationError(filename, [{ path: rootPath, message: 'must be a top-level Loader entry array' }])
   }
+  const ids = new Set<string>()
   const visit = (entries: readonly unknown[], path: string): void => {
     entries.forEach((candidate, index) => {
       const entryPath = `${path}[${index}]`
@@ -332,16 +334,22 @@ function validateEntries(value: unknown, filename: string): readonly EntryOption
         diagnostics.push({ path: entryPath, message: 'must be a Loader entry object' })
         return
       }
+      if (typeof entry.id !== 'string' || entry.id.trim().length === 0) {
+        diagnostics.push({ path: `${entryPath}.id`, message: 'must be a non-empty string' })
+      } else if (ids.has(entry.id)) {
+        diagnostics.push({ path: `${entryPath}.id`, message: `duplicate entry ID "${entry.id}"` })
+      } else ids.add(entry.id)
       if (typeof entry.name !== 'string' || entry.name.trim().length === 0) {
-        diagnostics.push({ path: `${entryPath}.name`, message: 'must be a non-empty plugin name' })
+        diagnostics.push({ path: `${entryPath}.name`, message: 'must be a non-empty string' })
       }
-      if (entry.id !== undefined && (typeof entry.id !== 'string' || entry.id.trim().length === 0)) {
-        diagnostics.push({ path: `${entryPath}.id`, message: 'must be a non-empty string when present' })
+      if (entry.group === true && entry.config !== undefined) {
+        if (!Array.isArray(entry.config)) {
+          diagnostics.push({ path: `${entryPath}.config`, message: 'must be an array of Loader entries when supplied for a group' })
+        } else visit(entry.config, `${entryPath}.config`)
       }
-      if (entry.group === true && Array.isArray(entry.config)) visit(entry.config, `${entryPath}.config`)
     })
   }
-  visit(value, '$')
+  visit(value, rootPath)
   if (diagnostics.length > 0) throw new RuntimeConfigurationError(filename, diagnostics)
   return Object.freeze(value as EntryOptions[])
 }
@@ -352,7 +360,7 @@ export async function loadRuntimePresetEntries(filename: string): Promise<readon
   if (value === undefined) {
     throw new RuntimeConfigurationError(absolute, [{ path: '$', message: `${RUNTIME_PRESET_FILE} is missing` }])
   }
-  return validateEntries(value, absolute)
+  return validateLoaderEntries(value, absolute)
 }
 
 function barePackageName(specifier: string): string | undefined {

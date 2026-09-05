@@ -156,4 +156,15 @@ describe('Chroma vector adapter', () => {
   })
 })
 
-runMemoryVectorBackendConformance('Chroma fake client', async ({ dimensions }) => new ChromaMemoryVectorIndex({ endpoint: 'https://chroma.example.test:8000', dimensions, client: new FakeChroma() }))
+runMemoryVectorBackendConformance('Chroma fake client', async ({ dimensions }) => new ChromaMemoryVectorIndex({ endpoint: 'https://chroma.example.test:8000', dimensions, client: new FakeChroma() }), {}, async () => {
+  const client = new FakeChroma()
+  const index = new ChromaMemoryVectorIndex({ endpoint: 'https://chroma.example.test:8000', dimensions: 3, generationId: 'generation.one', client })
+  await index.upsert([entry()])
+  let entered!: () => void
+  const reached = new Promise<void>(resolve => { entered = resolve })
+  let release!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  let underlyingOperations = 0
+  client.deleteCollection = async () => { underlyingOperations += 1; entered(); await blocked }
+  return { kind: 'cleanup-generation', async run() { try { const first = index.maintenance('cleanup-generation'); await reached; const competing = await index.maintenance('cleanup-generation'); release(); return { first: await first, competing, underlyingOperations } } finally { release(); await index.close() } } }
+})

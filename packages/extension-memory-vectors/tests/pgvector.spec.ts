@@ -424,4 +424,16 @@ runMemoryVectorBackendConformance('pgvector', ({ dimensions }) => {
       expectedFailedCandidateClosures: 1,
     }
   },
+}, async () => {
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  let underlyingOperations = 0
+  let indexPresent = false
+  const pool = new FakePgVectorPool(async text => {
+    if (text.includes('FROM pg_indexes')) return { rows: indexPresent ? [{ exists: 1 }] : [] }
+    if (text.includes('CREATE INDEX')) { underlyingOperations += 1; entered.resolve(); await release.promise; indexPresent = true }
+    return { rows: [] }
+  })
+  const index = await createPgVectorMemoryVectorIndex(config(pool, { hnsw: { m: 12, efConstruction: 80 } }))
+  return { kind: 'build-index', async run() { try { const first = index.maintenance('build-index'); await entered.promise; const competing = await index.maintenance('build-index'); release.resolve(); return { first: await first, competing, underlyingOperations } } finally { release.resolve(); await index.close() } } }
 })

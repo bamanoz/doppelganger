@@ -84,7 +84,10 @@ function eventQueue<T>() {
   }
 }
 
-function fileExporterPatch(path: string, overrides: readonly string[] = []): string {
+function fileExporterPatch(
+  destination: string,
+  options: { readonly field?: 'path' | 'pathTemplate'; readonly level?: 'info' | 'debug' } = {},
+): string {
   return [
     '- insert:',
     '    - id: runtime-logs-file',
@@ -93,12 +96,11 @@ function fileExporterPatch(path: string, overrides: readonly string[] = []): str
     '      isolate:',
     '        doppelgangerLogging: session',
     '      config:',
-    `        path: ${JSON.stringify(path)}`,
-    '        level: debug',
+    `        ${options.field ?? 'path'}: ${JSON.stringify(destination)}`,
+    `        level: ${options.level ?? 'debug'}`,
     '        maxBytes: 65536',
     '        maxFiles: 2',
     '        maximumPendingRecords: 16',
-    ...overrides,
     '',
   ].join('\n')
 }
@@ -168,6 +170,7 @@ describe('runtime logging contracts', () => {
     await waitFor(() => records.length === 1)
 
     expect(records[0]).toMatchObject({
+      runtimeActivationId: session.router.scope.runtimeActivationId,
       sequence: 1,
       severity: 'info',
       logger: 'ordinary-plugin',
@@ -175,8 +178,20 @@ describe('runtime logging contracts', () => {
       sessionId: 'logging-session',
       runtimePresetId: 'logging-test',
     })
+    expect(session.router.scope).toMatchObject({ sessionId: 'logging-session', runtimePresetId: 'logging-test' })
+    expect(session.router.scope.runtimeActivationId).toMatch(/^[0-9a-f-]{36}$/u)
+    expect(Object.isFrozen(session.router.scope)).toBe(true)
     expect(Object.isFrozen(records[0])).toBe(true)
     await session.owner.dispose()
+  })
+
+  it('creates distinct activation identities when a logical session ID is reused', async () => {
+    const first = await testSession('shared-logical-session')
+    const second = await testSession('shared-logical-session')
+
+    expect(first.router.scope.sessionId).toBe(second.router.scope.sessionId)
+    expect(first.router.scope.runtimeActivationId).not.toBe(second.router.scope.runtimeActivationId)
+    await Promise.all([first.owner.dispose(), second.owner.dispose()])
   })
 
   it('normalizes cyclic throwing and oversized Cordis logger arguments within bounds', async () => {
@@ -427,10 +442,11 @@ describe('runtime logging integration', () => {
     const definition = await composition([])
     const root = dirname(definition.loaderPath)
     const patchPath = join(root, 'runtime.cordis.patch.yml')
-    const logPath = join(root, 'runtime.jsonl')
+    const logTemplate = join(root, 'runtime-{runtimeActivationId}.jsonl')
     const reloads = eventQueue<void>()
     const failures = eventQueue<void>()
     let emit = () => undefined
+    let runtimeActivationId = ''
     const runtime = createCompositionRuntime({
       watch: { base: root, root: [] },
       onReload: () => { reloads.push() },
@@ -445,15 +461,20 @@ describe('runtime logging integration', () => {
       runtimePlugins: {
         emitter: {
           name: 'runtime-logging-emitter',
-          apply(ctx) { emit = () => { ctx.logger('patch-emitter').debug('debug record') } },
+          inject: ['doppelgangerLogging'],
+          apply(ctx) {
+            runtimeActivationId = ctx.doppelgangerLogging.scope.runtimeActivationId
+            emit = () => { ctx.logger('patch-emitter').debug('debug record') }
+          },
         },
       },
     })
+    const logPath = logTemplate.replace('{runtimeActivationId}', runtimeActivationId)
 
     emit()
     await expect(access(logPath)).rejects.toMatchObject({ code: 'ENOENT' })
     const added = reloads.next('file exporter addition')
-    await writeFile(patchPath, fileExporterPatch(logPath))
+    await writeFile(patchPath, fileExporterPatch(logTemplate, { field: 'pathTemplate' }))
     await added
     emit()
     await waitFor(async () => (await parsedJsonLines(logPath).catch(() => []))
@@ -465,6 +486,9 @@ describe('runtime logging integration', () => {
     emit()
     await waitFor(async () => (await parsedJsonLines(logPath))
       .filter(record => record.logger === 'patch-emitter' && record.message === 'debug record').length === 2)
+    const emitted = (await parsedJsonLines(logPath))
+      .filter(record => record.logger === 'patch-emitter' && record.message === 'debug record')
+    expect(new Set(emitted.map(record => record.runtimeActivationId))).toEqual(new Set([runtimeActivationId]))
 
     const removed = reloads.next('file exporter removal')
     await unlink(patchPath)
@@ -547,13 +571,12 @@ describe('runtime logging integration', () => {
     await runtime.dispose()
   })
 
-  it('keeps file destinations isolated across concurrent Runtime Sessions', async () => {
+  it('resolves one path template to isolated files for concurrent Runtime Sessions', async () => {
     const base = await composition([])
     const root = dirname(base.loaderPath)
     const runtime = createCompositionRuntime({ watch: false })
-    const firstPath = join(root, 'first.jsonl')
-    const secondPath = join(root, 'second.jsonl')
-    const definition = (path: string) => createCompositionDefinition({
+    const pathTemplate = join(root, 'runtime-{runtimeActivationId}.jsonl')
+    const definition = createCompositionDefinition({
       ...base,
       patches: [{
         source: 'session file exporter',
@@ -563,32 +586,52 @@ describe('runtime logging integration', () => {
           name: '@doppelganger/doppelganger-logging-file/loader',
           inject: ['doppelgangerLogging'],
           isolate: { doppelgangerLogging: 'session' },
-          config: { path, level: 'info', maxBytes: 65_536, maxFiles: 1, maximumPendingRecords: 16 },
+          config: { pathTemplate, level: 'info', maxBytes: 65_536, maxFiles: 1, maximumPendingRecords: 16 },
         }] }],
       }],
     })
+    let firstActivationId = ''
+    let secondActivationId = ''
     let emitFirst = () => undefined
     let emitSecond = () => undefined
     const [first, second] = await Promise.all([
       runtime.activate({
-        sessionId: 'file-first',
-        composition: definition(firstPath),
-        runtimePlugins: { emitter: { name: 'first-emitter', apply(ctx) { emitFirst = () => { ctx.logger('first').info('first only') } } } },
+        sessionId: 'shared-logical-session',
+        composition: definition,
+        runtimePlugins: { emitter: { name: 'first-emitter', inject: ['doppelgangerLogging'], apply(ctx) {
+          firstActivationId = ctx.doppelgangerLogging.scope.runtimeActivationId
+          emitFirst = () => { ctx.logger('first').info('first only') }
+        } } },
       }),
       runtime.activate({
-        sessionId: 'file-second',
-        composition: definition(secondPath),
-        runtimePlugins: { emitter: { name: 'second-emitter', apply(ctx) { emitSecond = () => { ctx.logger('second').info('second only') } } } },
+        sessionId: 'shared-logical-session',
+        composition: definition,
+        runtimePlugins: { emitter: { name: 'second-emitter', inject: ['doppelgangerLogging'], apply(ctx) {
+          secondActivationId = ctx.doppelgangerLogging.scope.runtimeActivationId
+          emitSecond = () => { ctx.logger('second').info('second only') }
+        } } },
       }),
     ])
+    const firstPath = pathTemplate.replace('{runtimeActivationId}', firstActivationId)
+    const secondPath = pathTemplate.replace('{runtimeActivationId}', secondActivationId)
+    expect(firstActivationId).not.toBe(secondActivationId)
+    expect(firstPath).not.toBe(secondPath)
     emitFirst()
     emitSecond()
     await waitFor(async () => (
       (await parsedJsonLines(firstPath).catch(() => [])).some(record => record.message === 'first only')
       && (await parsedJsonLines(secondPath).catch(() => [])).some(record => record.message === 'second only')
     ))
-    expect((await parsedJsonLines(firstPath)).find(record => record.message === 'first only')).toMatchObject({ sessionId: 'file-first', message: 'first only' })
-    expect((await parsedJsonLines(secondPath)).find(record => record.message === 'second only')).toMatchObject({ sessionId: 'file-second', message: 'second only' })
+    expect((await parsedJsonLines(firstPath)).find(record => record.message === 'first only')).toMatchObject({
+      runtimeActivationId: firstActivationId,
+      sessionId: 'shared-logical-session',
+      message: 'first only',
+    })
+    expect((await parsedJsonLines(secondPath)).find(record => record.message === 'second only')).toMatchObject({
+      runtimeActivationId: secondActivationId,
+      sessionId: 'shared-logical-session',
+      message: 'second only',
+    })
     await Promise.all([first.dispose(), second.dispose()])
     await runtime.dispose()
   })

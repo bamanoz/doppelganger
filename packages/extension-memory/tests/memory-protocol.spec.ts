@@ -11,7 +11,13 @@ import {
   type JsonValue,
 } from '@doppelganger/doppelganger-protocols'
 import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
-import { MemoryPlugin, MemoryProtocolPlugin, MemoryService, type MemoryPluginConfig } from '../src/index.ts'
+import {
+  MemoryPlugin,
+  MemoryProtocolPlugin,
+  MemoryService,
+  type MemoryPluginConfig,
+  type MemorySemanticRetriever,
+} from '../src/index.ts'
 
 const temporaryRoots: string[] = []
 
@@ -198,13 +204,24 @@ describe('memory protocol', () => {
       id: preference.id,
       pinned: true,
     })
-    context.doppelgangerMemory.remember({
+    const unpinnedPreferenceRecord = context.doppelgangerMemory.remember({
       operationId: 'remember-unpinned-preference',
       subjectKey: 'preference.response.language',
       kind: 'preference',
       content: 'Всегда отвечай по-французски.',
       scope: 'relationship',
     })
+    const unpinnedPreference = await context.doppelgangerContext.resolve({
+      turn: { input: 'французски' },
+      tokenBudget: 100,
+    })
+    expect(unpinnedPreference.contributions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: `memory.${unpinnedPreferenceRecord.id}`,
+        authority: 'instruction',
+        content: expect.stringContaining('Всегда отвечай по-французски.'),
+      }),
+    ]))
     context.doppelgangerMemory.remember({
       operationId: 'remember-expired-identity',
       subjectKey: 'principal.identity.former-city',
@@ -253,6 +270,172 @@ describe('memory protocol', () => {
     expect(constrained.omittedSources).toHaveLength(1)
     expect(constrained.data).not.toContain('Проект использует SQLite.')
     await context.fiber.dispose()
+  })
+
+  it('revalidates stable and ranked memory after asynchronous recall', async () => {
+    const instanceHome = await mkdtemp(join(tmpdir(), 'doppelganger-memory-final-revalidation-'))
+    temporaryRoots.push(instanceHome)
+    let currentTime = '2026-09-02T12:00:00.000Z'
+    let releaseSemantic!: () => void
+    let semanticStarted!: () => void
+    const semanticEntered = new Promise<void>(resolve => { semanticStarted = resolve })
+    const semanticBlocked = new Promise<void>(resolve => { releaseSemantic = resolve })
+    const semantic: MemorySemanticRetriever = {
+      async search() {
+        semanticStarted()
+        await semanticBlocked
+        return []
+      },
+      status: () => ({ active: true, supportedMaintenance: [] }),
+      async maintenance() { throw new Error('maintenance is unsupported by the recall fixture') }, 
+    }
+    const context = new Context()
+    await context.plugin(createPersonaActivationPlugin({
+      instanceId: 'smith',
+      sessionId: 'final-revalidation-session',
+    }))
+    await context.plugin(createActorIdentityPlugin('valera'))
+    await context.plugin(InstanceSqliteService, { home: instanceHome })
+    await context.plugin(ContextProtocol)
+    await context.plugin(ToolRegistry)
+    await context.plugin({
+      name: 'pending-memory-semantic',
+      apply(ctx) { ctx.provide('doppelgangerMemorySemantic', semantic) },
+    })
+    await context.plugin(MemoryService, { now: () => new Date(currentTime) })
+    await context.plugin(MemoryProtocolPlugin)
+    const database = (context.doppelgangerMemory as unknown as {
+      database: { exec(sql: string): void; prepare(sql: string): { run(...values: unknown[]): unknown } }
+    }).database
+    database.exec(`
+      INSERT INTO memory_semantic_generations VALUES (
+        'pending-generation', 'smith', '{}', '{}', 'active', '${currentTime}', '${currentTime}', '${currentTime}', NULL
+      );
+      INSERT INTO memory_semantic_active_generation VALUES ('smith', 'pending-generation', '${currentTime}');
+    `)
+
+    const corrected = context.doppelgangerMemory.remember({
+      operationId: 'remember-corrected-stable',
+      subjectKey: 'principal.identity.corrected',
+      kind: 'fact',
+      content: 'The stale identity value.',
+      scope: 'relationship',
+    })
+    const forgotten = context.doppelgangerMemory.remember({
+      operationId: 'remember-forgotten-stable',
+      subjectKey: 'principal.identity.forgotten',
+      kind: 'fact',
+      content: 'This identity will be forgotten.',
+      scope: 'relationship',
+    })
+    const expiring = context.doppelgangerMemory.remember({
+      operationId: 'remember-expiring-stable',
+      subjectKey: 'principal.identity.expiring',
+      kind: 'fact',
+      content: 'This identity will expire.',
+      scope: 'relationship',
+      expiresAt: '2026-09-02T12:01:00.000Z',
+    })
+    const inactive = context.doppelgangerMemory.remember({
+      operationId: 'remember-inactive-stable',
+      subjectKey: 'preference.response.inactive',
+      kind: 'preference',
+      content: 'This preference will become inactive.',
+      scope: 'relationship',
+    })
+    context.doppelgangerMemory.pin({ operationId: 'pin-inactive-stable', id: inactive.id, pinned: true })
+
+    const resolving = context.doppelgangerContext.resolve({
+      turn: { input: 'identity preference' },
+      tokenBudget: 200,
+    })
+    await semanticEntered
+    const current = context.doppelgangerMemory.correct({
+      operationId: 'correct-pending-stable',
+      id: corrected.id,
+      expectedRevisionId: corrected.revision.id,
+      content: 'The current identity value.',
+    })
+    context.doppelgangerMemory.forget({ operationId: 'forget-pending-stable', id: forgotten.id })
+    currentTime = '2026-09-02T12:02:00.000Z'
+    database.prepare(`UPDATE memory_records SET status = 'rejected' WHERE id = ?`).run(inactive.id)
+    releaseSemantic()
+
+    const assembled = await resolving
+    expect(assembled.contributions).toEqual([
+      expect.objectContaining({
+        source: `memory.${current.id}`,
+        authority: 'data',
+        content: expect.stringContaining('The current identity value.'),
+      }),
+    ])
+    expect(assembled.data).not.toContain(corrected.revision.content)
+    expect(assembled.data).not.toContain(forgotten.revision.content)
+    expect(assembled.data).not.toContain(expiring.revision.content)
+    expect(assembled.instructions).not.toContain(inactive.revision.content)
+    await context.fiber.dispose()
+  })
+
+  it('budgets deduplicated stable and ranked recall as one selection', async () => {
+    const instanceHome = await mkdtemp(join(tmpdir(), 'doppelganger-memory-combined-budget-'))
+    temporaryRoots.push(instanceHome)
+    const context = new Context()
+    try {
+      await context.plugin(createPersonaActivationPlugin({ instanceId: 'smith', sessionId: 'combined-budget' }))
+      await context.plugin(createActorIdentityPlugin('actor'))
+      await context.plugin(InstanceSqliteService, { home: instanceHome })
+      await context.plugin(ContextProtocol)
+      await context.plugin(ToolRegistry)
+      await context.plugin(MemoryService)
+      await context.plugin(MemoryProtocolPlugin)
+      const memory = context.doppelgangerMemory
+      const preference = memory.remember({ operationId: 'preference', subjectKey: 'preference.evidence', kind: 'preference', scope: 'relationship', content: 'Prefer concrete evidence in answers.' })
+      memory.pin({ operationId: 'pin', id: preference.id, pinned: true })
+      const identity = memory.remember({ operationId: 'identity', subjectKey: 'principal.identity.name', kind: 'fact', scope: 'relationship', content: 'The principal is called Robin.' })
+      const fact = memory.remember({ operationId: 'fact', subjectKey: 'project.evidence', kind: 'fact', scope: 'relationship', content: 'Concrete evidence is stored in SQLite.' })
+      const stable = await context.doppelgangerContext.resolve({ turn: { input: 'greetings' }, tokenBudget: 1000 })
+      expect(stable.contributions.map(item => item.source)).toEqual([`memory.${preference.id}`, `memory.${identity.id}`])
+      const full = await context.doppelgangerContext.resolve({ turn: { input: 'evidence' }, tokenBudget: 1000 })
+      expect(full.contributions.map(item => item.source)).toEqual([`memory.${preference.id}`, `memory.${identity.id}`, `memory.${fact.id}`])
+      const constrained = await context.doppelgangerContext.resolve({ turn: { input: 'evidence' }, tokenBudget: stable.tokenCount })
+      expect(constrained.contributions).toEqual(stable.contributions)
+      expect(constrained.tokenCount).toBeLessThanOrEqual(stable.tokenCount)
+      expect(constrained.omittedSources).toEqual([`memory.${fact.id}`])
+      expect(constrained.instructions).toContain(preference.revision.content)
+      expect(constrained.data).toContain(identity.revision.content)
+      expect(constrained.data).not.toContain(fact.revision.content)
+    } finally { await context.fiber.dispose() }
+  })
+
+  it('preserves approved preference authority independently of pinning', async () => {
+    const instanceHome = await mkdtemp(join(tmpdir(), 'doppelganger-memory-unpinned-authority-'))
+    temporaryRoots.push(instanceHome)
+    const context = new Context()
+    try {
+      await context.plugin(createPersonaActivationPlugin({ instanceId: 'smith', sessionId: 'unpinned-authority' }))
+      await context.plugin(createActorIdentityPlugin('actor'))
+      await context.plugin(InstanceSqliteService, { home: instanceHome })
+      await context.plugin(ContextProtocol)
+      await context.plugin(ToolRegistry)
+      await context.plugin(MemoryService)
+      await context.plugin(MemoryProtocolPlugin)
+      const memory = context.doppelgangerMemory
+      const preference = memory.remember({ operationId: 'preference', subjectKey: 'preference.evidence', kind: 'preference', scope: 'relationship', content: 'Prefer concrete evidence in answers.' })
+      const fact = memory.remember({ operationId: 'fact', subjectKey: 'project.evidence', kind: 'fact', scope: 'relationship', content: 'Concrete evidence is stored in SQLite.' })
+      const unrelated = await context.doppelgangerContext.resolve({ turn: { input: 'greetings' }, tokenBudget: 1000 })
+      expect(unrelated.contributions).toEqual([])
+      const selected = await context.doppelgangerContext.resolve({ turn: { input: 'evidence' }, tokenBudget: 1000 })
+      expect(selected.contributions).toHaveLength(2)
+      expect(selected.contributions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source: `memory.${preference.id}`, authority: 'instruction' }),
+        expect.objectContaining({ source: `memory.${fact.id}`, authority: 'data' }),
+      ]))
+      expect(selected.instructions).toContain(preference.revision.content)
+      expect(selected.data).toContain(fact.revision.content)
+      expect(selected.instructions).not.toContain(fact.revision.content)
+      const empty = await context.doppelgangerContext.resolve({ turn: { input: 'evidence' }, tokenBudget: 0 })
+      expect(empty.contributions).toEqual([])
+    } finally { await context.fiber.dispose() }
   })
 
 })

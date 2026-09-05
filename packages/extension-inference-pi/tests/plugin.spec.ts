@@ -13,6 +13,7 @@ import {
 } from '@doppelganger/doppelganger-protocols'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  PiInferencePluginConfigSchema,
   PiStructuredInferenceProvider,
   normalizePiInferencePluginConfig,
 } from '../src/index.ts'
@@ -93,6 +94,45 @@ describe('Pi inference configuration', () => {
       .toThrow('requestTimeoutMs')
     expect(() => normalizePiInferencePluginConfig({ provider: 'openai', model: 'gpt-5', maximumOutputTokens: 65_537 }))
       .toThrow('maximumOutputTokens')
+  })
+
+  it('uses identical direct and Loader Pi configuration admission', () => {
+    const valid = {
+      provider: 'custom-proxy',
+      model: 'custom-model',
+      baseUrl: 'https://proxy.example.test/v1',
+      modelContextWindow: 272_000,
+      apiKeyEnv: 'CUSTOM_PROXY_API_KEY',
+      reasoning: 'high',
+      requestTimeoutMs: 600_000,
+      maximumInputCharacters: 1_000_000,
+      maximumOutputTokens: 65_536,
+      maximumResponseCharacters: 2_000_000,
+    }
+    const direct = normalizePiInferencePluginConfig(valid)
+    const admitted = PiInferencePluginConfigSchema['~standard'].validate(valid)
+    expect('issues' in admitted ? admitted.issues : undefined).toBeUndefined()
+    if ('value' in admitted) expect(admitted.value).toEqual(direct)
+    const invalid = [
+      { ...valid, unknown: true },
+      { ...valid, baseUrl: undefined },
+      { ...valid, reasoning: 'extreme' },
+      { ...valid, requestTimeoutMs: 600_001 },
+      { ...valid, maximumOutputTokens: 65_537 },
+    ]
+    for (const input of invalid) {
+      expect(() => normalizePiInferencePluginConfig(input)).toThrow()
+      expect(PiInferencePluginConfigSchema['~standard'].validate(input)).toHaveProperty('issues')
+    }
+  })
+
+  it('normalizes omitted Pi configuration without credentials or provider I/O', () => {
+    const normalized = normalizePiInferencePluginConfig({ provider: 'openai', model: 'gpt-5' })
+    expect(normalized).toEqual({
+      provider: 'openai', model: 'gpt-5', requestTimeoutMs: 120_000,
+      maximumInputCharacters: 64_000, maximumOutputTokens: 2_048, maximumResponseCharacters: 100_000,
+    })
+    expect(normalized).not.toHaveProperty('apiKey')
   })
 
   it('builds an explicit OpenAI-compatible provider snapshot without exposing credentials', () => {

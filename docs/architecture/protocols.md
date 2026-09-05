@@ -1,6 +1,8 @@
-# Extension protocols
+# Protocols
 
-Protocol plugins provide a host-neutral integration language without expanding the runtime kernel. Values crossing protocol, YAML, RPC, tool, lifecycle, settings, or persistence seams are validated as plain JSON-compatible own-data values before cloning, hashing, freezing, or transport. Cycles, accessors, symbol or non-enumerable properties, unsupported prototypes, executable coercion such as custom `toJSON`, sparse arrays, non-finite numbers, and configured depth or byte overflow fail at the owning boundary.
+Protocol plugins provide a host-neutral integration language without expanding the runtime kernel. Portable values crossing protocol, YAML, RPC, tool, lifecycle, settings, or persistence seams are admitted by the single descriptor-aware `cloneJsonValue` contract in `extension-protocols` before cloning, hashing, freezing, or transport. It rejects cycles, accessors, symbol or non-enumerable properties, unsupported prototypes, executable coercion such as custom `toJSON`, sparse arrays, non-finite numbers, and configured depth or byte overflow without running user code. `host-omp` owns only envelope, version, capability, and host-state validation and delegates portable value admission to this contract.
+
+Host lifecycle observations are intentionally different: `serializeLifecycleValue` first produces a bounded, explicitly lossy projection (including truncation metadata), and only that projection enters strict lifecycle validation. This observation path must not be used for command, descriptor, invocation-input, or result admission.
 
 ## Actor identity
 
@@ -11,6 +13,7 @@ Generic compositions and the shared Runtime Host API may run without the service
 ## Structured inference
 
 `extension-protocols` defines the optional session-scoped `doppelgangerInference` service for one-shot structured extraction. A request has exact keys: a bounded lowercase purpose identifier, bounded system instruction, untrusted input string, portable JSON output schema, optional output-token cap, and optional `AbortSignal`. The wrapper validates schema depth, node count, serialized size, supported keywords, request bounds, provider result shape, JSON compatibility, output size, schema conformance, and bounded token usage; accepted requests and results are immutable.
+The Pi adapter’s direct normalizer and Loader admission share one plugin-owned Standard Schema contract. Both enforce closed fields, normalized provider/model identifiers, paired custom `baseUrl`/`modelContextWindow`, reasoning and timeout/token/response limits, and identical defaults/omission behavior. Validation is synchronous and side-effect-free: it does not resolve credentials or construct or call a provider. Credential resolution remains per-call, while each activated generation retains its immutable provider/model snapshot and cancellation semantics.
 
 Providers return only the schema-shaped JSON value and optional usage. Stable errors distinguish invalid requests, unavailable providers, authentication, timeout, cancellation, provider failure, missing output, and invalid output. Raw prompts, provider payloads, thinking, tool text, credentials, and provider diagnostics are not part of the result contract. A Runtime Preset may substitute any conforming provider by composing one `doppelgangerInference` implementation in the session realm; duplicate providers fail rather than winning by order. Omitting the service is valid.
 
@@ -49,6 +52,8 @@ Host adapters publish normalized, deeply frozen, bounded lifecycle events throug
 
 Each event kind has one payload owner: `turn-committed` carries committed principal input, assistant output, and turn outcome, while each tool result or structured tool error appears only in its correlated `tool-completed` event. Stable `sessionId`, `turnId`, `callId`, and `deliveryId` values preserve correlation across transport. Candidate capture and Evolution signal discovery consume completed committed turns only. Partial, failed, or cancelled turns never become evidence; uncommitted tool-completion events are bounded correlation material and expire without persistence. Subscriber failure is contained as a lifecycle diagnostic and never invalidates already committed host work.
 
+Identifiers are opaque to portable consumers. Every host adapter must distinguish new work from replay when a logical session is resumed: a new turn must not reuse a prior turn identity, and a new event must not reuse a prior delivery identity. A genuine replay preserves the original event identifiers. Identifier generation and native-session restoration belong to each adapter; the shared protocol requires neither a particular UUID format nor OMP counters, binding state, or logging activation metadata.
+
 ## Host seam
 
 A host integration installs at most one shared Runtime Host bridge per Runtime Session. A direct host binds it in-process; a transported host serializes its requests over one adapter-owned connection:
@@ -62,6 +67,7 @@ The bridge exposes one frozen actor-neutral capability profile containing only c
 The runtime-side bridge maps correlated context requests, immutable revisioned tool catalogs, exact-revision invocation, call-correlated cancellation, protected one-shot approval grants, and declared lifecycle publication to optional standard protocols. Its binding has one explicit runtime-to-host signal, `toolCatalogChanged(revision)`; another outbound condition requires its own typed contract rather than a generic notification envelope. A host may add typed host-specific sibling plugins only under the convention above. Portable feature plugins, Evolution workflows, generated Packages, and MCP servers do not receive the raw host runtime.
 
 Every supported adapter passes the same transport-independent Runtime Host conformance suite. A host-specific operation or event enters the common API only after two implemented adapters prove equivalent timing and commit boundaries, authority, correlation identities, success/failure/cancellation/retry/replay behavior, ordering and stale-callback semantics, and rollback/disposal ownership.
+Transported conformance instantiates the actual adapter, child, and request/response mapping. OMP verifies bound and explicit-unbound Actor Identity; true provider absence is covered separately by the direct protocol fixture because OMP always installs the provider. Test-only registration and held-call controls are outside production contracts.
 
 ## Primary implementation
 

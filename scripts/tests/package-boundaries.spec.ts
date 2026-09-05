@@ -72,6 +72,76 @@ describe('package boundary checker', () => {
       'packages/a/src/index.ts: forbidden source edge @doppelganger/a -> @doppelganger/b',
     ])
   })
+  it('rejects forbidden side-effect and type-only workspace imports', async () => {
+    const root = await fixture({
+      ...base,
+      '@doppelganger/a': {
+        ...base['@doppelganger/a'],
+        dependencies: [],
+        source: [
+          "import { value } from '@doppelganger/b'",
+          "import '@doppelganger/b'",
+          "import type { value as Value } from '@doppelganger/b'",
+          "export { value as reexported } from '@doppelganger/b'",
+          "export const loaded = import('@doppelganger/b')",
+        ].join('\n'),
+      },
+    })
+    await expect(checkPackageBoundaries(root)).resolves.toEqual([
+      'packages/a/src/index.ts: forbidden source edge @doppelganger/a -> @doppelganger/b',
+      'packages/a/src/index.ts: forbidden source edge @doppelganger/a -> @doppelganger/b',
+      'packages/a/src/index.ts: forbidden source edge @doppelganger/a -> @doppelganger/b',
+      'packages/a/src/index.ts: forbidden source edge @doppelganger/a -> @doppelganger/b',
+      'packages/a/src/index.ts: forbidden source edge @doppelganger/a -> @doppelganger/b',
+    ])
+  })
+
+  it('rejects relative cross-package imports even for otherwise allowed named edges', async () => {
+    const root = await fixture({
+      ...base,
+      '@doppelganger/a': {
+        ...base['@doppelganger/a'],
+        source: "import { value } from '../../b/src/index'\n",
+      },
+    })
+    await expect(checkPackageBoundaries(root)).resolves.toEqual([
+      'packages/a/src/index.ts: forbidden relative source edge @doppelganger/a -> @doppelganger/b',
+    ])
+  })
+
+  it('attributes imports and reexports from package subpaths to their owner', async () => {
+    const root = await fixture({
+      ...base,
+      '@doppelganger/a': {
+        ...base['@doppelganger/a'],
+        source: [
+          "import { value } from '@doppelganger/b/internal/module'",
+          "import { value as local } from './local'",
+          "export { value as reexported } from '@doppelganger/b/types'",
+          "export const loaded = import('@doppelganger/b/runtime')",
+        ].join('\n'),
+      },
+    })
+    await expect(checkPackageBoundaries(root)).resolves.toEqual([])
+  })
+
+  it('ignores import-shaped comments and strings while checking literal dynamic imports', async () => {
+    const root = await fixture({
+      ...base,
+      '@doppelganger/a': {
+        ...base['@doppelganger/a'],
+        dependencies: [],
+        source: [
+          "// import { value } from '@doppelganger/b'",
+          "const text = \"export { value } from '@doppelganger/b'\"",
+          "const loaded = import('@doppelganger/b')",
+        ].join('\n'),
+      },
+    })
+    await expect(checkPackageBoundaries(root)).resolves.toEqual([
+      'packages/a/src/index.ts: forbidden source edge @doppelganger/a -> @doppelganger/b',
+    ])
+  })
 
   it('rejects an unregistered workspace package', async () => {
     const root = await fixture(base)

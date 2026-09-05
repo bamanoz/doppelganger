@@ -263,6 +263,50 @@ describe('CodeGraph portable extension', () => {
     })
     await dispose(malformed)
   })
+  it('preserves status and exploration policy in both discovery call orders', async () => {
+    vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_COMMAND', 'version')
+    vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_MS', '100')
+    for (const mode of ['missing', 'unavailable', 'incompatible'] as const) {
+      vi.stubEnv('CODEGRAPH_FIXTURE_FAIL_COMMAND', mode === 'unavailable' ? 'version' : '')
+      vi.stubEnv('CODEGRAPH_FIXTURE_VERSION', mode === 'incompatible' ? '2.0.0' : '1.6.0')
+      if (mode === 'unavailable') vi.stubEnv('CODEGRAPH_FIXTURE_STDERR', 'version unavailable')
+      for (const statusFirst of [true, false]) {
+        const config = mode === 'missing' ? { executable: join(tmpdir(), `missing-codegraph-${crypto.randomUUID()}`) } : {}
+        const harness = await setup(config)
+        const status = () => invokePortable(harness.tools, 'codegraph.status', {})
+        const explore = () => invokePortable(harness.tools, 'codegraph.explore', { query: 'overlap' })
+        const [first, second] = statusFirst ? await Promise.all([status(), explore()]) : await Promise.all([explore(), status()])
+        const statusResult = statusFirst ? first : second
+        const exploreResult = statusFirst ? second : first
+        const unavailable = mode !== 'incompatible'
+        expect(statusResult).toMatchObject({ ok: true, value: { diagnosticCode: unavailable ? 'binary-unavailable' : 'binary-incompatible' } })
+        expect(exploreResult).toMatchObject({ ok: false, error: { code: unavailable ? 'CODEGRAPH_BINARY_UNAVAILABLE' : 'CODEGRAPH_BINARY_INCOMPATIBLE' } })
+        const expectedCommands = mode === 'missing' ? [] : [['--version']]
+        expect((await commandLog(harness.logPath)).map(entry => entry.args)).toEqual(expectedCommands)
+        await dispose(harness)
+      }
+    }
+  })
+
+  it('retries failed shared discovery without publishing after disposal', async () => {
+    vi.stubEnv('CODEGRAPH_FIXTURE_FAIL_COMMAND', 'version')
+    const harness = await setup()
+    expect(await invokePortable(harness.tools, 'codegraph.status', {})).toMatchObject({ ok: true, value: { diagnosticCode: 'binary-unavailable' } })
+    vi.stubEnv('CODEGRAPH_FIXTURE_FAIL_COMMAND', '')
+    expect(await invokePortable(harness.tools, 'codegraph.status', {})).toMatchObject({ ok: true, value: { binary: { compatible: true } } })
+    await dispose(harness)
+
+    vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_COMMAND', 'version')
+    vi.stubEnv('CODEGRAPH_FIXTURE_DELAY_MS', '250')
+    const disposing = await setup()
+    const pending = invokePortable(disposing.tools, 'codegraph.status', {})
+    await vi.waitFor(async () => expect(await commandLog(disposing.logPath)).toHaveLength(1))
+    await disposing.plugin.dispose()
+    expect(await pending).toMatchObject({ ok: false, error: { code: 'CODEGRAPH_DISPOSED' } })
+    expect(await invokePortable(disposing.tools, 'codegraph.status', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })
+    expect((await commandLog(disposing.logPath)).map(entry => entry.args)).toEqual([['--version']])
+    await disposing.ctx.fiber.dispose()
+  })
 
   it('retries failed discovery and maps non-zero CodeGraph commands', async () => {
     vi.stubEnv('CODEGRAPH_FIXTURE_FAIL_COMMAND', 'version')

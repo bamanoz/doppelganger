@@ -325,19 +325,8 @@ export const MemoryProtocolPlugin: Plugin = {
     ctx.doppelgangerContext.register({
       id: 'persona.memory',
       async resolve(request) {
-        if (request.tokenBudget === 0) return []
-        const stable = ctx.doppelgangerMemory.stableProfile()
-        const stableIds = new Set(stable.map(record => record.id))
-        const ranked = request.turn.input.trim().length === 0
-          ? []
-          : await ctx.doppelgangerMemory.search({
-              query: request.turn.input,
-              tokenBudget: request.tokenBudget,
-            })
-        return Object.freeze([
-          ...stable.map(record => recordContribution(record, true)),
-          ...ranked.flatMap(result => stableIds.has(result.record.id) ? [] : [recordContribution(result.record)]),
-        ])
+        const records = await ctx.doppelgangerMemory.automaticRecall(request.turn.input, request.tokenBudget)
+        return Object.freeze(records.map(record => recordContribution(record, record.scope.kind === 'relationship' && (record.kind === 'fact' && record.subjectKey.startsWith('principal.identity.')) || (record.kind === 'preference' && record.pinned))))
       },
     })
   },

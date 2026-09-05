@@ -1,15 +1,24 @@
 import { once } from 'node:events'
 import { createServer } from 'node:net'
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { Context } from '@deepseek-ai/cordis'
+import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import type { RuntimeLogRecord } from '@doppelganger/doppelganger-composition-runtime'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type {
+  RuntimeLoggingService,
+  RuntimeLogRecord,
+  RuntimeLogSink,
+  RuntimeLogSinkOptions,
+} from '@doppelganger/doppelganger-composition-runtime'
 import {
+  FileLoggingConfigSchema,
+  FileLoggingPlugin,
   createFileLoggingFilter,
   normalizeFileLoggingConfig,
+  resolveFileLoggingConfig,
   RollingJsonlWriter,
-  type NormalizedFileLoggingConfig,
+  type ResolvedFileLoggingConfig,
 } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
@@ -24,8 +33,15 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-function config(path: string, overrides: Partial<NormalizedFileLoggingConfig> = {}): NormalizedFileLoggingConfig {
-  return normalizeFileLoggingConfig({
+const runtimeActivationId = '123e4567-e89b-42d3-a456-426614174000'
+const loggingScope = Object.freeze({
+  runtimeActivationId,
+  sessionId: 'file-session',
+  runtimePresetId: 'file-preset',
+})
+
+function config(path: string, overrides: Partial<ResolvedFileLoggingConfig> = {}): ResolvedFileLoggingConfig {
+  return resolveFileLoggingConfig(normalizeFileLoggingConfig({
     path,
     level: 'debug',
     levels: {},
@@ -33,11 +49,12 @@ function config(path: string, overrides: Partial<NormalizedFileLoggingConfig> = 
     maxFiles: 2,
     maximumPendingRecords: 16,
     ...overrides,
-  })
+  }), loggingScope)
 }
 
 function record(sequence: number, message = `record ${sequence}`, logger = 'file-test', severity: RuntimeLogRecord['severity'] = 'info'): RuntimeLogRecord {
   return Object.freeze({
+    runtimeActivationId,
     sequence,
     timestamp: 1_700_000_000_000 + sequence,
     severity,
@@ -54,18 +71,129 @@ async function jsonLines(path: string): Promise<RuntimeLogRecord[]> {
 }
 
 describe('file logging configuration', () => {
-  it('rejects unknown fields, invalid bounds, invalid levels, and non-normalized paths', async () => {
+  it('rejects unknown fields, invalid bounds, invalid levels, and invalid path forms', async () => {
     const root = await temporaryRoot()
     const path = join(root, 'runtime.jsonl')
+    const template = join(root, 'runtime-{runtimeActivationId}.jsonl')
 
     expect(() => normalizeFileLoggingConfig({ path, unknown: true })).toThrow('unknown field')
     expect(() => normalizeFileLoggingConfig({ path, level: 'trace' })).toThrow('error, warn, info, or debug')
     expect(() => normalizeFileLoggingConfig({ path, maxBytes: 1 })).toThrow('maxBytes')
     expect(() => normalizeFileLoggingConfig({ path, maxFiles: 0 })).toThrow('maxFiles')
     expect(() => normalizeFileLoggingConfig({ path, maximumPendingRecords: 0 })).toThrow('maximumPendingRecords')
+    expect(() => normalizeFileLoggingConfig({})).toThrow('exactly one of path or pathTemplate')
+    expect(() => normalizeFileLoggingConfig({ path, pathTemplate: template })).toThrow('exactly one of path or pathTemplate')
     expect(() => normalizeFileLoggingConfig({ path: 'relative.jsonl' })).toThrow('must be absolute')
     expect(() => normalizeFileLoggingConfig({ path: `${root}/nested/../runtime.jsonl` })).toThrow('must be normalized')
+    expect(() => normalizeFileLoggingConfig({ pathTemplate: join(root, 'runtime.jsonl') })).toThrow('exactly one')
+    expect(() => normalizeFileLoggingConfig({ pathTemplate: join(root, 'runtime-{runtimeActivationId}-{runtimeActivationId}.jsonl') })).toThrow('exactly one')
+    expect(() => normalizeFileLoggingConfig({ pathTemplate: join(root, 'runtime-{sessionId}-{runtimeActivationId}.jsonl') })).toThrow('supports only')
+    expect(() => normalizeFileLoggingConfig({ pathTemplate: join(root, 'runtime-{runtimeActivationId.jsonl') })).toThrow('exactly one')
     expect(() => normalizeFileLoggingConfig({ path, levels: { '': 'debug' } })).toThrow('non-empty exact names')
+  })
+
+  it('uses identical direct and Loader file configuration admission', async () => {
+    const root = await temporaryRoot()
+    const path = join(root, 'parity.jsonl')
+    const template = join(root, 'runtime-{runtimeActivationId}.jsonl')
+    const valid = [
+      { path },
+      {
+        pathTemplate: join(root, 'runtime-{runtimeActivationId}.jsonl'),
+        level: 'debug',
+        levels: { worker: 'warn' },
+        maxBytes: 64 * 1024,
+        maxFiles: 100,
+        maximumPendingRecords: 1,
+        retention: {},
+      },
+      {
+        pathTemplate: join(root, 'bounded-{runtimeActivationId}.jsonl'),
+        retention: {
+          maxAgeDays: 3_650,
+          maxTotalBytes: Number.MAX_SAFE_INTEGER,
+          cleanupIntervalMs: 86_400_000,
+        },
+      },
+    ] as const
+    for (const input of valid) {
+      const direct = normalizeFileLoggingConfig(input)
+      const admitted = FileLoggingConfigSchema['~standard'].validate(input)
+      expect('issues' in admitted ? admitted.issues : undefined).toBeUndefined()
+      if ('value' in admitted) expect(admitted.value).toEqual(direct)
+    }
+    expect(normalizeFileLoggingConfig({ path })).toEqual({
+      path,
+      level: 'info',
+      levels: {},
+      maxBytes: 10 * 1024 * 1024,
+      maxFiles: 5,
+      maximumPendingRecords: 2_048,
+    })
+    expect(normalizeFileLoggingConfig({
+      pathTemplate: join(root, 'retained-{runtimeActivationId}.jsonl'),
+      retention: {},
+    })).toMatchObject({
+      retention: {
+        maxAgeDays: 7,
+        maxTotalBytes: 512 * 1024 * 1024,
+        cleanupIntervalMs: 60_000,
+      },
+    })
+
+    const invalid = [
+      null,
+      { path, unknown: true },
+      { path: `${root}/${'x'.repeat(4_096)}` },
+      { pathTemplate: `${root}/${'x'.repeat(4_096)}-{runtimeActivationId}` },
+      { path, pathTemplate: join(root, 'runtime-{runtimeActivationId}.jsonl') },
+      { path, level: 'trace' },
+      { path, levels: { worker: null } },
+      { path, maxBytes: 65_535 },
+      { path, maximumPendingRecords: 16_385 },
+      { pathTemplate: template, retention: null },
+      { pathTemplate: template, retention: { unknown: true } },
+      { pathTemplate: template, retention: { maxAgeDays: 0 } },
+      { pathTemplate: template, retention: { maxAgeDays: 3_651 } },
+      { pathTemplate: template, retention: { maxTotalBytes: 65_535 } },
+      { pathTemplate: template, retention: { maxTotalBytes: Number.MAX_SAFE_INTEGER + 1 } },
+      { pathTemplate: template, retention: { cleanupIntervalMs: 999 } },
+      { pathTemplate: template, retention: { cleanupIntervalMs: 86_400_001 } },
+      { path, retention: {} },
+      { pathTemplate: join(root, '{runtimeActivationId}', 'runtime.jsonl'), retention: {} },
+    ]
+    for (const input of invalid) {
+      expect(() => normalizeFileLoggingConfig(input)).toThrow()
+      expect(FileLoggingConfigSchema['~standard'].validate(input)).toHaveProperty('issues')
+    }
+    await expect(access(path)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('resolves one activation placeholder while preserving static paths', async () => {
+    const root = await temporaryRoot()
+    const staticPath = join(root, 'static.jsonl')
+    const template = join(root, 'runtime-{runtimeActivationId}.jsonl')
+    const normalizedStatic = normalizeFileLoggingConfig({ path: staticPath })
+    const normalizedTemplate = normalizeFileLoggingConfig({ pathTemplate: template })
+    const normalizedRetention = normalizeFileLoggingConfig({ pathTemplate: template, retention: {} })
+
+    expect(resolveFileLoggingConfig(normalizedStatic, loggingScope)).not.toHaveProperty('pathTemplate')
+    expect(resolveFileLoggingConfig(normalizedStatic, loggingScope).path).toBe(staticPath)
+    expect(resolveFileLoggingConfig(normalizedTemplate, loggingScope)).not.toHaveProperty('pathTemplate')
+    expect(resolveFileLoggingConfig(normalizedTemplate, loggingScope).path).toBe(join(root, `runtime-${runtimeActivationId}.jsonl`))
+    expect(resolveFileLoggingConfig(normalizedRetention, loggingScope)).toMatchObject({
+      path: join(root, `runtime-${runtimeActivationId}.jsonl`),
+      pathTemplate: template,
+      retention: {
+        maxAgeDays: 7,
+        maxTotalBytes: 512 * 1024 * 1024,
+        cleanupIntervalMs: 60_000,
+      },
+    })
+    expect(() => resolveFileLoggingConfig(normalizedTemplate, {
+      ...loggingScope,
+      runtimeActivationId: '../unsafe',
+    })).toThrow('canonical lowercase UUID')
   })
 
   it('applies exact logger overrides before destination queueing', async () => {
@@ -136,6 +264,21 @@ describe('rolling JSONL writer', () => {
     await reopened.close()
   })
 
+  it('keeps default-off retention cleanup compatible with close and reopen', async () => {
+    const root = await temporaryRoot()
+    const path = join(root, 'runtime.jsonl')
+    const writer = await RollingJsonlWriter.open(config(path))
+
+    expect(writer.retentionStatus).toBeUndefined()
+    await expect(writer.cleanup()).resolves.toBeUndefined()
+    await writer.close()
+    const reopened = await RollingJsonlWriter.open(config(path))
+    await reopened.write(record(1))
+    await reopened.close()
+
+    expect(await jsonLines(path)).toEqual([record(1)])
+  })
+
   it('rotates before the threshold-crossing record and retains exact generations', async () => {
     const root = await temporaryRoot()
     const path = join(root, 'runtime.jsonl')
@@ -189,5 +332,96 @@ describe('rolling JSONL writer', () => {
 
     expect((await jsonLines(path)).map(item => item.sequence)).toEqual(Array.from({ length: 50 }, (_, index) => index + 1))
     await expect(writer.write(record(51))).rejects.toThrow('not accepting records')
+  })
+})
+
+describe('file logging Loader lifecycle', () => {
+  it('schedules retained cleanup and clears it before exhaustive disposal', async () => {
+    vi.useFakeTimers()
+    const rootPath = await temporaryRoot()
+    const pathTemplate = join(rootPath, 'runtime-{runtimeActivationId}.jsonl')
+    const order: string[] = []
+    const cleanup = vi.fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('maintenance failed'))
+      .mockResolvedValue(undefined)
+    const close = vi.fn(async () => { order.push('close') })
+    const writer = {
+      write: vi.fn<RuntimeLogSink['write']>(),
+      cleanup,
+      close,
+      retentionStatus: undefined,
+    } as unknown as RollingJsonlWriter
+    const open = vi.spyOn(RollingJsonlWriter, 'open').mockResolvedValue(writer)
+    let registeredSink: RuntimeLogSink | undefined
+    let registeredOptions: RuntimeLogSinkOptions | undefined
+    const logging: RuntimeLoggingService = {
+      scope: loggingScope,
+      register(sink, options) {
+        registeredSink = sink
+        registeredOptions = options
+        return async () => { order.push('unregister') }
+      },
+    }
+    const root = new Context().isolate('doppelgangerLogging')
+    root.provide('doppelgangerLogging', logging)
+    try {
+      const fiber = root.plugin(FileLoggingPlugin, {
+        pathTemplate,
+        retention: { cleanupIntervalMs: 1_000 },
+        maximumPendingRecords: 7,
+      })
+      await fiber.await()
+
+      expect(open).toHaveBeenCalledWith(expect.objectContaining({
+        path: join(rootPath, `runtime-${runtimeActivationId}.jsonl`),
+        pathTemplate,
+        retention: expect.objectContaining({ cleanupIntervalMs: 1_000 }),
+      }))
+      expect(registeredSink).toBe(writer)
+      expect(registeredOptions?.maximumPendingRecords).toBe(7)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(cleanup).toHaveBeenCalledTimes(2)
+
+      await Promise.all([fiber.dispose(), fiber.dispose()])
+      expect(order).toEqual(['unregister', 'close'])
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(cleanup).toHaveBeenCalledTimes(2)
+    } finally {
+      try {
+        await root.fiber.dispose()
+      } finally {
+        open.mockRestore()
+        vi.useRealTimers()
+      }
+    }
+  })
+
+  it('closes the writer when sink registration fails after retained open', async () => {
+    const rootPath = await temporaryRoot()
+    const pathTemplate = join(rootPath, 'runtime-{runtimeActivationId}.jsonl')
+    const close = vi.fn(async () => undefined)
+    const writer = { write: vi.fn(), cleanup: vi.fn(), close, retentionStatus: undefined } as unknown as RollingJsonlWriter
+    const open = vi.spyOn(RollingJsonlWriter, 'open').mockResolvedValue(writer)
+    const logging: RuntimeLoggingService = {
+      scope: loggingScope,
+      register() {
+        throw new Error('registration failed')
+      },
+    }
+    const root = new Context().isolate('doppelgangerLogging')
+    root.provide('doppelgangerLogging', logging)
+    try {
+      await expect(root.plugin(FileLoggingPlugin, {
+        pathTemplate,
+        retention: {},
+      }).await()).rejects.toThrow('registration failed')
+      expect(close).toHaveBeenCalledTimes(1)
+    } finally {
+      try {
+        await root.fiber.dispose()
+      } finally {
+        open.mockRestore()
+      }
+    }
   })
 })

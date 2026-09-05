@@ -14,7 +14,12 @@ import {
 } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
+
+declare global {
+  var loaderParityApplications: number | undefined
+}
 afterEach(async () => {
+  globalThis.loaderParityApplications = undefined
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -163,6 +168,40 @@ describe('native Cordis patch layers', () => {
     expect(() => composeCompositionEntries([{ id: 'base', name: 'pkg-base' }], [
       layer('valid shape, invalid target', [{ id: 'missing', config: {} }]),
     ])).toThrow(CompositionLayerError)
+  })
+
+  it('rejects the same malformed Loader structures as preset discovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-loader-parity-'))
+    temporaryRoots.push(root)
+    const home = join(root, 'home')
+    const directory = join(home, '.runtime-presets', 'parity')
+    await mkdir(directory, { recursive: true })
+    const runtime = createCompositionRuntime({ watch: false })
+    for (const [label, source, path] of [
+      ['missing ID', '- name: ./feature.mjs\n', '$[0].id'],
+      ['duplicate ID', '- id: duplicate\n  name: ./feature.mjs\n- id: duplicate\n  name: ./feature.mjs\n', '$[1].id'],
+      ['malformed group', '- id: group\n  name: cordis:group\n  group: true\n  config: {}\n', '$[0].config'],
+    ] as const) {
+      globalThis.loaderParityApplications = 0
+      await Promise.all([
+        writeFile(join(directory, 'runtime.cordis.yml'), source),
+        writeFile(join(directory, 'feature.mjs'), 'export default { apply() { globalThis.loaderParityApplications += 1 } }\n'),
+      ])
+      const roster = new RuntimePresetRoster({ home, includeShippedRoot: false })
+      const preset = (await roster.list()).find(candidate => candidate.id === 'parity')
+      expect(preset, label).toMatchObject({
+        status: 'broken',
+        diagnostics: expect.arrayContaining([expect.objectContaining({ path })]),
+      })
+      await expect(runtime.activate({
+        composition: createCompositionDefinition({
+          id: 'parity', revision: 'authored', loaderPath: join(directory, 'runtime.cordis.yml'), patches: [],
+        }),
+        sessionId: `parity-${label}`,
+      })).rejects.toThrow('invalid')
+      expect(globalThis.loaderParityApplications).toBe(0)
+    }
+    await runtime.dispose()
   })
 
   it('loads optional files, rejects empty documents, and anchors only inserted relative names', async () => {

@@ -5,8 +5,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { createRuntimeSessionMetadataPlugin } from '@doppelganger/doppelganger-composition-runtime'
 import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
 import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
-import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
-import { afterEach, describe, expect, it } from 'vitest'
+import { InstanceSqliteService, type InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   EVOLUTION_SCHEMA_VERSION,
   EvolutionError,
@@ -15,6 +15,7 @@ import {
 } from '../src/index.ts'
 
 const roots: string[] = []
+const evolutionStorage = new WeakMap<Context, InstanceSqliteDatabase>()
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
@@ -43,6 +44,12 @@ async function session(home: string, options: SessionOptions = {}): Promise<Cont
     ...(workspaceRoot === undefined ? {} : { projectId: 'project-a', projectRoot: workspaceRoot }),
   }))
   await context.plugin(InstanceSqliteService, { home })
+  const open = context.doppelgangerInstanceSqlite.open.bind(context.doppelgangerInstanceSqlite)
+  vi.spyOn(context.doppelgangerInstanceSqlite, 'open').mockImplementation(async namespace => {
+    const storage = await open(namespace)
+    if (namespace === 'evolution') evolutionStorage.set(context, storage)
+    return storage
+  })
   let index = 0
   await context.plugin(EvolutionService, {
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -145,6 +152,153 @@ describe('Evolution global storage', () => {
       await isolated.fiber.dispose()
     }
   })
+})
+
+describe.each(['global', 'project'] as const)('Evolution %s unchanged and expiry storage', scope => {
+  it('records unchanged proposal commands consistently in SQLite and YAML', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-unchanged-'))
+    const workspace = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-unchanged-workspace-'))
+    roots.push(home, workspace)
+    const context = await session(home, { workspaceRoot: workspace })
+    const request = { ...globalRequest('first-operation'), dedupeKey: `capability.unchanged-${scope}`,
+      scope, operationId: 'first-operation' }
+    const first = await context.doppelgangerEvolution.propose(request)
+    const duplicate = await context.doppelgangerEvolution.propose({ ...request, operationId: 'second-operation' })
+    expect(duplicate).toEqual(first)
+    expect((await context.doppelgangerEvolution.inspect(first.id)).proposal).toEqual(first)
+    if (scope === 'project') {
+      const path = join(workspace, '.doppelganger', 'evolution', 'opportunities', `${first.id}.yaml`)
+      const content = await readFile(path, 'utf8')
+      expect(content).toContain('second-operation')
+    }
+
+    const later = await context.doppelgangerEvolution.transition({
+      operationId: `later-${scope}`, id: first.id, expectedRevision: first.revision,
+      target: 'researching', researchQuestion: 'Verify replay remains tied to its original result.',
+    })
+    expect(await context.doppelgangerEvolution.propose({ ...request, operationId: 'second-operation' })).toEqual(first)
+    await expect(context.doppelgangerEvolution.propose({
+      ...request, operationId: 'second-operation', title: 'Changed digest',
+    })).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' })
+    expect(later.revision).toBe(first.revision + 1)
+    await context.fiber.dispose()
+  })
+
+  it('lists and inspects without rewriting expired or unrelated proposals', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-read-only-'))
+    const workspace = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-read-only-workspace-'))
+    roots.push(home, workspace)
+    let now = new Date('2026-09-01T00:00:00.000Z')
+    const context = await session(home, { workspaceRoot: workspace, now: () => now })
+    const proposal = await context.doppelgangerEvolution.propose({
+      ...globalRequest(`read-only-propose-${scope}`), scope,
+      dedupeKey: `capability.read-only-${scope}`,
+    })
+    const snoozed = await context.doppelgangerEvolution.snooze({
+      operationId: `read-only-snooze-${scope}`, id: proposal.id, expectedRevision: proposal.revision,
+      until: '2026-09-02T00:00:00.000Z', reason: 'Remain durably snoozed until a mutation.',
+    })
+    now = new Date('2026-09-03T00:00:00.000Z')
+    const directory = join(workspace, '.doppelganger', 'evolution')
+    const path = join(directory, 'opportunities', `${proposal.id}.yaml`)
+    const before = scope === 'project' ? await readFile(path, 'utf8') : undefined
+    const listed = await context.doppelgangerEvolution.list({ scope, status: 'snoozed', dueOnly: true })
+    const inspected = await context.doppelgangerEvolution.inspect(proposal.id)
+    expect(listed.proposals).toEqual([snoozed])
+    expect(inspected.proposal).toEqual(snoozed)
+    if (scope === 'global') {
+      const storage = evolutionStorage.get(context)
+      if (storage === undefined) throw new Error('expected captured Evolution storage')
+      expect(storage.prepare('SELECT current_revision FROM evolution_proposals WHERE id = ?').get(proposal.id))
+        .toEqual({ current_revision: snoozed.revision })
+      expect(storage.prepare('SELECT COUNT(*) AS count FROM evolution_operations').get()).toEqual({ count: 2 })
+    } else {
+      expect(await readFile(path, 'utf8')).toBe(before)
+      await expect(lstat(join(directory, '.lock'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    await context.fiber.dispose()
+  })
+
+  it('records duplicate reminder commands without duplicate revisions in either store', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-reminder-unchanged-'))
+    const workspace = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-reminder-unchanged-workspace-'))
+    roots.push(home, workspace)
+    const context = await session(home, { workspaceRoot: workspace })
+    const proposal = await context.doppelgangerEvolution.propose({
+      ...globalRequest(`reminder-propose-${scope}`), scope,
+      dedupeKey: `capability.reminder-unchanged-${scope}`,
+    })
+    const delivered = await context.doppelgangerEvolution.recordReminder({
+      operationId: `reminder-first-${scope}`, id: proposal.id, expectedRevision: proposal.revision,
+      sessionId: 'session-reminder', turnId: 'turn-reminder',
+    })
+    const duplicate = await context.doppelgangerEvolution.recordReminder({
+      operationId: `reminder-second-${scope}`, id: proposal.id, expectedRevision: delivered.revision,
+      sessionId: 'session-reminder', turnId: 'turn-reminder',
+    })
+    expect(duplicate).toEqual(delivered)
+    expect(duplicate.revision).toBe(delivered.revision)
+    expect(duplicate.reminders).toHaveLength(1)
+    await context.fiber.dispose()
+  })
+
+  it('atomically resumes an expired reminder target using the inspected revision', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-expiry-'))
+    const workspace = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-expiry-workspace-'))
+    roots.push(home, workspace)
+    let now = new Date('2026-09-01T00:00:00.000Z')
+    const context = await session(home, { workspaceRoot: workspace, now: () => now })
+    const target = await context.doppelgangerEvolution.propose({
+      ...globalRequest(`expiry-target-${scope}`), scope,
+      dedupeKey: `capability.expiry-target-${scope}`,
+    })
+    const neighbor = await context.doppelgangerEvolution.propose({
+      ...globalRequest(`expiry-neighbor-${scope}`), scope,
+      dedupeKey: `capability.expiry-neighbor-${scope}`,
+    })
+    const snoozed = await context.doppelgangerEvolution.snooze({
+      operationId: `expiry-snooze-${scope}`, id: target.id, expectedRevision: target.revision,
+      until: '2026-09-02T00:00:00.000Z', reason: 'Wait for the next turn.',
+    })
+    now = new Date('2026-09-03T00:00:00.000Z')
+    const delivered = await context.doppelgangerEvolution.recordReminder({
+      operationId: `expiry-delivery-${scope}`, id: target.id, expectedRevision: snoozed.revision,
+      sessionId: 'expiry-session', turnId: 'expiry-turn',
+    })
+    expect(delivered).toMatchObject({
+      id: target.id, status: 'proposed', revision: snoozed.revision + 2,
+      reminders: [{ sessionId: 'expiry-session' }],
+    })
+    expect((await context.doppelgangerEvolution.inspect(neighbor.id)).proposal).toEqual(neighbor)
+    expect((await context.doppelgangerEvolution.inspect(target.id)).proposal).toEqual(delivered)
+    await context.fiber.dispose()
+  })
+
+  it('rolls back targeted expiry when the requested mutation cannot commit', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-expiry-failure-'))
+    const workspace = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-expiry-failure-workspace-'))
+    roots.push(home, workspace)
+    let now = new Date('2026-09-01T00:00:00.000Z')
+    const context = await session(home, { workspaceRoot: workspace, now: () => now })
+    const target = await context.doppelgangerEvolution.propose({
+      ...globalRequest(`expiry-failure-${scope}`), scope,
+      dedupeKey: `capability.expiry-failure-${scope}`,
+    })
+    const snoozed = await context.doppelgangerEvolution.snooze({
+      operationId: `expiry-failure-snooze-${scope}`, id: target.id, expectedRevision: target.revision,
+      until: '2026-09-02T00:00:00.000Z', reason: 'Wait for a valid delivery.',
+    })
+    now = new Date('2026-09-03T00:00:00.000Z')
+    await expect(context.doppelgangerEvolution.recordReminder({
+      operationId: `expiry-failure-delivery-${scope}`, id: target.id, expectedRevision: snoozed.revision,
+      sessionId: '', turnId: 'expiry-turn',
+    })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    expect((await context.doppelgangerEvolution.inspect(target.id)).proposal).toEqual(snoozed)
+    await context.fiber.dispose()
+  })
+
+
+
 })
 
 describe('Evolution schema migration', () => {

@@ -349,6 +349,36 @@ describe('Doppelganger OMP extension', () => {
       reason: 'shutdown',
     })).toMatchObject({ type: 'session-disposed', reason: 'shutdown' })
   })
+  it('rejects invalid invocation values before transport or approval', async () => {
+    const { root, home } = await projectFixture()
+    const factory = new ExtensionFactory()
+    const pi = fakePi()
+    createDoppelgangerOmpExtension({ home, childFactory: factory })(pi.api)
+    const ctx = extensionContext(root)
+    await pi.handlers.get('session_start')!({ type: 'session_start' }, ctx)
+    const tool = pi.tools.get('doppelganger_memory_search')!
+    const coercion = vi.fn(() => ({ coerced: true }))
+    const invalid = { value: NaN, toJSON: coercion }
+    await expect(tool.execute('invalid', invalid, undefined, undefined, ctx))
+      .rejects.toThrow('OMP tool invocation input.toJSON must be JSON-compatible')
+    expect(coercion).not.toHaveBeenCalled()
+    expect(factory.connection.requests.filter(request => request.method === 'tools.invoke')).toHaveLength(0)
+    await pi.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, ctx)
+  })
+
+  it('preserves exact valid JSON values through direct and transported invocation', async () => {
+    const { root, home } = await projectFixture()
+    const factory = new ExtensionFactory()
+    const pi = fakePi()
+    createDoppelgangerOmpExtension({ home, childFactory: factory })(pi.api)
+    const ctx = extensionContext(root)
+    await pi.handlers.get('session_start')!({ type: 'session_start' }, ctx)
+    const input = { nested: { value: 'exact' }, flags: [true, false], count: 0 }
+    await pi.tools.get('doppelganger_memory_search')!.execute('valid', input, undefined, undefined, ctx)
+    expect(factory.connection.requests.find(request => request.method === 'tools.invoke')?.params)
+      .toMatchObject({ input })
+    await pi.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, ctx)
+  })
   it('keeps data-authority runtime context out of system instructions', async () => {
     const { root, home } = await projectFixture()
     const factory = new ExtensionFactory()
@@ -472,7 +502,7 @@ describe('Doppelganger OMP extension', () => {
       params: {
         protocolVersion: 1,
         type: 'todo-reminder',
-        deliveryId: 'omp-session:omp-todo-reminder:1',
+        deliveryId: expect.any(String),
         sessionId: 'omp-session',
         timestamp: expect.any(Number),
         todos: [
@@ -488,7 +518,7 @@ describe('Doppelganger OMP extension', () => {
       method: 'context.resolve',
       params: expect.objectContaining({
         requestId: expect.any(String),
-        turn: { input: 'Current user turn', turnId: 'omp-session:turn:1' },
+        turn: { input: 'Current user turn', turnId: expect.any(String) },
         tokenBudget: 321,
       }),
     })
@@ -579,10 +609,12 @@ describe('Doppelganger OMP extension', () => {
       'tool-completed',
       'turn-committed',
     ])
+    const turnId = published(factory.connection).find(event => event.type === 'turn-started')!.turnId
+    expect(turnId).toEqual(expect.any(String))
     expect(published(factory.connection).at(-2)).toMatchObject({
       protocolVersion: 2,
       type: 'tool-completed',
-      turnId: 'omp-session:turn:2',
+      turnId,
       callId: 'call-one',
       name: 'read',
       outcome: 'completed',
@@ -591,7 +623,7 @@ describe('Doppelganger OMP extension', () => {
     expect(published(factory.connection).at(-1)).toMatchObject({
       protocolVersion: 2,
       type: 'turn-committed',
-      turnId: 'omp-session:turn:2',
+      turnId,
       principalInput: { value: 'Next turn' },
       assistantOutput: { value: 'Completed answer.' },
       outcome: 'completed',
@@ -635,7 +667,9 @@ describe('Doppelganger OMP extension', () => {
     }, ctx)
     expect(factory.connection.requests.filter(request => request.method === 'context.resolve')).toEqual([
       { method: 'context.resolve', params: {
-        requestId: 'omp-session:context:1', turn: { input: 'Remember this', turnId: 'omp-session:turn:1' }, tokenBudget: 222,
+        requestId: expect.any(String),
+        turn: { input: 'Remember this', turnId: published(factory.connection).find(event => event.type === 'turn-started')!.turnId },
+        tokenBudget: 222,
       } },
     ])
 
@@ -668,7 +702,7 @@ describe('Doppelganger OMP extension', () => {
     session.setCwd(secondRoot)
     await pi.handlers.get('turn_start')!({ type: 'turn_start', turnIndex: 0, timestamp: 10 }, session.ctx)
     expect(published(factory.connection).at(-1)).toMatchObject({
-      type: 'turn-started', sessionId: 'session-one', turnId: 'session-one:turn:1',
+      type: 'turn-started', sessionId: 'session-one', turnId: expect.any(String),
     })
 
     await pi.handlers.get('session_switch')!({
@@ -708,6 +742,84 @@ describe('Doppelganger OMP extension', () => {
     expect(factory.connectionAt(2).disposed).toBe(true)
     expect(pi.activeTools()).toEqual(['read', 'bash'])
     expect(pi.api.logger.error).toHaveBeenCalledWith(expect.stringContaining('replacement failed'))
+  })
+
+  it.each(['restart', 'switch-back'] as const)('keeps new lifecycle identities distinct after same-session %s', async (mode) => {
+    const { root, home } = await projectFixture()
+    const factory = new ExtensionFactory()
+    const session = mutableExtensionContext(root)
+    let pi = fakePi()
+    createDoppelgangerOmpExtension({ home, childFactory: factory })(pi.api)
+
+    const completeTurn = async () => {
+      await pi.handlers.get('before_agent_start')!({
+        type: 'before_agent_start', prompt: 'Check the capability gap', systemPrompt: [],
+      }, session.ctx)
+      await pi.handlers.get('turn_start')!({ type: 'turn_start', turnIndex: 0, timestamp: 10 }, session.ctx)
+      const toolEnd = {
+        type: 'tool_execution_end', toolCallId: 'native-call', toolName: 'read', result: {}, isError: false,
+      }
+      await pi.handlers.get('tool_execution_end')!(toolEnd, session.ctx)
+      await pi.handlers.get('tool_execution_end')!(toolEnd, session.ctx)
+      await pi.handlers.get('session_before_compact')!({
+        type: 'session_before_compact', preparation: {}, branchEntries: [],
+      }, session.ctx)
+      await pi.handlers.get('todo_reminder')!({
+        type: 'todo_reminder', todos: [], attempt: 1, maxAttempts: 3,
+      }, session.ctx)
+      await pi.handlers.get('turn_end')!({
+        type: 'turn_end', turnIndex: 0,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Completed.' }], stopReason: 'stop' },
+        toolResults: [],
+      }, session.ctx)
+      const connection = factory.latestConnection
+      const events = published(connection)
+      const committed = events.find(event => event.type === 'turn-committed')!
+      const context = connection.requests.find(request => request.method === 'context.resolve')!.params as {
+        requestId: string; turn: { turnId: string }
+      }
+      expect(committed.sessionId).toBe('omp-session')
+      expect(context.turn.turnId).toBe(committed.turnId)
+      for (const event of events.filter(event => event.turnId !== undefined)) {
+        expect(event.turnId).toBe(committed.turnId)
+      }
+      const toolEvents = events.filter(event => event.type === 'tool-completed')
+      expect(toolEvents).toHaveLength(2)
+      expect(toolEvents[0]!.deliveryId).toBe(toolEvents[1]!.deliveryId)
+      expect(toolEvents[0]!.callId).toBe('native-call')
+      return { connection, committed, context }
+    }
+
+    await pi.handlers.get('session_start')!({ type: 'session_start' }, session.ctx)
+    const first = await completeTurn()
+    if (mode === 'restart') {
+      await pi.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, session.ctx)
+      await vi.waitFor(() => expect(first.connection.disposed).toBe(true))
+      pi = fakePi()
+      createDoppelgangerOmpExtension({ home, childFactory: factory })(pi.api)
+      await pi.handlers.get('session_start')!({ type: 'session_start' }, session.ctx)
+    } else {
+      session.setSessionId('other-session')
+      await pi.handlers.get('session_switch')!({ type: 'session_switch', reason: 'resume' }, session.ctx)
+      session.setSessionId('omp-session')
+      await pi.handlers.get('session_switch')!({ type: 'session_switch', reason: 'resume' }, session.ctx)
+    }
+    const second = await completeTurn()
+    await pi.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, session.ctx)
+    await vi.waitFor(() => expect(second.connection.disposed).toBe(true))
+
+    expect(second.committed.turnId).not.toBe(first.committed.turnId)
+    expect(second.context.requestId).not.toBe(first.context.requestId)
+    const previousDeliveries = new Set(published(first.connection).map(event => event.deliveryId))
+    for (const event of published(second.connection)) {
+      expect(event.sessionId).toBe('omp-session')
+      expect(previousDeliveries.has(event.deliveryId)).toBe(false)
+    }
+    const reminder = (connection: ExtensionConnection) => (
+      connection.requests.find(request => request.method === 'omp.todo-reminder')!.params as { deliveryId: string }
+    ).deliveryId
+    expect(reminder(second.connection)).not.toBe(reminder(first.connection))
+    expect(pi.api.logger.error).not.toHaveBeenCalled()
   })
 
   it('publishes no session completion for resumable OMP settle hooks', async () => {

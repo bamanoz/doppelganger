@@ -152,4 +152,148 @@ describe('layered composition reload', () => {
     expect(await readFile(loaderPath, 'utf8')).toBe(loaderSource)
     expect(globalThis.doppelgangerReloadLifecycle?.at(-1)).toBe('stop:base')
   })
+
+  it('reports observed rollback audit failures without restoring stale healthy diagnostics', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-composition-rollback-audit-'))
+    temporaryRoots.push(root)
+    const loaderPath = join(root, 'runtime.cordis.yml')
+    const modulePath = join(root, 'feature.mjs')
+    await Promise.all([
+      writeFile(loaderPath, '- id: feature\n  name: ./feature.mjs\n  config:\n    value: base\n'),
+      writeFile(modulePath, [
+        'let applications = 0',
+        'export default {',
+        "  name: 'rollback-audit-feature',",
+        '  apply(_ctx, config) {',
+        '    applications += 1',
+        '    if (config.value === "candidate") throw new Error("candidate activation rejected")',
+        '    if (config.value === "base" && applications > 2) throw new Error("restoration activation rejected")',
+        '  },',
+        '}',
+      ].join('\n')),
+    ])
+    const failures = eventQueue<CompositionReloadEvent>()
+    const runtime = createCompositionRuntime({
+      watch: { base: root, root: [] },
+      onReloadFailure: event => { failures.push(event) },
+    })
+    const session = await runtime.activate({
+      composition: createCompositionDefinition({
+        id: 'rollback-audit',
+        revision: 'authored',
+        loaderPath,
+        patches: [],
+      }),
+      sessionId: 'rollback-audit',
+    })
+
+    const failed = failures.next('failed restoration audit')
+    await writeFile(loaderPath, '- id: feature\n  name: ./feature.mjs\n  config:\n    value: candidate\n')
+    const event = await failed
+    expect(event.diagnostics.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'feature',
+        state: 'failed',
+        error: expect.stringContaining('restoration activation rejected'),
+      }),
+    ]))
+    expect(event.diagnostics.reload?.error).toContain('candidate activation rejected')
+    expect(event.diagnostics.reload?.error).toContain('restoration activation rejected')
+    expect(session.diagnostics()).toBe(event.diagnostics)
+
+    await expect(runtime.dispose()).resolves.toBeUndefined()
+  })
+
+  it('aggregates candidate and restoration errors while retaining disposal ownership', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-composition-rollback-update-'))
+    temporaryRoots.push(root)
+    const loaderPath = join(root, 'runtime.cordis.yml')
+    const featurePath = join(root, 'feature.mjs')
+    await Promise.all([
+      writeFile(loaderPath, '- id: feature\n  name: ./feature.mjs\n  config:\n    cleanupThrows: false\n'),
+      writeFile(featurePath, [
+        'let applications = 0',
+        'export default {',
+        "  name: 'rollback-update-feature',",
+        '  apply(_ctx, config) {',
+        '    applications += 1',
+        '    if (config.cleanupThrows && applications === 2) throw new Error("candidate update rejected")',
+        '    if (!config.cleanupThrows && applications > 2) throw new Error("restoration update rejected")',
+        '  },',
+        '}',
+      ].join('\n')),
+    ])
+    const failures = eventQueue<CompositionReloadEvent>()
+    const runtime = createCompositionRuntime({
+      watch: { base: root, root: [] },
+      onReloadFailure: event => { failures.push(event) },
+    })
+    const session = await runtime.activate({
+      composition: createCompositionDefinition({
+        id: 'rollback-update',
+        revision: 'authored',
+        loaderPath,
+        patches: [],
+      }),
+      sessionId: 'rollback-update',
+    })
+
+    const failed = failures.next('thrown restoration update')
+    await writeFile(loaderPath, [
+      '- id: feature',
+      '  name: ./feature.mjs',
+      '  config:',
+      '    cleanupThrows: true',
+      '',
+    ].join('\n'))
+    const event = await failed
+    expect(event.diagnostics.reload?.error).toContain('candidate update rejected')
+    expect(event.diagnostics.reload?.error).toContain('restoration update rejected')
+    expect(session.diagnostics()).toBe(event.diagnostics)
+
+    await expect(runtime.dispose()).resolves.toBeUndefined()
+  })
+
+  it('reports a pending entry observed during restoration', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-composition-rollback-pending-'))
+    temporaryRoots.push(root)
+    const loaderPath = join(root, 'runtime.cordis.yml')
+    const modulePath = join(root, 'feature.mjs')
+    await Promise.all([
+      writeFile(loaderPath, '- id: provider\n  name: ./provider.mjs\n- id: feature\n  name: ./feature.mjs\n  config:\n    value: base\n'),
+      writeFile(join(root, 'provider.mjs'), [
+        'export let drop',
+        'export default { name: "restoration-provider", apply(ctx) { drop = ctx.provide("restorationMissingService", true) } }',
+      ].join('\n')),
+      writeFile(modulePath, [
+        'import { drop } from "./provider.mjs"',
+        'export default {',
+        "  name: 'rollback-pending-feature',",
+        '  inject: ["restorationMissingService"],',
+        '  apply(_ctx, config) { if (config.value === "candidate") drop() },',
+        '}',
+      ].join('\n')),
+    ])
+    const failures = eventQueue<CompositionReloadEvent>()
+    const runtime = createCompositionRuntime({
+      watch: { base: root, root: [] },
+      onReloadFailure: event => { failures.push(event) },
+    })
+    const session = await runtime.activate({
+      composition: createCompositionDefinition({
+        id: 'rollback-pending', revision: 'authored', loaderPath, patches: [],
+      }),
+      sessionId: 'rollback-pending',
+    })
+
+    const failed = failures.next('pending restoration audit')
+    await writeFile(loaderPath, '- id: provider\n  name: ./provider.mjs\n- id: feature\n  name: ./feature.mjs\n  config:\n    value: candidate\n')
+    const event = await failed
+    expect(event.diagnostics.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'feature', state: 'pending', missingServices: ['restorationMissingService'] }),
+    ]))
+    expect(event.diagnostics.reload?.error).toContain('pending')
+    expect(session.diagnostics()).toBe(event.diagnostics)
+    await runtime.dispose()
+  })
 })

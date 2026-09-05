@@ -1,9 +1,9 @@
 import { readdir, readFile } from 'node:fs/promises'
-import { join, relative } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
+import ts from 'typescript'
 
 const INTERNAL_PREFIX = '@doppelganger/'
 const DEPENDENCY_SECTIONS = ['dependencies', 'peerDependencies', 'devDependencies']
-const IMPORT_PATTERN = /(?:from\s+|import\s*\()(['"])([^'"]+)\1/gu
 
 async function files(directory, suffix) {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -17,6 +17,35 @@ async function files(directory, suffix) {
 
 function isObject(value) {
   return value !== null && !Array.isArray(value) && typeof value === 'object'
+}
+
+function sourceSpecifiers(path, source) {
+  const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const specifiers = []
+  const add = value => {
+    if (ts.isStringLiteral(value)) specifiers.push(value.text)
+  }
+  const visit = node => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      if (node.moduleSpecifier !== undefined) add(node.moduleSpecifier)
+    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const [specifier] = node.arguments
+      if (specifier !== undefined) add(specifier)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return specifiers
+}
+
+function namedPackageOwner(specifier, packages) {
+  if (!specifier.startsWith(INTERNAL_PREFIX)) return
+  const owner = Object.keys(packages).find(name => specifier === name || specifier.startsWith(`${name}/`))
+  return owner ?? specifier.split('/').slice(0, 2).join('/')
+}
+
+function pathPackageOwner(path, packageRoots) {
+  return packageRoots.find(({ root }) => path === root || path.startsWith(`${root}${sep}`))
 }
 
 export function validateBoundaryManifest(value) {
@@ -81,6 +110,10 @@ export async function checkPackageBoundaries(root, manifestPath = join(root, 'sc
   for (const directory of configuredDirectories) {
     if (!packageEntries.includes(directory)) violations.push(`boundary manifest: unknown workspace directory packages/${directory}`)
   }
+  const packageRoots = Object.entries(manifest.packages).map(([name, entry]) => ({
+    name,
+    root: resolve(root, 'packages', entry.directory),
+  }))
 
   for (const [name, entry] of Object.entries(manifest.packages)) {
     const packageRoot = join(root, 'packages', entry.directory)
@@ -105,9 +138,16 @@ export async function checkPackageBoundaries(root, manifestPath = join(root, 'sc
     try {
       for (const filename of await files(join(packageRoot, 'src'), '.ts')) {
         const source = await readFile(filename, 'utf8')
-        for (const match of source.matchAll(IMPORT_PATTERN)) {
-          const dependency = match[2]
-          if (dependency?.startsWith(INTERNAL_PREFIX) && !allowed.has(dependency)) {
+        for (const specifier of sourceSpecifiers(filename, source)) {
+          if (specifier.startsWith('.')) {
+            const target = pathPackageOwner(resolve(dirname(filename), specifier), packageRoots)
+            if (target !== undefined && target.name !== name) {
+              violations.push(`${relative(root, filename)}: forbidden relative source edge ${name} -> ${target.name}`)
+            }
+            continue
+          }
+          const dependency = namedPackageOwner(specifier, manifest.packages)
+          if (dependency !== undefined && !allowed.has(dependency)) {
             violations.push(`${relative(root, filename)}: forbidden source edge ${name} -> ${dependency}`)
           }
         }

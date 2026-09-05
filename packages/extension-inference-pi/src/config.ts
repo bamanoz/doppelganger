@@ -156,3 +156,17 @@ export function normalizePiInferencePluginConfig(value: unknown): NormalizedPiIn
     ),
   })
 }
+
+export const PiInferencePluginConfigSchema = Object.freeze({
+  '~standard': Object.freeze({
+    version: 1 as const,
+    vendor: 'doppelganger',
+    validate(value: unknown) {
+      try {
+        return { value: normalizePiInferencePluginConfig(value) }
+      } catch (cause) {
+        return { issues: [{ message: cause instanceof Error ? cause.message : String(cause) }] }
+      }
+    },
+  }),
+})

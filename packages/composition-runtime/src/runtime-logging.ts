@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { Logger, Service, type Context, type Fiber, type LoggerType, type Message } from '@deepseek-ai/cordis'
 import type { RuntimeSessionMetadata } from './session-metadata.ts'
 
@@ -9,7 +10,14 @@ export interface RuntimeLogError {
   readonly stack?: string
 }
 
+export interface RuntimeLoggingScope {
+  readonly runtimeActivationId: string
+  readonly sessionId: string
+  readonly runtimePresetId: string
+}
+
 export interface RuntimeLogRecord {
+  readonly runtimeActivationId: string
   readonly sequence: number
   readonly timestamp: number
   readonly severity: RuntimeLogSeverity
@@ -30,6 +38,7 @@ export interface RuntimeLogSinkOptions {
 }
 
 export interface RuntimeLoggingService {
+  readonly scope: RuntimeLoggingScope
   register(sink: RuntimeLogSink, options: RuntimeLogSinkOptions): () => Promise<void>
 }
 
@@ -223,19 +232,20 @@ function freezeRecord(record: RuntimeLogRecord): RuntimeLogRecord {
 }
 
 function syntheticDropRecord(
-  metadata: RuntimeSessionMetadata,
+  scope: RuntimeLoggingScope,
   sequence: number,
   dropped: number,
   queue: 'activation' | 'sink',
 ): RuntimeLogRecord {
   return freezeRecord({
+    runtimeActivationId: scope.runtimeActivationId,
     sequence,
     timestamp: Date.now(),
     severity: 'warn',
     logger: syntheticLogger,
     message: `${queue} logging queue dropped ${dropped} oldest record${dropped === 1 ? '' : 's'}`,
-    sessionId: metadata.sessionId,
-    runtimePresetId: metadata.runtimePresetId,
+    sessionId: scope.sessionId,
+    runtimePresetId: scope.runtimePresetId,
   })
 }
 
@@ -243,7 +253,7 @@ export class RuntimeLoggingRouter extends Service implements RuntimeLoggingServi
   private readonly sinks = new Set<SinkState>()
   private readonly activationRecords: RuntimeLogRecord[] = []
   private readonly removeExporter: () => Promise<void>
-  private readonly metadata: RuntimeSessionMetadata
+  readonly scope: RuntimeLoggingScope
   private readonly sessionFibers: WeakSet<Fiber>
   private readonly onSessionError: ((args: readonly unknown[]) => void) | undefined
   private activationDropped = 0
@@ -260,7 +270,11 @@ export class RuntimeLoggingRouter extends Service implements RuntimeLoggingServi
     exporterContext: Context = ctx,
   ) {
     super(ctx, RUNTIME_LOGGING_SERVICE)
-    this.metadata = metadata
+    this.scope = Object.freeze({
+      runtimeActivationId: randomUUID(),
+      sessionId: metadata.sessionId,
+      runtimePresetId: metadata.runtimePresetId,
+    })
     this.sessionFibers = sessionFibers
     this.onSessionError = onSessionError
     this.removeExporter = exporterContext.logger.exporter({
@@ -300,7 +314,7 @@ export class RuntimeLoggingRouter extends Service implements RuntimeLoggingServi
         const first = this.activationRecords[0]
         if (this.activationDropped > 0) {
           this.enqueue(state, syntheticDropRecord(
-            this.metadata,
+            this.scope,
             first === undefined ? 0 : Math.max(0, first.sequence - 1),
             this.activationDropped,
             'activation',
@@ -355,13 +369,14 @@ export class RuntimeLoggingRouter extends Service implements RuntimeLoggingServi
   private normalize(message: Message): RuntimeLogRecord {
     const error = errorFrom(message.args[0])
     return freezeRecord({
+      runtimeActivationId: this.scope.runtimeActivationId,
       sequence: this.sequence += 1,
       timestamp: Number.isFinite(message.ts) ? message.ts : Date.now(),
       severity: severityFrom(message.type),
       logger: truncateRuntimeLogUtf8(boundedString(message.name, RUNTIME_LOGGING_LIMITS.maximumLoggerBytes, renderingMarker), RUNTIME_LOGGING_LIMITS.maximumLoggerBytes),
       message: renderMessage(message, error),
-      sessionId: this.metadata.sessionId,
-      runtimePresetId: this.metadata.runtimePresetId,
+      sessionId: this.scope.sessionId,
+      runtimePresetId: this.scope.runtimePresetId,
       ...(error === undefined ? {} : { error }),
     })
   }
@@ -394,7 +409,7 @@ export class RuntimeLoggingRouter extends Service implements RuntimeLoggingServi
         let record: RuntimeLogRecord
         if (state.dropped > 0) {
           record = syntheticDropRecord(
-            this.metadata,
+            this.scope,
             state.droppedSequence ?? state.queue[0]?.sequence ?? this.sequence,
             state.dropped,
             'sink',

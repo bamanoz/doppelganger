@@ -87,6 +87,8 @@ The nearest project manifest is discovered from the working directory up to the 
 
 Precedence is explicit host/session choice, project `runtimePreset`, user `defaultRuntimePreset`, then the roster's optional deployment default. The standard package/plugin deployment default is `standard`. A winning missing or broken preset fails visibly and does not fall through. A roster explicitly configured without a deployment default can still yield no selection, which activates no Runtime Session.
 
+Runtime Preset health and Composition Runtime activation use the same portable Loader structure validator. A complete tree may be empty; otherwise every entry, including entries nested in a supplied group list, requires a nonblank unique `id` and nonblank plugin `name`. A supplied group `config` must be an entry array. Ordinary non-group plugin configuration remains opaque to this structural pass and is validated by its owning plugin. Protected runtime identities, patch targets, activation settlement, audit, and rollback remain Composition Runtime policy rather than roster health promises.
+
 ## Plugin ownership
 
 A preset's Loader rows own feature configuration, credentials by environment-variable reference, state directories, databases, migrations, partitions, and assets. The runtime does not create Persona Instance directories or assign storage. Persona rows own agent identity only; actor-aware persistence injects the separate host-owned `doppelgangerActor` service.
@@ -99,7 +101,7 @@ Runtime logging destinations are opt-in Loader rows and never fields in `config.
   inject: [doppelgangerLogging]
   isolate: { doppelgangerLogging: session }
   config:
-    path: "/absolute/path/doppelganger.jsonl"
+    pathTemplate: "/absolute/path/runtime-{runtimeActivationId}.jsonl"
 
 - id: runtime-logs-sentry
   name: "@doppelganger/doppelganger-logging-sentry/loader"
@@ -109,7 +111,9 @@ Runtime logging destinations are opt-in Loader rows and never fields in `config.
     dsnEnv: DOPPELGANGER_SENTRY_DSN
 ```
 
-The file path must be absolute and normalized. `dsnEnv` names exactly one environment variable resolved for that Loader generation; no DSN value belongs in authored YAML. Unknown fields and invalid bounds fail activation or candidate reload. The complete configuration, defaults, filtering, rotation, and credential rules are owned by [Runtime logging](../features/runtime-logging.md).
+The file destination requires exactly one static `path` or activation-derived `pathTemplate`. Both must be absolute and normalized. A template contains exactly one `{runtimeActivationId}` token; Composition Runtime supplies the safe opaque value through the same session-isolated logging service before exporter activation. This lets concurrent Runtime Sessions or OMP children resolve distinct concrete files without changing host configuration or adding interprocess rotation locking. Static paths retain the one-operating-system-writer-per-concrete-path rule. `dsnEnv` names exactly one environment variable resolved for that Loader generation; no DSN value belongs in authored YAML. Unknown fields, invalid placeholders, and invalid bounds fail activation or candidate reload. The complete configuration, defaults, filtering, rotation, correlation, and credential rules are owned by [Runtime logging](../features/runtime-logging.md).
+
+The file exporter's optional `retention` block remains plugin-owned Loader configuration. Its private registry belongs beside the logs, not in the runtime selection configuration or instance-storage service. See [cross-activation retention](../features/runtime-logging.md#cross-activation-retention) for local-directory requirements, legacy-file preservation, and the distinction between a cleanup budget and a hard disk quota.
 
 Dynamic Runtime Plugins are opt-in Loader configuration. The row uses `@doppelganger/doppelganger-dynamic-runtime-plugins/loader`, requires `doppelgangerRuntimeSession` and `doppelgangerTools`, and isolates both services in the session realm. Its optional bounded integer configuration controls VM evaluation time, source/name/purpose sizes, Plugin and Package counts, aggregate stored source, inspection output, and diagnostic message/stack sizes. Unknown or invalid fields fail activation before control tools register. Definitions, Package source, pointers, runs, and diagnostics remain process memory owned by that row; they never write Runtime Presets, patches, configuration, repositories, or durable state. The shipped `standard` preset omits the row.
 
@@ -144,4 +148,4 @@ explicit host/session patches
 protected runtime-owned plugins (session metadata, shared Runtime Host, optional Actor Identity, typed host extensions)
 ```
 
-Missing optional patches are no-ops. Valid changes reload the active session; invalid changes retain the previous audited generation. No normalized Loader input is written back to authored files.
+Missing optional patches are no-ops. Each generation derives flattened patches and the effective tree from one preflight of immutable authored input. Valid changes reload the active session; invalid changes attempt restoration and publish rollback success only after the restored tree settles and passes activation audit. Failed restoration reports observed entry diagnostics and aggregate candidate/restoration errors while leaving explicit retry and disposal ownership available. No normalized Loader input is written back to authored files.

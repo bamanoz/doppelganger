@@ -118,6 +118,7 @@ Every backend SHALL implement the required equality and conjunction filters for 
 
 ### Requirement: Projection synchronization is durable and idempotent
 Canonical mutations SHALL enqueue identifier-only vector projection work transactionally with the canonical state change. Retrying work SHALL NOT create duplicate vector entries, and a worker SHALL load and verify the current canonical revision immediately before embedding or deletion.
+Canonical projection queue, receipt, generation and status-count persistence SHALL remain owned by the memory module. A semantic coordinator SHALL use bounded memory-owned operations for leasing, retry, delivery acknowledgment and generation transitions rather than obtaining unrestricted canonical database access. Those operations SHALL enforce canonical identity and generation state, retain synchronous transaction boundaries, and revalidate source state when asynchronous backend work is acknowledged.
 
 #### Scenario: Active revision is committed
 - **ID**: `memory.semantic.projection.transactional-enqueue`
@@ -145,6 +146,18 @@ Canonical mutations SHALL enqueue identifier-only vector projection work transac
 - **EVIDENCE**: `packages/extension-memory/tests/memory-projections.spec.ts::commits canonical and lexical memory without semantic projection work`
 - **WHEN** canonical memory changes while no semantic stack is active
 - **THEN** canonical mutation and FTS5 succeed without accumulating work for an unconfigured generation
+
+#### Scenario: Canonical revision changes before projection acknowledgment
+- **ID**: `memory.semantic.projection.acknowledgment-current-source`
+- **EVIDENCE**: `packages/extension-memory/tests/memory-projections.spec.ts::revalidates canonical projection acknowledgments after external work`
+- **WHEN** a backend upsert finishes after the canonical record was corrected, forgotten or made ineligible
+- **THEN** the memory-owned acknowledgment refuses to certify the stale revision as current and preserves the durable work needed to converge on canonical state
+
+#### Scenario: Coordinator attempts an invalid canonical generation transition
+- **ID**: `memory.semantic.projection.owner-rejects-invalid-transition`
+- **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator.spec.ts::preserves canonical state when a coordinator generation transition is invalid`
+- **WHEN** coordinator work requests activation or acknowledgment for an obsolete or mismatched canonical generation
+- **THEN** the memory-owned operation rejects that transition without changing the valid active pointer or losing pending canonical work
 
 ### Requirement: Semantic generations rebuild without mixed vector spaces
 A rebuild or backend/model change SHALL populate a new isolated generation from deterministic pages of canonical current eligible revisions, verify it, and switch the local active-generation pointer only after successful completion. Changing EmbeddingGemma from q4/256 to q8/384 SHALL always produce a distinct generation identity. The coordinator SHALL rebuild from canonical memory and SHALL NOT copy, reinterpret, resize, or query vectors from the incompatible q4/256 generation. Failure SHALL leave the previous generation active.
@@ -180,6 +193,7 @@ Embedder and vector-index operations SHALL use bounded deadlines. Timeout, healt
 
 ### Requirement: Backend maintenance is capability-declared
 Each vector adapter SHALL declare the maintenance operations it implements and SHALL return an observable `ran`, `already-running`, or `noop` result. Requesting an unsupported operation SHALL fail explicitly rather than silently succeeding.
+Supported exclusive maintenance SHALL not execute overlapping exclusive work for one adapter. Conformance SHALL demonstrate a genuinely overlapping request at a controlled work boundary and prove one underlying operation with the documented competing outcome. Already completed and no-op operations SHALL be verified separately rather than accepted by an assertion true for every outcome.
 
 #### Scenario: pgvector HNSW build is requested twice
 - **ID**: `memory.semantic.maintenance.pgvector-hnsw-concurrency`
@@ -192,6 +206,18 @@ Each vector adapter SHALL declare the maintenance operations it implements and S
 - **EVIDENCE**: `packages/extension-memory-vectors/tests/chroma.spec.ts::rejects unsupported maintenance explicitly`
 - **WHEN** a backend without an ANN index receives a reindex request
 - **THEN** it returns a typed unsupported-maintenance error
+
+#### Scenario: Exclusive maintenance overlaps under a controlled fixture
+- **ID**: `memory.semantic.maintenance.controlled-overlap`
+- **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator.spec.ts::proves one exclusive maintenance operation while a second request overlaps`
+- **WHEN** a supported exclusive maintenance operation is held open while a second request reaches the same adapter
+- **THEN** exactly one underlying exclusive operation runs and the competing request reports the documented already-running outcome
+
+#### Scenario: Completed maintenance is requested again
+- **ID**: `memory.semantic.maintenance.completed-request`
+- **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator.spec.ts::distinguishes completed and noop maintenance from overlapping work`
+- **WHEN** maintenance is requested after the previous operation has observably settled
+- **THEN** the adapter returns its declared ran or noop result without falsely reporting an operation still in progress
 
 ### Requirement: Semantic diagnostics are bounded and secret-free
 The memory tool surface SHALL report backend kind, sanitized target, embedder-space identity, active generation, current/indexed/stale/missing counts, pending projection and deletion counts, last failure category and time, and supported maintenance operations. It SHALL NOT expose credentials, vectors, memory content, or query content.

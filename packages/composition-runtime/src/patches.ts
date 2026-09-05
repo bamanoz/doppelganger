@@ -10,9 +10,9 @@ import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import { load } from 'js-yaml'
 import {
   RuntimeConfigurationError,
+  validateLoaderEntries,
   type RuntimeConfigurationDiagnostic,
 } from '@doppelganger/doppelganger-runtime-presets'
-
 export const RUNTIME_ENTRY_PREFIX = 'doppelganger-runtime-'
 export const RUNTIME_IMPORT_PREFIX = `cordis:${RUNTIME_ENTRY_PREFIX}`
 
@@ -77,30 +77,24 @@ function validateEntryList(
   diagnostics: RuntimeConfigurationDiagnostic[],
   checkReserved: boolean,
 ): value is EntryOptions[] {
-  if (!Array.isArray(value)) {
-    diagnostics.push({ path, message: 'must be an array of Loader entries' })
+  try {
+    validateLoaderEntries(value, source, path)
+  } catch (error) {
+    if (error instanceof RuntimeConfigurationError) diagnostics.push(...error.diagnostics)
+    else throw error
     return false
   }
-  const initialDiagnosticCount = diagnostics.length
-  value.forEach((candidate, index) => {
-    const entryPath = `${path}[${index}]`
-    const entry = record(candidate)
-    if (entry === undefined) {
-      diagnostics.push({ path: entryPath, message: 'must be a Loader entry object' })
-      return
+  if (checkReserved) {
+    const visit = (entries: readonly EntryOptions[], entryPath: string): void => {
+      entries.forEach((entry, index) => {
+        const currentPath = `${entryPath}[${index}]`
+        reservedEntry(entry as unknown as Readonly<Record<string, unknown>>, source, currentPath)
+        if (entry.group === true && Array.isArray(entry.config)) visit(entry.config as EntryOptions[], `${currentPath}.config`)
+      })
     }
-    if (typeof entry.id !== 'string' || entry.id.trim().length === 0) {
-      diagnostics.push({ path: `${entryPath}.id`, message: 'must be a non-empty string' })
-    }
-    if (typeof entry.name !== 'string' || entry.name.trim().length === 0) {
-      diagnostics.push({ path: `${entryPath}.name`, message: 'must be a non-empty string' })
-    }
-    if (checkReserved) reservedEntry(entry, source, entryPath)
-    if (entry.group === true && entry.config !== undefined) {
-      validateEntryList(entry.config, source, `${entryPath}.config`, diagnostics, checkReserved)
-    }
-  })
-  return diagnostics.length === initialDiagnosticCount
+    visit(value as EntryOptions[], path)
+  }
+  return true
 }
 
 function anchorInsertedEntries(entries: EntryOptions[], baseUrl: string): void {
@@ -176,18 +170,15 @@ export async function loadCompositionPatchFile(
 }
 
 export function validateCompositionEntries(entries: readonly EntryOptions[], source: string): void {
-  const diagnostics: RuntimeConfigurationDiagnostic[] = []
-  validateEntryList(entries, source, '$', diagnostics, true)
-  if (diagnostics.length > 0) throw new RuntimeConfigurationError(source, diagnostics)
-  const ids = new Set<string>()
-  const visit = (items: readonly EntryOptions[]): void => {
-    for (const entry of items) {
-      if (ids.has(entry.id)) throw new CompositionLayerError(source, `duplicate entry ID "${entry.id}"`, { targetId: entry.id })
-      ids.add(entry.id)
-      if (entry.group === true && Array.isArray(entry.config)) visit(entry.config as EntryOptions[])
-    }
+  validateLoaderEntries(entries, source)
+  const visit = (items: readonly EntryOptions[], path: string): void => {
+    items.forEach((entry, index) => {
+      const entryPath = `${path}[${index}]`
+      reservedEntry(entry as unknown as Readonly<Record<string, unknown>>, source, entryPath)
+      if (entry.group === true && Array.isArray(entry.config)) visit(entry.config as EntryOptions[], `${entryPath}.config`)
+    })
   }
-  visit(entries)
+  visit(entries, '$')
 }
 
 function preflightPatches(base: readonly EntryOptions[], layers: readonly CompositionPatchLayer[]): PatchOptions[] {
@@ -251,26 +242,36 @@ function preflightPatches(base: readonly EntryOptions[], layers: readonly Compos
   return flattened
 }
 
+export interface CompositionPreflight {
+  readonly patches: readonly PatchOptions[]
+  readonly effective: readonly EntryOptions[]
+}
+
+export function prepareComposition(
+  base: readonly EntryOptions[],
+  layers: readonly CompositionPatchLayer[],
+): CompositionPreflight {
+  validateCompositionEntries(base, 'base composition')
+  const flattened = preflightPatches(base, layers)
+  const warnings: string[] = []
+  const effective = applyEntryPatches(structuredClone(base) as EntryOptions[], flattened, (message, ...args) => {
+    let index = 0
+    warnings.push(message.replace(/%C/g, () => JSON.stringify(args[index++])))
+  })
+  if (warnings.length > 0) throw new CompositionLayerError('effective composition', warnings.join('; '))
+  return Object.freeze({ patches: Object.freeze(flattened), effective: Object.freeze(effective) })
+}
+
 export function flattenCompositionPatches(
   base: readonly EntryOptions[],
   layers: readonly CompositionPatchLayer[],
 ): PatchOptions[] {
-  validateCompositionEntries(base, 'base composition')
-  return preflightPatches(base, layers)
+  return [...prepareComposition(base, layers).patches]
 }
 
 export function composeCompositionEntries(
   base: readonly EntryOptions[],
   layers: readonly CompositionPatchLayer[],
 ): EntryOptions[] {
-  const flattened = flattenCompositionPatches(base, layers)
-  const warnings: string[] = []
-  const result = applyEntryPatches(structuredClone(base) as EntryOptions[], flattened, (message, ...args) => {
-    let index = 0
-    warnings.push(message.replace(/%C/g, () => JSON.stringify(args[index++])))
-  })
-  if (warnings.length > 0) {
-    throw new CompositionLayerError('effective composition', warnings.join('; '))
-  }
-  return result
+  return [...prepareComposition(base, layers).effective]
 }

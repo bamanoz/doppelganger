@@ -12,6 +12,7 @@ import {
   enqueueActiveMemoryProjection,
   enqueueKnownMemoryProjectionDeletions,
   enqueueMemoryRevisionReplacement,
+  MemoryProjectionStore,
 } from './projection-store.ts'
 import { projectMemorySemanticQuery } from './query-projection.ts'
 import type {
@@ -435,13 +436,13 @@ export class MemoryService extends Service {
 
   private database!: InstanceSqliteDatabase
   private readonly logger: Logger
-
-  /** Coordinator-only access to canonical storage; all writes remain transaction-owned here. */
-  get canonicalDatabase(): InstanceSqliteDatabase {
-    if (this.database === undefined) throw new Error('memory service is not initialized')
-    return this.database
-  }
   private readonly now: () => Date
+  private projectionStoreInstance?: MemoryProjectionStore
+
+  get projectionStore(): MemoryProjectionStore {
+    if (this.projectionStoreInstance === undefined) throw new Error('memory service is not initialized')
+    return this.projectionStoreInstance
+  }
   private readonly id: () => string
   private readonly namespace: string
   private readonly automaticPromotionDistinctSessions: number
@@ -482,6 +483,7 @@ export class MemoryService extends Service {
       if (actor.state !== 'bound') throw new Error('memory requires a bound host actor')
       this.database = await this.ctx.doppelgangerInstanceSqlite.open(this.namespace)
       migrateMemorySchema(this.database, { legacyActorId: actor.actorId })
+      this.projectionStoreInstance = new MemoryProjectionStore(this.database)
       this.logger.info('component.active')
     } catch (error) {
       this.logger.error('component.activation.failed reason=%s', error instanceof MemoryError ? error.code : error instanceof Error ? error.name : typeof error)
@@ -1260,6 +1262,33 @@ export class MemoryService extends Service {
       LIMIT ?
     `).all(...eligible.parameters, STABLE_PROFILE_LIMIT)
     return Object.freeze(rows.map(row => recordFrom(row, now)))
+  }
+
+  /**
+   * Assemble automatic recall behind one final canonical validation boundary.
+   * Semantic retrieval may await external work, so stable identities are retained
+   * only as record ids and reloaded before any contribution is returned.
+   */
+  async automaticRecall(query: string, tokenBudget: number): Promise<readonly MemoryRecord[]> {
+    if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 0) throw new MemoryError('INVALID_BUDGET', 'memory recall token budget must be a non-negative safe integer')
+    if (tokenBudget === 0) return Object.freeze([])
+    const stableIds = this.stableProfile().map(record => record.id)
+    const ranked = query.trim().length === 0 ? [] : await this.search({ query, tokenBudget })
+    const selected: MemoryRecord[] = []
+    const seen = new Set<string>()
+    let tokens = 0
+    const finalCandidates = [...stableIds, ...ranked.map(result => result.record.id)]
+    for (const id of finalCandidates) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      const current = this.visibleRecord(this.database, id, ['active'], true)
+      if (current === undefined) continue
+      const candidateTokens = Math.ceil(Buffer.byteLength(current.revision.content, 'utf8') / 4)
+      if (tokens + candidateTokens > tokenBudget) continue
+      tokens += candidateTokens
+      selected.push(current)
+    }
+    return Object.freeze(selected)
   }
 
   async search(request: MemorySearchRequest): Promise<readonly MemorySearchResult[]> {

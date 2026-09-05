@@ -18,9 +18,9 @@ The shared content policy rejects secrets, credentials, tokens, private keys, re
 
 ## Retrieval
 
-Automatic recall has two bounded layers. First, it contributes an eligible relationship-profile subset independent of lexical overlap: pinned relationship preferences and relationship facts under `principal.identity.*`. Second, it uses the current principal turn as query material for ranked lexical and optional semantic recall. Stable profile data is considered before ordinary ranked data under the host-provided context budget; pinned preferences retain instruction authority, while identity facts and all other ordinary records remain data.
+Automatic recall is one memory-owned operation. It first gathers an eligible relationship-profile subset independent of lexical overlap: pinned relationship preferences and relationship facts under `principal.identity.*`. It then awaits ranked lexical and optional semantic retrieval using the complete current principal turn, and performs one final canonical reload/eligibility pass before returning contributions. Stable profile data is considered before ordinary ranked data under the host-provided context budget; pinned preferences retain instruction authority, while approved active preferences remain behavioral instructions even when unpinned and selected by query. Identity facts and all other ordinary records remain data.
 
-Both layers derive authorization only from the bound actor partition, status, temporal eligibility, and the hard token budget. FTS5 and optional semantic top-K are independent ranked candidate sources, and deterministic reciprocal-rank fusion combines their ranks. Results duplicated by the stable profile layer are contributed once.
+The final operation deduplicates by canonical record identity and applies a deterministic whole-record budget; it never emits a stale stable snapshot or awaits between final validation and return. Both layers derive authorization only from the bound actor partition, status, temporal eligibility, and hard token budget. FTS5 and optional semantic top-K are independent ranked candidate sources, and deterministic reciprocal-rank fusion combines their ranks.
 
 Before return, every record is validated against canonical Persona Instance, actor, scope, status, temporal eligibility, active semantic generation where applicable, record identity, and current revision. Semantic absence, timeout, malformed output, or backend failure preserves stable-profile and lexical recall.
 
@@ -71,5 +71,5 @@ Canonical activation, mutation outcomes, search counts, and semantic degradation
 - `packages/extension-memory/src/schema.ts` — schema and migrations.
 - `packages/extension-memory/src/capture.ts` — candidate extraction.
 - `packages/extension-memory/src/semantic.ts` — semantic contracts.
-- `packages/extension-memory/src/projection-store.ts` — canonical projection queue.
+- `packages/extension-memory/src/projection-store.ts` — bounded canonical projection queue, acknowledgment, generation transitions, and status counts; the coordinator has no raw database access.
 - `packages/extension-memory-vectors/src/coordinator.ts` — derived projection delivery and semantic retrieval.

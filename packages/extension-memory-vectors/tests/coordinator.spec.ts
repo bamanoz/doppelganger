@@ -7,8 +7,8 @@ import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-person
 import { ToolRegistry, createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
 import { InstanceSqliteService, type InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
 import { MemoryService, memorySemanticGenerationId, type MemoryEmbedder, type MemoryVectorEntry, type MemoryVectorHealth, type MemoryVectorIndex, type MemoryVectorMaintenanceKind, type MemoryVectorMaintenanceResult, type MemoryVectorSearchRequest } from '@doppelganger/doppelganger-memory'
-import { MemoryVectorCoordinator } from '../src/coordinator.ts'
 import { MemoryVectorCoordinatorPlugin } from '../src/plugin.ts'
+import { MemoryVectorCoordinator } from '../src/coordinator.ts'
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -36,7 +36,10 @@ class FakeIndex implements MemoryVectorIndex {
   beforeUpsert: (() => Promise<void>) | undefined
   failUpserts = 0
   failOnUpsertCall: number | undefined
-
+  maintenanceEntered: (() => void) | undefined
+  maintenanceRelease: Promise<void> | undefined
+  maintenanceRunning = false
+  maintenanceOperations = 0
   constructor(dimensions = 3, entries = new Map<string, MemoryVectorEntry>()) {
     this.identity = Object.freeze({
       backend: 'sqlite_exact' as const,
@@ -71,9 +74,22 @@ class FakeIndex implements MemoryVectorIndex {
   }
 
   async search(request: MemoryVectorSearchRequest) { return [...this.entries.values()].filter(entry => entry.generationId === request.generationId && entry.instanceId === request.filter.instanceId && entry.actorId === request.filter.actorId).slice(0, request.limit).map(entry => ({ generationId: entry.generationId, recordId: entry.recordId, revisionId: entry.revisionId, score: 1 })) }
-  async health(): Promise<MemoryVectorHealth> { return { state: 'healthy', checkedAt: new Date().toISOString(), backend: 'sqlite_exact', sanitizedTarget: 'memory', counts: { indexed: this.entries.size, current: this.entries.size, stale: 0, missing: 0, pendingUpserts: 0, pendingDeletes: 0 } } }
-  async maintenance(kind: MemoryVectorMaintenanceKind): Promise<MemoryVectorMaintenanceResult> { return { kind, outcome: 'noop', startedAt: new Date().toISOString(), completedAt: new Date().toISOString() } }
-  async close() { this.closed = true }
+  async maintenance(kind: MemoryVectorMaintenanceKind): Promise<MemoryVectorMaintenanceResult> {
+    const startedAt = new Date().toISOString()
+    if (this.maintenanceRelease === undefined) return { kind, outcome: 'noop', startedAt, completedAt: new Date().toISOString() }
+    if (this.maintenanceRunning) return { kind, outcome: 'already-running', startedAt, completedAt: new Date().toISOString() }
+    this.maintenanceRunning = true
+    this.maintenanceOperations += 1
+    this.maintenanceEntered?.()
+    try {
+      await this.maintenanceRelease
+      return { kind, outcome: 'ran', startedAt, completedAt: new Date().toISOString() }
+    } finally { this.maintenanceRunning = false }
+  }
+  async health(): Promise<MemoryVectorHealth> {
+    return { state: this.closed ? 'unavailable' : 'healthy', checkedAt: new Date().toISOString(), backend: this.identity.backend, sanitizedTarget: this.identity.sanitizedTarget, counts: { indexed: this.entries.size, current: this.entries.size, stale: 0, missing: 0, pendingUpserts: 0, pendingDeletes: 0 } }
+  }
+  async close(): Promise<void> { this.closed = true }
 }
 
 interface Fixture { context: Context; database: InstanceSqliteDatabase; index: FakeIndex; coordinator: MemoryVectorCoordinator }
@@ -100,7 +116,7 @@ async function openFixture(home: string, selectedEmbedder: MemoryEmbedder, index
   const services: Plugin = { name: 'coordinator-fakes', apply(ctx) { ctx.provide('doppelgangerMemoryEmbedder', selectedEmbedder); ctx.provide('doppelgangerMemoryVectorIndex', index) } }
   await context.plugin(services)
   const coordinator = new MemoryVectorCoordinator(context, { pollIntervalMs: 5, batchSize, retryBaseMs: 2, operationTimeoutMs: 100 })
-  return { context, database: context.doppelgangerMemory.canonicalDatabase, index, coordinator }
+  return { context, database: (context.doppelgangerMemory as unknown as { database: InstanceSqliteDatabase }).database, index, coordinator }
 }
 
 async function fixture(): Promise<Fixture> {
@@ -248,6 +264,16 @@ describe('memory vector coordinator', () => {
     expect(database.prepare('SELECT generation_id FROM memory_semantic_active_generation WHERE instance_id = ?').get('aiden')).toMatchObject({ generation_id: generation })
     await coordinator.stop()
   })
+  it('preserves canonical state when a coordinator generation transition is invalid', async () => {
+    const { context, database } = await fixture()
+    const store = context.doppelgangerMemory.projectionStore
+    const timestamp = new Date().toISOString()
+    database.prepare(`INSERT INTO memory_semantic_generations(id, instance_id, embedder_identity_json, vector_index_identity_json, state, created_at) VALUES (?, ?, '{}', '{}', 'failed', ?)`).run('obsolete-generation', 'aiden', timestamp)
+    const active = store.activeGeneration('aiden')
+    expect(store.activateGeneration('obsolete-generation', 'aiden', timestamp)).toBe(false)
+    expect(store.rollbackGeneration('obsolete-generation', 'aiden', timestamp)).toBe(false)
+    expect(store.activeGeneration('aiden')).toBe(active)
+  })
   it('registers sanitized status, rebuild, rollback, and maintenance tools', async () => {
     const { context } = await fixture()
     await context.plugin(MemoryVectorCoordinatorPlugin, {
@@ -269,5 +295,30 @@ describe('memory vector coordinator', () => {
       .toMatchObject({ ok: true, value: { kind: 'compact', outcome: 'noop' } })
     expect(await context.doppelgangerTools.invoke({ callId: crypto.randomUUID(), name: 'memory.semantic.rollback', toolRevision: context.doppelgangerTools.snapshot().tools.find(tool => tool.name === 'memory.semantic.rollback')!.revision, input: { generationId: 'unknown' } }, 'test-session'))
       .toMatchObject({ ok: false, error: { code: 'SEMANTIC_OPERATION_FAILED' } })
+  })
+
+  it('proves one exclusive maintenance operation while a second request overlaps', async () => {
+    const { coordinator, index } = await fixture()
+    let entered!: () => void
+    const enteredPromise = new Promise<void>(resolve => { entered = resolve })
+    let release!: () => void
+    index.maintenanceEntered = entered
+    index.maintenanceRelease = new Promise<void>(resolve => { release = resolve })
+    const first = coordinator.maintenance('compact')
+    await enteredPromise
+    await expect(coordinator.maintenance('compact')).resolves.toMatchObject({ outcome: 'already-running' })
+    expect(index.maintenanceOperations).toBe(1)
+    release()
+    await expect(first).resolves.toMatchObject({ outcome: 'ran' })
+  })
+  it('distinguishes completed and noop maintenance from overlapping work', async () => {
+    const { coordinator, index } = await fixture()
+    index.maintenanceRelease = Promise.resolve()
+    await expect(coordinator.maintenance('compact')).resolves.toMatchObject({ outcome: 'ran' })
+    await expect(coordinator.maintenance('compact')).resolves.toMatchObject({ outcome: 'ran' })
+    expect(index.maintenanceOperations).toBe(2)
+    index.maintenanceRelease = undefined
+    await expect(coordinator.maintenance('compact')).resolves.toMatchObject({ outcome: 'noop' })
+    expect(index.maintenanceOperations).toBe(2)
   })
 })

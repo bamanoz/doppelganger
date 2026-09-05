@@ -1,9 +1,11 @@
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   LIFECYCLE_PROTOCOL_VERSION,
@@ -12,8 +14,13 @@ import {
 } from '@doppelganger/doppelganger-protocols'
 import { RuntimePresetRoster } from '@doppelganger/doppelganger-runtime-presets'
 import { OMP_RPC_PROTOCOL_VERSION, OMP_RUNTIME_HOST_CAPABILITIES } from '../src/contracts.ts'
-import { OmpAdapterSession } from '../src/adapter.ts'
-import { resolveOmpActivation } from '../src/extension.ts'
+import {
+  OmpAdapterSession,
+  type OmpChildConnection,
+  type OmpChildDisposal,
+  type OmpChildFactory,
+} from '../src/adapter.ts'
+import { createDoppelgangerOmpExtension, resolveOmpActivation } from '../src/extension.ts'
 import { NodeOmpChildFactory } from '../src/process.ts'
 import { FramedJsonRpcPeer } from '../src/protocol.ts'
 
@@ -28,6 +35,192 @@ interface ChildHarness {
 
 interface RpcRequester {
   request(method: string, params?: unknown): Promise<unknown>
+}
+
+interface RecordedChildConnection extends OmpChildConnection {
+  readonly requests: Array<{ readonly method: string; readonly params: unknown }>
+  readonly disposed: Promise<OmpChildDisposal>
+}
+
+interface CommittedLifecycleEvent extends Record<string, unknown> {
+  readonly deliveryId: string
+  readonly sessionId: string
+  readonly turnId: string
+}
+
+class RecordingNodeChildFactory implements OmpChildFactory {
+  readonly connections: RecordedChildConnection[] = []
+  readonly #inner: NodeOmpChildFactory
+
+  constructor() {
+    this.#inner = new NodeOmpChildFactory({
+      childPath: fileURLToPath(new URL('../src/child.ts', import.meta.url)),
+      shutdownTimeoutMs: 1000,
+    })
+  }
+
+  async start(): Promise<OmpChildConnection> {
+    const inner = await this.#inner.start()
+    const requests: Array<{ readonly method: string; readonly params: unknown }> = []
+    const completion = Promise.withResolvers<OmpChildDisposal>()
+    let disposal: Promise<OmpChildDisposal> | undefined
+    const connection: RecordedChildConnection = {
+      requests,
+      disposed: completion.promise,
+      ...(inner.processId === undefined ? {} : { processId: inner.processId }),
+      request(method, params) {
+        requests.push({ method, params })
+        return inner.request(method, params)
+      },
+      onNotification(method, handler) {
+        return inner.onNotification(method, handler)
+      },
+      dispose() {
+        disposal ??= inner.dispose().then(result => {
+          completion.resolve(result)
+          return result
+        }, cause => {
+          completion.reject(cause)
+          throw cause
+        })
+        return disposal
+      },
+    }
+    this.connections.push(connection)
+    return connection
+  }
+}
+
+interface MountedOmpExtension {
+  readonly handlers: Map<string, (event: unknown, context: ExtensionContext) => Promise<unknown> | unknown>
+  readonly context: ExtensionContext
+  readonly errors: string[]
+}
+
+function mountedOmpExtension(
+  root: string,
+  sessionId: string,
+  install: (api: ExtensionAPI) => void,
+): MountedOmpExtension {
+  const handlers = new Map<string, (event: unknown, context: ExtensionContext) => Promise<unknown> | unknown>()
+  const errors: string[] = []
+  let activeTools = ['read', 'bash']
+  const schema = { min: () => schema }
+  const api = {
+    zod: { string: () => schema, object: () => ({}) },
+    logger: { error(message: string) { errors.push(message) } },
+    registerTool() {},
+    on(event: string, handler: (event: unknown, context: ExtensionContext) => Promise<unknown> | unknown) {
+      handlers.set(event, handler)
+    },
+    getActiveTools: () => [...activeTools],
+    setActiveTools: async (names: string[]) => { activeTools = [...names] },
+  } as unknown as ExtensionAPI
+  const context = {
+    cwd: root,
+    hasUI: false,
+    ui: { notify() {} },
+    sessionManager: { getSessionId: () => sessionId },
+  } as unknown as ExtensionContext
+  install(api)
+  return { handlers, context, errors }
+}
+
+function published(connection: RecordedChildConnection, type?: string): Array<Record<string, unknown>> {
+  return connection.requests.flatMap(request => (
+    request.method === 'event.publish'
+    && request.params !== null
+    && typeof request.params === 'object'
+    && (type === undefined || ('type' in request.params && request.params.type === type))
+      ? [request.params as Record<string, unknown>]
+      : []
+  ))
+}
+
+async function waitForInferenceCalls(connection: OmpChildConnection, expected: number): Promise<void> {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    const result = await invokeTool(connection, 'signal-test.inference-calls', {})
+    if (result !== null && typeof result === 'object' && 'ok' in result && result.ok === true
+      && 'value' in result && result.value !== null && typeof result.value === 'object'
+      && 'calls' in result.value && result.value.calls === expected) return
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  throw new Error(`signal inference call count ${expected} timed out`)
+}
+
+interface EvolutionDatabaseState {
+  readonly receipts: Array<Record<string, unknown>>
+  readonly signals: Array<Record<string, unknown>>
+  readonly aggregates: Array<Record<string, unknown>>
+  readonly proposals: Array<Record<string, unknown>>
+  readonly evidence: Array<Record<string, unknown>>
+  readonly diagnostics: Array<Record<string, unknown>>
+  readonly transitions: Array<Record<string, unknown>>
+}
+
+function evolutionDatabaseState(path: string): EvolutionDatabaseState {
+  const database = new DatabaseSync(path, { readOnly: true })
+  try {
+    return {
+      receipts: database.prepare('SELECT delivery_id, session_id, turn_id FROM evolution_signal_receipts ORDER BY delivery_id').all(),
+      signals: database.prepare('SELECT delivery_id, turn_id, source FROM evolution_signals ORDER BY delivery_id').all(),
+      aggregates: database.prepare('SELECT occurrence_count, deterministic_occurrence_count, distinct_turns, distinct_sessions, promotion_status, proposal_id FROM evolution_signal_aggregates').all(),
+      proposals: database.prepare('SELECT id, kind, scope, status, current_revision FROM evolution_proposals ORDER BY id').all(),
+      evidence: database.prepare('SELECT proposal_id, source_id FROM evolution_evidence ORDER BY source_id').all(),
+      diagnostics: database.prepare('SELECT code, delivery_id, pattern_key FROM evolution_signal_diagnostics ORDER BY code, delivery_id').all(),
+      transitions: database.prepare('SELECT proposal_id, from_status, to_status FROM evolution_transitions ORDER BY created_at, id').all(),
+    }
+  } finally {
+    database.close()
+  }
+}
+
+async function waitForEvolutionState(
+  path: string,
+  predicate: (state: EvolutionDatabaseState) => boolean,
+): Promise<EvolutionDatabaseState> {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    const state = evolutionDatabaseState(path)
+    if (predicate(state)) return state
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  throw new Error('Evolution database state timed out')
+}
+
+async function completeOmpTurn(
+  extension: MountedOmpExtension,
+  ordinal: number,
+  outcome: 'completed' | 'failed' | 'cancelled',
+  commit = true,
+): Promise<void> {
+  await extension.handlers.get('before_agent_start')!({
+    type: 'before_agent_start', prompt: `Read missing fixture ${ordinal}.`, systemPrompt: [],
+  }, extension.context)
+  const timestamp = Date.now()
+  await extension.handlers.get('turn_start')!({
+    type: 'turn_start', turnIndex: ordinal, timestamp,
+  }, extension.context)
+  await extension.handlers.get('tool_execution_end')!({
+    type: 'tool_execution_end',
+    toolCallId: `native-read-${ordinal}`,
+    toolName: 'read',
+    result: { code: 'ENOENT', message: 'Missing fixture.' },
+    isError: true,
+  }, extension.context)
+  if (!commit) return
+  await extension.handlers.get('turn_end')!({
+    type: 'turn_end',
+    turnIndex: ordinal,
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'The fixture read failed.' }],
+      stopReason: outcome === 'completed' ? 'stop' : outcome === 'failed' ? 'error' : 'aborted',
+      timestamp: timestamp + 1,
+    },
+    toolResults: [],
+  }, extension.context)
 }
 
 afterEach(async () => {
@@ -315,13 +508,14 @@ async function writeEvolutionSignalPreset(root: string): Promise<void> {
     '  apply(ctx) {',
     '    ctx.provide(\'doppelgangerInference\', createStructuredInference({',
     '      async infer(request) {',
-    '        calls += 1',
     '        const material = JSON.parse(request.input).committedTurn',
+    '        setImmediate(() => { calls += 1 })',
+    '        const errorCode = material.toolOutcomes[0]?.errorCode ?? \'OMP_TOOL_FAILED\'',
     '        return { value: { hypotheses: [{',
-    "          kind: 'capability', scope: 'global', patternKey: 'tool.read.failed.enoent',",
+    "          kind: 'capability', scope: 'global', patternKey: `tool.read.failed.${errorCode.toLowerCase()}`,",
     "          title: 'Improve repeated read failure handling',",
     "          rationale: 'Independent committed turns repeatedly encounter the same read failure.',",
-    "          summary: 'The read tool repeatedly failed with ENOENT.',",
+    "          summary: 'The read tool repeatedly failed with the same structured error.',",
     "          tags: ['capability', 'tool-failure', 'read'], severity: 'medium', reuseValue: 'medium',",
     '          provenance: [material.deliveryId, material.turnId],',
     '        }] } }',
@@ -358,7 +552,7 @@ async function writeEvolutionSignalPreset(root: string): Promise<void> {
 }
 
 async function invokeEvolution(
-  peer: FramedJsonRpcPeer,
+  peer: RpcRequester,
   name: string,
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
@@ -935,10 +1129,10 @@ describe('Node OMP runtime child', () => {
     const harnesses = await Promise.all([childHarness(), childHarness(), childHarness()])
     const sessionIds = ['omp-signal-session-one', 'omp-signal-session-two', 'omp-signal-session-three']
     try {
-      await Promise.all(harnesses.map((harness, index) => harness.peer.request(
-        'session.activate',
-        activation(root, [], 'actor-one', sessionIds[index]!),
-      )))
+      // Initialize the shared schema before exercising concurrent signal delivery.
+      for (const [index, harness] of harnesses.entries()) {
+        await harness.peer.request('session.activate', activation(root, [], 'actor-one', sessionIds[index]!))
+      }
       await Promise.all(harnesses.map(async (harness, index) => {
         const sessionId = sessionIds[index]!
         const turnId = `${sessionId}:turn-one`
@@ -1011,6 +1205,182 @@ describe('Node OMP runtime child', () => {
     }
     expect(harnesses.map(harness => harness.child.exitCode)).toEqual([0, 0, 0])
   }, 20_000)
+
+  it('records distinct Evolution turns across fresh bindings for one resumed OMP session without duplicating replayed evidence', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-resumed-omp-'))
+    temporaryRoots.push(root)
+    const home = join(root, 'home')
+    const workspace = join(root, 'workspace')
+    const preset = join(home, '.runtime-presets', 'evolution-resumed-session')
+    await Promise.all([
+      mkdir(preset, { recursive: true }),
+      mkdir(join(workspace, '.git'), { recursive: true }),
+    ])
+    await writeEvolutionSignalPreset(preset)
+    await writeFile(join(home, 'config.yaml'), 'version: 1\ndefaultRuntimePreset: evolution-resumed-session\n')
+    const databasePath = join(preset, 'home', 'storage', 'evolution.sqlite')
+    const factory = new RecordingNodeChildFactory()
+    const sessionId = 'omp-resumed-signal-session'
+    const completed: CommittedLifecycleEvent[] = []
+    let extension: MountedOmpExtension | undefined
+    const mounted: MountedOmpExtension[] = []
+
+    const startBinding = async () => {
+      extension = mountedOmpExtension(workspace, sessionId, createDoppelgangerOmpExtension({
+        home,
+        actorId: 'actor-one',
+        childFactory: factory,
+        watch: false,
+      }))
+      mounted.push(extension)
+      await extension.handlers.get('session_start')!({ type: 'session_start' }, extension.context)
+      return factory.connections.at(-1)!
+    }
+    const stopBinding = async (connection: RecordedChildConnection) => {
+      await extension!.handlers.get('session_shutdown')!({ type: 'session_shutdown' }, extension!.context)
+      await timeout(connection.disposed, 'resumed OMP child disposal')
+      expect(connection.processId).toEqual(expect.any(Number))
+    }
+    const collectCommitted = (connection: RecordedChildConnection): CommittedLifecycleEvent => {
+      const committed = published(connection, 'turn-committed').at(-1)
+      if (committed === undefined
+        || typeof committed.deliveryId !== 'string'
+        || typeof committed.sessionId !== 'string'
+        || typeof committed.turnId !== 'string') {
+        throw new Error('OMP extension did not publish a valid committed turn')
+      }
+      const event = committed as CommittedLifecycleEvent
+      completed.push(event)
+      return event
+    }
+
+    try {
+      const first = await startBinding()
+      await completeOmpTurn(extension!, 1, 'completed')
+      const firstCommitted = collectCommitted(first)
+      const afterFirst = await waitForEvolutionState(databasePath, state => (
+        state.receipts.length === 1 && state.signals.length === 1
+      ))
+      expect(afterFirst.receipts).toEqual([expect.objectContaining({
+        delivery_id: firstCommitted.deliveryId,
+        session_id: sessionId,
+        turn_id: firstCommitted.turnId,
+      })])
+      expect(afterFirst.signals).toEqual([expect.objectContaining({
+        delivery_id: firstCommitted.deliveryId,
+        turn_id: firstCommitted.turnId,
+        source: 'deterministic',
+      })])
+      expect(afterFirst.aggregates).toEqual([expect.objectContaining({
+        occurrence_count: 1,
+        deterministic_occurrence_count: 1,
+        distinct_turns: 1,
+        distinct_sessions: 1,
+        promotion_status: 'pending',
+        proposal_id: null,
+      })])
+      expect(afterFirst.proposals).toEqual([])
+
+      await expect(first.request('event.publish', structuredClone(firstCommitted))).resolves.toBeNull()
+      await waitForInferenceCalls(first, 2)
+      expect(evolutionDatabaseState(databasePath)).toEqual(afterFirst)
+      await completeOmpTurn(extension!, 2, 'failed')
+      await completeOmpTurn(extension!, 3, 'cancelled')
+      await completeOmpTurn(extension!, 4, 'completed', false)
+      await stopBinding(first)
+      expect(evolutionDatabaseState(databasePath)).toEqual(afterFirst)
+
+      const second = await startBinding()
+      await expect(second.request('event.publish', structuredClone(firstCommitted))).resolves.toBeNull()
+      await waitForInferenceCalls(second, 1)
+      expect(evolutionDatabaseState(databasePath)).toEqual(afterFirst)
+      await completeOmpTurn(extension!, 1, 'completed')
+      const secondCommitted = collectCommitted(second)
+      const afterSecond = await waitForEvolutionState(databasePath, state => (
+        state.receipts.length === 2 && state.signals.length === 2
+      ))
+      expect(afterSecond.receipts.map(row => row.delivery_id).sort())
+        .toEqual([firstCommitted.deliveryId, secondCommitted.deliveryId].sort())
+      expect(afterSecond.signals.map(row => row.delivery_id).sort())
+        .toEqual([firstCommitted.deliveryId, secondCommitted.deliveryId].sort())
+      expect(afterSecond.aggregates).toEqual([expect.objectContaining({
+        occurrence_count: 2,
+        deterministic_occurrence_count: 2,
+        distinct_turns: 2,
+        distinct_sessions: 1,
+        promotion_status: 'pending',
+        proposal_id: null,
+      })])
+      expect(afterSecond.proposals).toEqual([])
+      expect(afterSecond.evidence).toEqual([])
+      expect(afterSecond.transitions).toEqual([])
+      await stopBinding(second)
+
+      const third = await startBinding()
+      await completeOmpTurn(extension!, 1, 'completed')
+      collectCommitted(third)
+      const finalState = await waitForEvolutionState(databasePath, state => (
+        state.receipts.length === 3
+        && state.signals.length === 3
+        && state.proposals.length === 1
+        && state.evidence.length === 3
+        && state.transitions.length === 1
+        && state.aggregates.some(row => row.promotion_status === 'promoted')
+      ))
+
+      const deliveryIds = completed.map(event => event.deliveryId)
+      const turnIds = completed.map(event => event.turnId)
+      expect(completed).toHaveLength(3)
+      expect(new Set(deliveryIds).size).toBe(3)
+      expect(new Set(turnIds).size).toBe(3)
+      expect(completed.map(event => event.sessionId)).toEqual([sessionId, sessionId, sessionId])
+      expect(finalState.receipts.map(row => row.delivery_id).sort()).toEqual([...deliveryIds].sort())
+      expect(finalState.receipts.map(row => row.turn_id).sort()).toEqual([...turnIds].sort())
+      expect(finalState.signals.map(row => row.delivery_id).sort()).toEqual([...deliveryIds].sort())
+      expect(finalState.aggregates).toEqual([expect.objectContaining({
+        occurrence_count: 3,
+        deterministic_occurrence_count: 3,
+        distinct_turns: 3,
+        distinct_sessions: 1,
+        promotion_status: 'promoted',
+        proposal_id: expect.any(String),
+      })])
+      expect(finalState.proposals).toEqual([expect.objectContaining({
+        kind: 'capability', scope: 'global', status: 'proposed', current_revision: 1,
+      })])
+      expect(finalState.evidence.map(row => row.source_id).sort())
+        .toEqual(deliveryIds.map(deliveryId => `lifecycle:${deliveryId}`).sort())
+      expect(finalState.transitions).toEqual([expect.objectContaining({
+        from_status: null, to_status: 'proposed',
+      })])
+      expect(finalState.diagnostics).toEqual([])
+
+      const listed = await invokeEvolution(third, 'evolution.list', {})
+      expect(listed.proposals).toEqual([expect.objectContaining({
+        kind: 'capability', scope: 'global', status: 'proposed', revision: 1,
+      })])
+      const proposals = listed.proposals
+      if (!Array.isArray(proposals) || proposals.length !== 1
+        || proposals[0] === null
+        || typeof proposals[0] !== 'object'
+        || !('id' in proposals[0])
+        || typeof proposals[0].id !== 'string') {
+        throw new Error('Evolution did not list exactly one proposal')
+      }
+      const inspected = await invokeEvolution(third, 'evolution.inspect', { id: proposals[0].id })
+      expect(inspected).toMatchObject({
+        proposal: { id: proposals[0].id, status: 'proposed', history: [{ toStatus: 'proposed' }] },
+      })
+      expect(inspected.proposal).not.toHaveProperty('researchQuestion')
+      expect(inspected.proposal).not.toHaveProperty('planReference')
+      expect(inspected.proposal).not.toHaveProperty('implementationReference')
+      expect(inspected.proposal).not.toHaveProperty('reviewSummary')
+      expect(mounted.flatMap(candidate => candidate.errors)).toEqual([])
+      await stopBinding(third)
+    } finally {
+      await Promise.all(factory.connections.map(connection => connection.dispose()))
+    }
+  }, 30_000)
 
   it('keeps a Persona proposal inert until review and completes it only after separately confirmed activation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'doppelganger-persona-evolution-vertical-'))

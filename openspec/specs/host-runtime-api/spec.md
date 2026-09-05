@@ -64,13 +64,13 @@ The shared Runtime Host bridge, binding, capability profile, requests, tool-cata
 - **THEN** it mounts the separate provider in explicit `unbound` state while the shared Runtime Host API remains unchanged
 
 ### Requirement: Correlated context resolution
-Each context request SHALL carry a non-empty adapter-minted request identity, current principal input, optional stable turn identity, and non-negative token budget. The bridge SHALL return the existing authority-preserving assembled context and SHALL NOT receive or mutate native prompt, message, or provider objects.
+Each context request SHALL carry a non-empty adapter-minted request identity, current principal input, optional stable turn identity, and non-negative token budget. The bridge SHALL return authority-separated assembled context with deterministic accepted and omitted provenance and SHALL NOT receive or mutate native prompt, message, or provider objects.
 
 #### Scenario: Host resolves every model request
 - **ID**: `host.runtime.api.host-resolves-every-model-request`
 - **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::returns authority-separated context through the shared bridge`
 - **WHEN** a host advertising per-request context performs multiple model requests in one turn
-- **THEN** each request has its own request ID and resolves the current registered providers under the supplied turn identity and budget
+- **THEN** each request has its own request ID and receives the current authority-preserving assembly under the supplied turn identity and budget
 
 #### Scenario: Context protocol is absent
 - **ID**: `host.runtime.api.context-protocol-is-absent`
@@ -86,12 +86,6 @@ The bridge SHALL expose a deterministic immutable tool-catalog snapshot containi
 - **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::commits deterministic immutable snapshots and retains unchanged tool revisions`
 - **WHEN** the adapter requests the current tool catalog
 - **THEN** it receives one internally consistent revision and descriptors that remain immutable after later registry mutations
-
-#### Scenario: Tool set changes atomically
-- **ID**: `host.runtime.api.tool-set-changes-atomically`
-- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::replaces complete owner sets atomically and preserves the old set on validation failure`
-- **WHEN** a plugin commits a valid owned-set replacement
-- **THEN** the bridge calls `toolCatalogChanged` exactly once after the complete new set becomes current and no observer sees a partially replaced set
 
 ### Requirement: Exact correlated tool invocation
 A tool invocation SHALL carry a non-empty call ID, optional turn ID, canonical name, exact projected tool revision, JSON-compatible input, and optional protected approval grant. The bridge SHALL invoke only the current matching descriptor and SHALL reject a stale or mismatched revision before calling any handler.
@@ -184,13 +178,33 @@ A host adapter MAY install additional runtime-owned Cordis plugins that provide 
 - **THEN** `host-omp` validates and routes it over the existing per-session framed RPC rather than allowing the provider to open another connection
 
 ### Requirement: Every adapter passes common conformance
-Before a host adapter is supported, it SHALL pass the same transport-independent conformance suite for two-session isolation, empty context and tools, closed capability validation, atomic catalog replacement, stale tool revision, approval replay, cancellation/completion races, undeclared lifecycle rejection, actor-provider absence/unbound/bound independence, disposal during active calls, and late callbacks after binding replacement.
+Before a host adapter is supported, it SHALL pass the same transport-independent conformance suite for two-session isolation, empty context and tools, closed capability validation, atomic catalog replacement, stale tool revision, approval replay, cancellation/completion races, undeclared lifecycle rejection, independence of the Actor Identity states supported by that adapter, disposal during active calls, and late callbacks after binding replacement.
+True Actor Identity provider absence SHALL remain independently verified at the common protocol boundary. OMP SHALL verify explicit unbound and bound states through its real transport because every OMP activation installs the provider; this SHALL NOT introduce a production absence switch or substitute a direct bridge for OMP evidence.
+A transported adapter SHALL satisfy those cases through its actual adapter entrypoints, request/response mapping and owned transport; substituting a direct underlying bridge SHALL not constitute adapter conformance. Fixture controls SHALL remain outside production contracts and SHALL wait for observable completion rather than fixed sleeps. Direct bridge semantics remain independently covered without being labelled transported-adapter proof.
 
 #### Scenario: New direct adapter claims support
 - **ID**: `host.runtime.api.new-direct-adapter-claims-support`
 - **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
 - **WHEN** a direct in-process adapter implements the shared Runtime Host API
-- **THEN** it passes the same observable scenarios as a transported adapter without test exceptions based on process topology
+- **THEN** it passes the same observable scenarios as a transported adapter with explicit protocol-level evidence for provider absence and real transported evidence for every state the transported adapter supports
+
+#### Scenario: Transported catalog is replaced during use
+- **ID**: `host.runtime.api.conformance.transported-catalog`
+- **EVIDENCE**: `packages/host-omp/tests/runtime-host-conformance.spec.ts::preserves catalog and stale-revision semantics through the real OMP adapter`
+- **WHEN** the common conformance fixture replaces a tool set through the actual OMP child and catalog path
+- **THEN** the adapter exposes the current atomic snapshot and rejects retained stale descriptors through the real invocation mapping
+
+#### Scenario: Transported approval grant is replayed
+- **ID**: `host.runtime.api.conformance.transported-approval`
+- **EVIDENCE**: `packages/host-omp/tests/runtime-host-conformance.spec.ts::enforces one-shot approval through the real OMP adapter`
+- **WHEN** the common conformance fixture repeats a protected grant through the actual OMP invocation path
+- **THEN** exactly the authorized first invocation reaches the handler and the replay fails through the transported result contract
+
+#### Scenario: Transported active call is cancelled and disposed
+- **ID**: `host.runtime.api.conformance.transported-call-lifecycle`
+- **EVIDENCE**: `packages/host-omp/tests/runtime-host-conformance.spec.ts::settles cancellation and disposal through the real OMP adapter`
+- **WHEN** the common conformance fixture cancels or disposes a held active call through the actual OMP adapter
+- **THEN** the call settles with the correct correlated cancellation or disposal outcome and late completion cannot reattach its retired binding
 
 ### Requirement: Common capability promotion requires two-host semantic proof
 A host-specific service or event SHALL enter the versioned common Runtime Host API only after at least two implemented host adapters demonstrate equivalent timing and commit boundary, operation ownership and authority, applicable correlation identities, success/failure/partial/cancellation/retry/replay semantics, ordering and stale-callback behavior, and resource rollback and disposal. Similar native names, approximately matching payloads, or a speculative future adapter SHALL be insufficient.
@@ -215,3 +229,32 @@ Bridge detachment SHALL be idempotent, prevent new requests, abort active calls,
 - **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::commits deterministic immutable snapshots and retains unchanged tool revisions`
 - **WHEN** Runtime Session disposal begins while portable tool calls are active
 - **THEN** new calls fail unavailable, active signals abort, cleanup attempts every owned resource, and no late result mutates a successor binding
+
+### Requirement: Context resolution preserves authority for adapters
+The Runtime Host bridge SHALL return immutable context projections that keep instruction-authority and data-authority content separate under one deterministic ordering and token budget. An adapter SHALL NOT need to parse delimiters or infer authority from flattened text.
+
+#### Scenario: Runtime resolves mixed-authority context
+- **ID**: `host.runtime.api.context-resolution-preserves-authority`
+- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::returns authority-separated context through the shared bridge`
+- **WHEN** active providers contribute both instructions and untrusted data
+- **THEN** the bridge exposes each accepted contribution and authority-specific rendered content without promoting data into instructions
+
+### Requirement: Owner removal terminates removed tool implementations
+The shared bridge SHALL preserve the tool registry's owner-scoped call lifecycle. When an owned tool definition is removed or revised, calls executing that exact removed implementation SHALL be aborted and SHALL NOT return a successful result as though the definition remained current.
+
+#### Scenario: Plugin reload removes an active handler
+- **ID**: `host.runtime.api.reload-removes-active-handler`
+- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::retains active calls only for unchanged definitions during owner replacement`
+- **WHEN** a valid plugin reload removes a tool while one call is active
+- **THEN** the call settles with the specified unavailable or cancelled result, the new catalog excludes the tool, and later stale closures cannot dispatch it
+
+### Requirement: Tool set changes atomically
+A valid owned-set replacement SHALL commit one complete immutable catalog revision. Notification failure SHALL not roll back or reject the committed mutation, and calls owned by definitions removed or revised by that replacement SHALL follow owner-scoped cancellation semantics. The bridge SHALL call `toolCatalogChanged` exactly once after the complete new set becomes current, and no observer SHALL see a partially replaced set.
+
+#### Scenario: Tool set changes atomically
+- **ID**: `host.runtime.api.tool-set-changes-atomically`
+- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::contains catalog observer failure after an atomic commit`
+- **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::replaces complete owner sets atomically and preserves the old set on validation failure`
+- **WHEN** a plugin commits a valid owned-set replacement and an observer fails
+- **THEN** the new set remains current, the mutation succeeds, independent observers may continue, and removed active implementations cannot report successful current completion
+

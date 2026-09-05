@@ -169,6 +169,34 @@ describe('Evolution protocol', () => {
     await context.fiber.dispose()
   })
 
+  it('selects expired snoozes without mutating stored proposals or delivery state', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-expired-read-only-'))
+    roots.push(home)
+    let now = new Date('2026-09-01T00:00:00.000Z')
+    const context = await base(home)
+    await context.plugin(EvolutionService, { now: () => now, id: () => crypto.randomUUID() })
+    await context.plugin(EvolutionProtocolPlugin)
+    const proposal = await context.doppelgangerEvolution.propose({
+      operationId: 'expired-read-propose', kind: 'capability', scope: 'global',
+      dedupeKey: 'capability.expired-read', title: 'Expired snooze search',
+      rationale: 'A relevant proposal should be selected after its deadline without a write.', tags: ['search'],
+    })
+    const snoozed = await context.doppelgangerEvolution.snooze({
+      operationId: 'expired-read-snooze', id: proposal.id, expectedRevision: proposal.revision,
+      until: '2026-09-02T00:00:00.000Z', reason: 'Wait until the deadline.',
+    })
+    now = new Date('2026-09-03T00:00:00.000Z')
+    const resolved = await context.doppelgangerContext.resolve({
+      turn: { input: 'expired snooze search' }, tokenBudget: 1000,
+    })
+    expect(resolved.contributions.map(item => item.source)).toContain(`evolution.reminder.${proposal.id}`)
+    const inspected = await context.doppelgangerEvolution.inspect(proposal.id)
+    expect(inspected.proposal).toEqual(snoozed)
+    expect(inspected.proposal.status).toBe('snoozed')
+    expect(inspected.proposal.reminders).toEqual([])
+    await context.fiber.dispose()
+  })
+
   it('captures deterministic committed evidence by default and deduplicates lifecycle retries', async () => {
     const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-signal-default-'))
     roots.push(home)
@@ -222,6 +250,67 @@ describe('Evolution protocol', () => {
       'lifecycle:turn-delivery-2',
     ])
     await context.fiber.dispose()
+  })
+
+  it('persists and promotes deterministic lifecycle evidence when structured inference fails', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doppelganger-evolution-inference-fallback-'))
+    roots.push(home)
+    const context = await base(home)
+    let inferenceCalls = 0
+    try {
+      await context.plugin({
+        provide: STRUCTURED_INFERENCE_SERVICE,
+        apply(ctx) {
+          ctx.provide(STRUCTURED_INFERENCE_SERVICE, createStructuredInference({
+            async infer() {
+              inferenceCalls += 1
+              throw new Error('provider failure is not lifecycle failure')
+            },
+          }))
+        },
+      })
+      await context.plugin(EvolutionPlugin, { signalInferenceEnabled: true })
+      for (let index = 0; index < 3; index += 1) {
+        await publishLifecycleEvent(context, {
+          protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+          type: 'tool-completed',
+          deliveryId: `fallback-tool-${index}`,
+          sessionId: 'session-a',
+          turnId: `fallback-turn-${index}`,
+          callId: `fallback-call-${index}`,
+          name: 'read',
+          outcome: 'failed',
+          error: { code: 'ENOENT', message: 'Missing file.' },
+          timestamp: Date.now(),
+        })
+        await publishLifecycleEvent(context, {
+          protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+          type: 'turn-committed',
+          deliveryId: `fallback-delivery-${index}`,
+          sessionId: 'session-a',
+          turnId: `fallback-turn-${index}`,
+          outcome: 'completed',
+          principalInput: serializeLifecycleValue('Read the missing file.'),
+          assistantOutput: serializeLifecycleValue('The read operation failed.'),
+          timestamp: Date.now(),
+        })
+      }
+      await vi.waitFor(async () => {
+        expect((await context.doppelgangerEvolution.list()).proposals).toHaveLength(1)
+      })
+      const result = await context.doppelgangerEvolution.list()
+      expect(inferenceCalls).toBe(3)
+      expect(result.proposals[0]).toMatchObject({ kind: 'capability', status: 'proposed', revision: 1 })
+      expect(result.proposals[0]!.evidence.map(item => item.sourceId).sort()).toEqual([
+        'lifecycle:fallback-delivery-0',
+        'lifecycle:fallback-delivery-1',
+        'lifecycle:fallback-delivery-2',
+      ])
+      expect(result.diagnostics).toContainEqual(expect.objectContaining({ code: 'INFERENCE_PROVIDER_FAILURE' }))
+      expect(context.doppelgangerTools.snapshot().tools).toHaveLength(7)
+    } finally {
+      await context.fiber.dispose()
+    }
   })
 
   it('preserves proposal-only behavior when proactive capture is disabled', async () => {

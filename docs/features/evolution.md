@@ -76,7 +76,7 @@ Kinds and authoritative scopes:
 
 The common initial state is `proposed`. Persona proposals may advance to `reviewing`; capability proposals may advance through `researching`, `options-ready`, `selected`, `planned`, and `implementing`. Both kinds may become `done`, `snoozed`, or terminal `rejected`. Snooze retains the prior forward state and a future deadline; expiry or an explicit exact-revision resume restores that state. Done and rejected proposals do not reopen implicitly.
 
-Every mutation uses a stable `operationId`. An exact retry replays its prior result; reusing the ID for different arguments fails. Revision-sensitive mutations require the current exact revision. Scope is immutable: correct a misclassification by rejecting the old proposal and creating a distinct linked opportunity in the intended scope.
+Every mutation uses a stable `operationId`. An exact retry replays its prior result; reusing the ID for different arguments fails. Revision-sensitive mutations require the current exact revision. A successful unchanged command (including an active deduplication or duplicate reminder delivery) stores a receipt without creating a revision, history, evidence, or delivery row. Scope is immutable: correct a misclassification by rejecting the old proposal and creating a distinct linked opportunity in the intended scope.
 
 ## Storage
 
@@ -88,15 +88,16 @@ Project capability proposals are Git-visible canonical documents at:
 <workspaceRoot>/.doppelganger/evolution/opportunities/<proposal-id>.yaml
 ```
 
-Each direct `.yaml` child is one version-1 document with exactly `version`, `proposal`, and `operations`. `proposal` contains the complete current project capability proposal and its immutable history; `operations` stores command digests and exact replay results. The filename is the opaque proposal ID, not user-authored text. Rendering uses deterministic sorted YAML keys.
+Each direct `.yaml` child is one version-1 document with exactly `version`, `proposal`, and `operations`. `proposal` contains the complete current project capability proposal and its immutable history; `operations` stores command digests and exact replay results. Unchanged successful operations are receipt-only and do not rewrite proposal history. The filename is the opaque proposal ID, not user-authored text. Rendering uses deterministic sorted YAML keys.
 
-Project reads validate files independently. A malformed, identity-mismatched, or symlinked document produces a per-file diagnostic without hiding unrelated healthy proposals, and Evolution never rewrites invalid user-authored YAML automatically. Writes use a bounded adjacent interprocess lock, reject unsafe paths and symlinks, recheck the expected revision, create an owner-only same-directory temporary file, fsync, and atomically rename it. The directory is not created before the first project mutation.
-
+Project reads validate files independently and are strictly read-only: they never resume expired snoozes, insert receipts, acquire the project write lock, create directories, or rewrite YAML. A malformed, identity-mismatched, or symlinked document produces a per-file diagnostic without hiding unrelated healthy proposals, and Evolution never rewrites invalid user-authored YAML automatically. Writes use a bounded adjacent interprocess lock, reject unsafe paths and symlinks, recheck the expected revision, create an owner-only same-directory temporary file, fsync, and atomically rename it. The directory is not created before the first project mutation.
 Project YAML is suitable for version control but is not a secret store. Titles, rationales, tags, evidence, transition details, and operation receipts may be committed. Keep them bounded and non-sensitive.
 
 ## Proactive signal lifecycle
 
 When proactive capture is enabled, Evolution subscribes to the existing host-neutral `tool-completed`, `turn-committed`, and `session-disposed` events. Tool outcomes are held only in a bounded in-memory correlation map keyed by session and turn. A completed `turn-committed` event consumes correlated outcomes and enqueues bounded material. Failed or cancelled turns, orphaned tool outcomes, partial work, and disposal create no durable evidence. Duplicate committed delivery IDs are transactionally deduplicated. Lifecycle publication returns before extraction, inference, storage, promotion, or retention work completes.
+
+Evolution treats provenance identifiers as opaque host-neutral values. It cannot distinguish a genuine replay from an adapter incorrectly assigning an old delivery ID to new work; both match the same receipt. Resume-safe identity generation belongs to the host adapter, not the Evolution ledger. A receipt confirms completed processing, not necessarily a detected signal; verify occurrences, aggregates, and proposal state separately. Correcting an adapter prevents future collisions but does not reconstruct signal material already discarded as a duplicate.
 
 The deterministic extractor recognizes structured failed-tool classes, explicit English or Russian principal corrections, and explicit English or Russian assistant limitation markers. It emits fixed bounded hypotheses rather than storing full prompts. Credential-shaped material is rejected before persistence; a tool error with a sensitive message may retain only its non-sensitive structural fields.
 
@@ -128,9 +129,9 @@ Schemas stay within the supported host-portable JSON Schema subset and reject un
 
 Evolution contributes one bounded instruction-authority policy. It tells the active assistant to evaluate completed work and dialogue for stable Persona improvements and material reusable capability gaps, distinguish Persona qualities from user facts and preferences, prefer existing capabilities, complete and verify the primary task first, present at most one concise opportunity afterward, require explicit consent before review or research, and prefer portable Doppelganger mechanisms when their seams fit. It explicitly marks automatically discovered proposals as inert, consent-gated, and unable to interrupt primary work.
 
-A context resolution may additionally include at most one data-authority reminder candidate. Selection is read-only and uses deterministic lexical overlap with direct principal input across eligible global and current-project proposals. Done, rejected, currently snoozed, irrelevant, and cooled-down proposals are excluded. Ranking uses overlap, oldest confirmed delivery, creation time, then proposal ID.
+A context resolution may additionally include at most one data-authority reminder candidate. Selection is read-only and uses deterministic lexical overlap with direct principal input across eligible global and current-project proposals. Done, rejected, currently snoozed, irrelevant, and cooled-down proposals are excluded; an expired snooze is time-eligible without changing its persisted `snoozed` status, revision, deadline, or resume status. Ranking uses overlap, oldest confirmed delivery, creation time, then proposal ID.
 
-The default cooldown is seven days from confirmed delivery. Selection alone does not advance it. After the assistant actually presents the candidate, the workflow calls `evolution.reminder.record`; omitting that record deliberately leaves the proposal due. Snooze is a user decision; cooldown is delivery rate limiting.
+The default cooldown is seven days from confirmed delivery. Selection alone does not advance it. After the assistant actually presents the candidate, the workflow calls `evolution.reminder.record`; omitting that record deliberately leaves the proposal due. Snooze is a user decision; cooldown is delivery rate limiting. An applicable explicit mutation owns targeted deadline resumption, validates the originally inspected revision, and commits resumption plus the requested mutation atomically; unrelated expired proposals are never swept.
 
 ## Consent and execution boundary
 

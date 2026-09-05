@@ -11,7 +11,7 @@ import {
   serializeLifecycleValue,
   type TurnCommittedEvent,
 } from '@doppelganger/doppelganger-protocols'
-import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
+import { InstanceSqliteService, type InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
 import {
   createMemoryCapturePlugin,
   type MemoryCandidateExtractor,
@@ -188,8 +188,8 @@ describe('optional memory capture', () => {
     })
     foreignId = foreign.id
     foreignRevisionId = foreign.revision.id
-    context.doppelgangerMemory.canonicalDatabase.prepare('UPDATE memory_records SET actor_id = ? WHERE id = ?')
-      .run('other-actor', foreign.id)
+    const database = (context.doppelgangerMemory as unknown as { database: InstanceSqliteDatabase }).database
+    database.prepare('UPDATE memory_records SET actor_id = ? WHERE id = ?').run('other-actor', foreign.id)
     await publishLifecycleEvent(context, committed('neighbor-candidate', '[fact:project.runtime.protocol] Runtime communication uses JSON frames.'))
     expect(requests).toEqual([expect.objectContaining({
       instanceId: 'aiden', actorId: 'local-user', scopeKind: 'project', projectId: 'project-one', kind: 'fact', limit: 4,

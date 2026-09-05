@@ -54,6 +54,7 @@ The runtime SHALL discover Runtime Presets from the ordered trust-aware roster r
 
 ### Requirement: Complete domain-neutral composition
 Each `runtime.cordis.yml` SHALL be a complete Cordis Loader entry tree, including an empty top-level list, and SHALL NOT depend on Persona, identity, memory, project, or persistence concepts supplied by the kernel.
+Roster health and Composition Runtime activation SHALL consume the same portable Loader structural rules for required nonblank entry IDs and plugin names, unique IDs, and recursively valid supplied group-entry arrays. Ordinary plugin configuration SHALL remain opaque. Protected runtime identities and layered patch target policy SHALL remain Composition Runtime responsibilities, and a healthy roster descriptor SHALL not promise successful plugin dependency activation.
 
 #### Scenario: Activate an arbitrary plugin tree
 - **ID**: `runtime.presets.activation.arbitrary-plugin-tree`
@@ -72,6 +73,18 @@ Each `runtime.cordis.yml` SHALL be a complete Cordis Loader entry tree, includin
 - **EVIDENCE**: `packages/runtime-presets/tests/runtime-presets.spec.ts::discovers healthy and broken occupied IDs deterministically`
 - **WHEN** `runtime.cordis.yml` contains a patch operation rather than a complete Loader entry list
 - **THEN** preset validation fails before a Runtime Session is returned
+
+#### Scenario: Malformed Loader shape reaches roster and activation
+- **ID**: `runtime.presets.validation.structural-parity`
+- **EVIDENCE**: `packages/composition-runtime/tests/patches.spec.ts::rejects the same malformed Loader structures as preset discovery`
+- **WHEN** a Loader tree with a missing ID, duplicate ID, or malformed supplied group-entry array is examined by roster discovery and activation
+- **THEN** both entrypoints reject the structure with source-labelled diagnostics before any plugin from that tree activates
+
+#### Scenario: Shared shape validation does not absorb feature configuration
+- **ID**: `runtime.presets.validation.opaque-config-preserved`
+- **EVIDENCE**: `packages/runtime-presets/tests/runtime-presets.spec.ts::validates Loader shape without interpreting ordinary plugin config`
+- **WHEN** a valid non-group plugin carries arbitrary JSON-compatible feature configuration
+- **THEN** roster structural validation leaves that configuration unchanged and does not require feature packages or runtime-protected policy
 
 ### Requirement: Runtime-owned user configuration
 `$DOPPELGANGER_HOME/config.yaml` SHALL be absent only before home initialization and, when present, SHALL contain only `version: 1` and optional `defaultRuntimePreset`; unknown or legacy Persona-instance fields SHALL be rejected.
@@ -116,19 +129,19 @@ A discovered `<project>/.doppelganger/manifest.yaml` SHALL be optional and, when
 - **THEN** manifest loading fails with a field-level diagnostic
 
 ### Requirement: Deterministic Runtime Preset selection
-Selection SHALL use the first present choice in this order: explicit host/session preset ID, project `runtimePreset`, user `defaultRuntimePreset`, deployment default. The standard roster SHALL use `standard` as its deployment default. A deployment that explicitly omits its default and supplies no higher-precedence choice SHALL leave Doppelganger inactive without failing the host. A present missing or broken winner SHALL fail visibly and SHALL NOT fall through.
+Selection SHALL evaluate the first present choice in this order: explicit host/session preset ID, project `runtimePreset`, user `defaultRuntimePreset`, deployment default. Documents below the winning precedence level SHALL NOT be loaded or validated for that selection attempt. A present document that can determine the winner SHALL remain strictly validated. A present missing or broken winner SHALL fail visibly and SHALL NOT fall through. The standard roster SHALL use `standard` as its deployment default. A deployment that explicitly omits its default and supplies no higher-precedence choice SHALL leave Doppelganger inactive without failing the host.
 
 #### Scenario: Explicit selection wins
 - **ID**: `runtime.presets.selection.explicit-wins`
-- **EVIDENCE**: `packages/runtime-presets/tests/runtime-presets.spec.ts::applies explicit, project, user, deployment, and inactive precedence`
-- **WHEN** explicit, project, user, and deployment selections all exist
-- **THEN** the explicit Runtime Preset is selected
+- **EVIDENCE**: `packages/runtime-presets/tests/runtime-presets.spec.ts::explicit selection ignores malformed lower-precedence documents`
+- **WHEN** an explicit valid Runtime Preset is supplied while project or user selection documents are malformed
+- **THEN** the explicit preset is selected without reading those lower-precedence documents
 
 #### Scenario: Project selection wins over defaults
 - **ID**: `runtime.presets.selection.project-over-user`
-- **EVIDENCE**: `packages/runtime-presets/tests/runtime-presets.spec.ts::applies explicit, project, user, deployment, and inactive precedence`
-- **WHEN** no explicit selection exists and project, user, and deployment selections exist
-- **THEN** the project Runtime Preset is selected
+- **EVIDENCE**: `packages/runtime-presets/tests/runtime-presets.spec.ts::project selection ignores malformed lower-precedence user configuration`
+- **WHEN** no explicit selection exists and a valid project selection exists while user configuration is malformed
+- **THEN** the project Runtime Preset is selected without reading the user default
 
 #### Scenario: User default wins over deployment default
 - **ID**: `runtime.presets.selection.user-over-deployment`
@@ -152,7 +165,7 @@ Selection SHALL use the first present choice in this order: explicit host/sessio
 - **ID**: `runtime.presets.selection.broken-winner-fails`
 - **EVIDENCE**: `packages/runtime-presets/tests/runtime-presets.spec.ts::does not fall through from a missing or broken winner`
 - **WHEN** the winning explicit, project, user, or deployment selection names an unknown or broken Runtime Preset
-- **THEN** activation fails visibly with available-preset and preset-health diagnostics rather than falling through to a lower-precedence choice
+- **THEN** selection fails with diagnostics for that winner rather than reading or selecting a lower-precedence choice
 
 ### Requirement: Plugin-owned configuration and state
 The Doppelganger kernel SHALL treat plugin row `config` values as opaque Loader input and SHALL NOT provide or persist plugin-specific settings, state directories, databases, credentials, scope partitions, or migration policy.
@@ -327,3 +340,19 @@ The runtime-presets package SHALL implement one roster domain model and expose i
 - **EVIDENCE**: `packages/runtime-presets/tests/plugin-and-standard.spec.ts::provides the same roster API and removes it with the plugin fiber`
 - **WHEN** an in-process host composes the runtime-presets plugin
 - **THEN** `ctx.doppelgangerRuntimePresets` provides the shared roster operations and disposes with its plugin scope
+
+### Requirement: Preset import health follows actual Node resolution
+A Runtime Preset SHALL be healthy only when every authored plugin import can resolve from the Loader path under supported Node ESM resolution. Bare-package validation SHALL honor package exports when present and SHALL also reject nonexistent package roots or deep targets when exports are absent.
+
+#### Scenario: Legacy package deep import is missing
+- **ID**: `runtime.presets.validation.missing-unexported-deep-import`
+- **EVIDENCE**: `packages/runtime-presets/tests/runtime-presets.spec.ts::marks nonexistent deep imports in packages without exports as broken`
+- **WHEN** a Loader entry names a deep path in a package without an exports map and that target does not exist
+- **THEN** discovery reports the preset as broken with an import-resolution diagnostic
+
+#### Scenario: Valid package import resolves outside process cwd
+- **ID**: `runtime.presets.validation.node-resolvable-bare-import`
+- **EVIDENCE**: `packages/runtime-presets/tests/runtime-presets.spec.ts::validates bare package targets with Node resolution independent of process cwd`
+- **WHEN** a Loader entry names an installed valid root or subpath export
+- **THEN** discovery accepts it using the same module-resolution basis used by activation rather than the caller's working directory
+

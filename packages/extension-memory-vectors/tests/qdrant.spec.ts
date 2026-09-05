@@ -100,6 +100,18 @@ runMemoryVectorBackendConformance('Qdrant fake', ({ dimensions }) => {
       expectedFailedCandidateClosures: 0,
     }
   },
+}, async () => {
+  const client = new FakeQdrant()
+  clients.push(client)
+  const index = await createQdrantMemoryVectorIndex({ url: 'https://qdrant.fake.test', dimensions: 3, generationId: 'generation.one', client })
+  await index.health()
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  let underlyingOperations = 0
+  client.delete = async (_name, request) => {
+    if ('filter' in (request as object)) { underlyingOperations += 1; entered.resolve(); await release.promise }
+  }
+  return { kind: 'cleanup-generation', async run() { try { const first = index.maintenance('cleanup-generation'); await entered.promise; const competing = await index.maintenance('cleanup-generation'); release.resolve(); return { first: await first, competing, underlyingOperations } } finally { release.resolve(); await index.close() } } }
 })
 
 describe('Qdrant vector index', () => {

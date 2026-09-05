@@ -155,7 +155,6 @@ export class EvolutionService extends Service {
 
   async list(request: EvolutionListRequest = {}): Promise<EvolutionListResult> {
     this.logger.debug('evolution.list.started')
-    await this.resumeExpiredSnoozes()
     const global = this.stores.global.list()
     const project = await this.projectSnapshot()
     const now = this.now()
@@ -175,7 +174,6 @@ export class EvolutionService extends Service {
   }
 
   async inspect(id: string): Promise<EvolutionInspectResult> {
-    await this.resumeExpiredSnoozes()
     const global = this.stores.global.inspect(id)
     if (global !== undefined) {
       return deepFreeze({
@@ -315,7 +313,6 @@ export class EvolutionService extends Service {
   }
 
   private async mutateExisting(command: Exclude<EvolutionMutationCommand, { readonly kind: 'propose' }>): Promise<EvolutionProposal> {
-    await this.resumeExpiredSnoozes()
     const id = command.request.id
     if (this.stores.global.inspect(id) !== undefined) return this.mutate('global', command)
     const project = await this.projectSnapshot()
@@ -331,22 +328,5 @@ export class EvolutionService extends Service {
       diagnostics: snapshot.diagnostics,
     })
   }
-
-  private async resumeExpiredSnoozes(): Promise<void> {
-    const now = this.now()
-    const global = this.stores.global.list()
-    const project = await this.projectSnapshot()
-    for (const proposal of [...global, ...project.proposals]) {
-      if (proposal.status !== 'snoozed' || proposal.snoozedUntil === undefined || Date.parse(proposal.snoozedUntil) > now.getTime()) continue
-      const command: EvolutionMutationCommand = {
-        kind: 'resume',
-        request: {
-          operationId: `resume:${proposal.id}:${proposal.revision}`,
-          id: proposal.id,
-          expectedRevision: proposal.revision,
-        },
-      }
-      await this.mutate(proposal.scope, command)
-    }
-  }
 }
+

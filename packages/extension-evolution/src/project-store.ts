@@ -11,7 +11,7 @@ import {
 import { basename, isAbsolute, join, normalize } from 'node:path'
 import { dump, load } from 'js-yaml'
 import {
-  applyMutation,
+  applyPersistedMutation,
   commandDigest,
   deepFreeze,
   EvolutionError,
@@ -315,7 +315,8 @@ export class ProjectEvolutionStore {
         return receipt.proposal
       }
       const current = snapshot.documents.map(item => item.document.proposal)
-      const next = applyMutation(current, command, context)
+      const mutation = applyPersistedMutation(current, command, context)
+      const next = mutation.proposal
       if (next.scope !== 'project') throw new EvolutionError('INVALID_SCOPE', 'project store received a global proposal')
       const previous = snapshot.documents.find(item => item.document.proposal.id === next.id)
       const operations = { ...(previous?.document.operations ?? {}), [commandId]: deepFreeze({ digest, proposal: next }) }

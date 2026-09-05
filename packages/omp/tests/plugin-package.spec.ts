@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createServer, type Server, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
-import { access, chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
@@ -952,7 +952,7 @@ describe('local OMP plugin package', () => {
       const extensionDirectory = join(delegatedWorkspace, '.omp', 'extensions')
       const projectDirectory = join(delegatedWorkspace, '.doppelganger')
       const presetDirectory = join(fixture.doppelgangerHome, '.runtime-presets', 'logging-test')
-      const logPath = join(fixture.root, 'project-local-runtime.jsonl')
+      const logTemplate = join(fixture.root, 'project-local-{runtimeActivationId}.jsonl')
       await Promise.all([
         mkdir(extensionDirectory, { recursive: true }),
         mkdir(projectDirectory, { recursive: true }),
@@ -969,11 +969,15 @@ describe('local OMP plugin package', () => {
           '      isolate:',
           '        doppelgangerLogging: session',
           '      config:',
-          `        path: ${JSON.stringify(logPath)}`,
+          `        pathTemplate: ${JSON.stringify(logTemplate)}`,
           '        level: info',
           '        maxBytes: 65536',
           '        maxFiles: 1',
           '        maximumPendingRecords: 16',
+          '        retention:',
+          '          maxAgeDays: 7',
+          '          maxTotalBytes: 536870912',
+          '          cleanupIntervalMs: 1000',
           '',
         ].join('\n')),
         writeFile(join(presetDirectory, 'producer.mjs'), [
@@ -988,6 +992,9 @@ describe('local OMP plugin package', () => {
 
       const run = await runLinkedOmp(fixture, undefined, delegatedWorkspace)
       const records = await eventually('project-local logging file', async () => {
+        const name = (await readdir(fixture.root)).find(name => /^project-local-[0-9a-f-]+\.jsonl$/u.test(name))
+        if (name === undefined) return
+        const logPath = join(fixture.root, name)
         const source = await readFile(logPath, 'utf8').catch(() => '')
         if (!source.endsWith('\n')) return
         const parsed = source.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
@@ -999,6 +1006,9 @@ describe('local OMP plugin package', () => {
         message: 'project local runtime log',
         runtimePresetId: 'logging-test',
       })
+      const registry = await stat(join(fixture.root, '.doppelganger-log-retention.sqlite'))
+      expect(registry.isFile()).toBe(true)
+      expect(records.every(record => typeof record.runtimeActivationId === 'string')).toBe(true)
       expect(activationRequest(run).params).toMatchObject({
         composition: { id: 'logging-test' },
         workspaceRoot: delegatedWorkspace,

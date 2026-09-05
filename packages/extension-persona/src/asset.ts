@@ -107,9 +107,11 @@ function emitReload(ctx: Context, event: PersonaAssetReloadEvent): void {
 export async function createPersonaAsset(ctx: Context, options: PersonaAssetOptions): Promise<PersonaAsset> {
   const filename = options.filename
   const kind = options.kind
+  const logger = ctx.logger('doppelganger-persona-asset')
   const readBytes = options.readBytes ?? readFile
   const url = pathToFileURL(await realpath(filename)).href
   let content = (await readCandidate(filename, kind, readBytes)).content
+  logger.info('persona.asset.loaded kind=%s', kind)
   let reload = Promise.resolve()
   let disposed = false
 
@@ -121,8 +123,10 @@ export async function createPersonaAsset(ctx: Context, options: PersonaAssetOpti
         if (disposed) return
         content = candidate.content
         emitReload(ctx, { url, outcome: 'success', revision: candidate.revision })
+        logger.info('persona.asset.reload.completed kind=%s', kind)
       } catch (cause) {
         if (disposed) return
+        logger.warn('persona.asset.reload.failed kind=%s reason=%s', kind, cause instanceof PersonaAssetReadError ? 'read' : cause instanceof Error ? cause.name : typeof cause)
         const revision = cause instanceof PersonaAssetReadError ? cause.revision : undefined
         if (options.onDiagnostic !== undefined) {
           const diagnostic = Object.freeze({

@@ -31,9 +31,9 @@ The workspace is layered around a small generic kernel:
 - `runtime-presets`, `extension-protocols`, and `extension-sqlite` are independent foundation packages;
 - `runtime-presets` exposes one pure Node roster API plus an optional Cordis service facade and ships the actor-neutral `standard` preset;
 - `extension-protocols` owns context, revisioned tools, approval/cancellation, lifecycle, independent Actor Identity, provider-neutral structured inference, the closed Runtime Host API, and its transport-independent adapter conformance suite;
-- `composition-runtime` owns generic Loader activation, protected runtime-owned plugin layering, patches, sessions, reload, and disposal;
+- `composition-runtime` owns generic Loader activation, protected runtime-owned plugin layering, patches, sessions, the default-silent session logging router, reload, and disposal;
 - `extension-inference-pi` is an optional leaf adapter from the structured-inference protocol to an explicitly configured Pi SDK provider/model snapshot; it depends only on `extension-protocols` and does not expose the host agent loop;
-- Persona, scoped Persona Authoring, memory, local embedding, vector backends, Dynamic Runtime Plugins, Evolution, structured-inference providers, CodeGraph, and MCP import are optional extension layers;
+- Persona, scoped Persona Authoring, memory, local embedding, vector backends, Dynamic Runtime Plugins, Evolution, structured-inference providers, CodeGraph, MCP import, and the independent file/Sentry logging exporters are optional extension layers;
 - Dynamic Runtime Plugins add an opt-in session-owned generated Cordis plugin workflow; generated code is trusted process code and never a kernel or host responsibility;
 - Evolution adds an opt-in actor-partitioned proposal ledger, lifecycle-driven bounded signal discovery, policy context, portable controls, and relevant cooled-down reminders without executor authority;
 - CodeGraph adds opt-in workspace-bound graph context through two portable tools and a bounded standalone-process adapter; it does not add a kernel service or host-specific route;
@@ -56,6 +56,7 @@ The generic runtime:
 - audits activation and reports source-labelled diagnostics;
 - serializes hot reload and rolls invalid generations back;
 - disposes owned fibers, effects, watchers, and roots deterministically;
+- installs one bounded session logging router before authored plugins while leaving every exporter-omitting composition destination-silent;
 - never writes normalized effective state back to authored files.
 
 The kernel does not interpret Persona, identity, traits, memory, actors, storage, project identity, context content, tool semantics, CodeGraph indexes, generated Package source or version state, embeddings, vectors, or concrete hosts.
@@ -64,7 +65,7 @@ The kernel does not interpret Persona, identity, traits, memory, actors, storage
 
 Every extension is a native Cordis plugin. Required services use `inject`; optional services enable controlled degradation; shared session services use matching Loader `isolate` realms. Duplicate providers in one realm fail rather than being selected by load order. Portable definitions do not branch on host identity. Provider substitution occurs by composing a different implementation of the same service, never by adding provider selection to the kernel or host bridge.
 
-Protocol and feature plugins are explicitly composed. Empty Runtime Presets and absent context, tool, lifecycle, Actor Identity, structured inference, Persona, memory, embedding, vector, Dynamic Runtime Plugin, Evolution, CodeGraph, or MCP services are valid. Runtime-owned host-specific plugins are typed, namespaced siblings of the shared bridge and reuse the adapter's one binding or transport; they never expose a raw host runtime or create a second native-host channel.
+Protocol and feature plugins are explicitly composed. Empty Runtime Presets and absent context, tool, lifecycle, Actor Identity, structured inference, Persona, memory, embedding, vector, Dynamic Runtime Plugin, Evolution, CodeGraph, MCP, or logging exporter services are valid. Runtime-owned host-specific plugins are typed, namespaced siblings of the shared bridge and reuse the adapter's one binding or transport; they never expose a raw host runtime or create a second native-host channel. Runtime logging remains process-local Composition Runtime infrastructure rather than a Runtime Host protocol; see [Runtime logging](../features/runtime-logging.md).
 
 ## Governing principle
 

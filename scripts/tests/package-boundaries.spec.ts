@@ -123,11 +123,20 @@ describe('package boundary checker', () => {
       '@doppelganger/doppelganger-extension-mcp',
       '@doppelganger/doppelganger-host-omp',
       '@doppelganger/doppelganger-inference-pi',
+      '@doppelganger/doppelganger-logging-file',
+      '@doppelganger/doppelganger-logging-sentry',
       '@doppelganger/doppelganger-persona',
       '@doppelganger/doppelganger-persona-authoring',
       '@doppelganger/doppelganger-protocols',
       '@doppelganger/doppelganger-runtime-presets',
     ])
+    expect(manifest.packages['@doppelganger/doppelganger-logging-file']?.dependencies).toEqual([
+      '@doppelganger/doppelganger-composition-runtime',
+    ])
+    expect(manifest.packages['@doppelganger/doppelganger-logging-sentry']?.dependencies).toEqual([
+      '@doppelganger/doppelganger-composition-runtime',
+    ])
+    expect(manifest.packages).not.toHaveProperty('@doppelganger/doppelganger-logging')
     expect(Object.keys(hostManifest.dependencies).filter(name => name.startsWith('@doppelganger/')).sort()).toEqual([
       '@doppelganger/doppelganger-composition-runtime',
       '@doppelganger/doppelganger-protocols',

@@ -24,9 +24,16 @@ export const ChromaVectorPlugin: Plugin<ChromaVectorPluginConfig> = {
   Config: ChromaVectorPluginConfigSchema as unknown as NonNullable<Plugin<ChromaVectorPluginConfig>['Config']>,
   provide: MEMORY_VECTOR_INDEX_SERVICE,
   async apply(ctx: Context, config: ChromaVectorPluginConfig) {
+    const logger = ctx.logger('doppelganger-memory-vectors-chroma')
+    logger.info('component.activation.started')
     const index = await createChromaMemoryVectorIndex(config)
     ctx.provide(MEMORY_VECTOR_INDEX_SERVICE, index)
-    ctx.effect(() => async () => { await index.close() }, 'doppelgangerMemoryVectors.chroma.close')
+    logger.info('component.active')
+    ctx.effect(() => async () => {
+      logger.info('component.disposal.started')
+      await index.close()
+      logger.info('component.disposal.completed')
+    }, 'doppelgangerMemoryVectors.chroma.close')
   },
 }
 

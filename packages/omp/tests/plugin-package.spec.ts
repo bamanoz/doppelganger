@@ -941,6 +941,73 @@ describe('local OMP plugin package', () => {
     }
   }, 45_000)
 
+  it('runs configured logging through real project-local OMP without host output', async () => {
+    const fixture = await createLinkedOmpFixture()
+    try {
+      await disableLinkedPluginForProjectDogfood(fixture)
+      const delegatedWorkspace = join(fixture.root, 'logging-delegated-workspace')
+      const extensionDirectory = join(delegatedWorkspace, '.omp', 'extensions')
+      const projectDirectory = join(delegatedWorkspace, '.doppelganger')
+      const presetDirectory = join(fixture.doppelgangerHome, '.runtime-presets', 'logging-test')
+      const logPath = join(fixture.root, 'project-local-runtime.jsonl')
+      await Promise.all([
+        mkdir(extensionDirectory, { recursive: true }),
+        mkdir(projectDirectory, { recursive: true }),
+        mkdir(presetDirectory, { recursive: true }),
+      ])
+      await Promise.all([
+        symlink(join(repositoryRoot, '.omp', 'extensions', 'doppelganger.ts'), join(extensionDirectory, 'doppelganger.ts')),
+        writeFile(join(projectDirectory, 'manifest.yaml'), 'version: 1\nruntimePreset: logging-test\n'),
+        writeFile(join(projectDirectory, 'runtime.cordis.patch.yml'), [
+          '- insert:',
+          '    - id: runtime-logs-file',
+          '      name: "@doppelganger/doppelganger-logging-file/loader"',
+          '      inject: [doppelgangerLogging]',
+          '      isolate:',
+          '        doppelgangerLogging: session',
+          '      config:',
+          `        path: ${JSON.stringify(logPath)}`,
+          '        level: info',
+          '        maxBytes: 65536',
+          '        maxFiles: 1',
+          '        maximumPendingRecords: 16',
+          '',
+        ].join('\n')),
+        writeFile(join(presetDirectory, 'producer.mjs'), [
+          'export default {',
+          "  name: 'project-local-logging-producer',",
+          "  apply(ctx) { ctx.logger('project-local-logging').info('project local runtime log') },",
+          '}',
+          '',
+        ].join('\n')),
+        writeFile(join(presetDirectory, 'runtime.cordis.yml'), '- id: producer\n  name: ./producer.mjs\n'),
+      ])
+
+      const run = await runLinkedOmp(fixture, undefined, delegatedWorkspace)
+      const records = await eventually('project-local logging file', async () => {
+        const source = await readFile(logPath, 'utf8').catch(() => '')
+        if (!source.endsWith('\n')) return
+        const parsed = source.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+        if (!parsed.some(record => record.logger === 'project-local-logging' && record.message === 'project local runtime log')) return
+        return parsed
+      })
+      expect(records.find(record => record.logger === 'project-local-logging' && record.message === 'project local runtime log')).toMatchObject({
+        logger: 'project-local-logging',
+        message: 'project local runtime log',
+        runtimePresetId: 'logging-test',
+      })
+      expect(activationRequest(run).params).toMatchObject({
+        composition: { id: 'logging-test' },
+        workspaceRoot: delegatedWorkspace,
+      })
+      expect([...run.input, ...run.output].some(message => 'method' in message && /log/iu.test(message.method ?? ''))).toBe(false)
+      expect(run.stdout).not.toContain('project local runtime log')
+      expect(run.stderr).toBe('')
+    } finally {
+      await destroyLinkedOmpFixture(fixture)
+    }
+  }, 30_000)
+
   it('uses the real project-local extension with Evolution persistence, reminder data, reload, and shutdown', async () => {
     const fixture = await createLinkedOmpFixture()
     try {
@@ -1052,6 +1119,8 @@ describe('local OMP plugin package', () => {
       '@doppelganger/doppelganger-evolution',
       '@doppelganger/doppelganger-codegraph',
       '@doppelganger/doppelganger-extension-mcp/loader',
+      '@doppelganger/doppelganger-logging-file/loader',
+      '@doppelganger/doppelganger-logging-sentry/loader',
       ...standardModules,
     ]
     const probePath = join(root, 'probe.mjs')

@@ -9,11 +9,13 @@ export const McpImportPlugin: Plugin<McpPluginConfig> = {
   provide: 'doppelgangerMcp',
   Config: McpPluginConfigSchema as unknown as NonNullable<Plugin<McpPluginConfig>['Config']>,
   async apply(ctx: Context, configured: McpPluginConfig) {
+    const logger = ctx.logger('doppelganger-mcp')
     const runtime = new McpImportRuntime(ctx, normalizeMcpPluginConfig(configured))
     ctx.effect(() => async () => {
       await runtime.dispose()
     }, 'doppelgangerMcp.dispose')
     new McpImportService(ctx, runtime)
+    logger.info('component.service.ready')
     ctx.on('internal/update', function (this: Fiber, nextConfig: McpPluginConfig) {
       runtime.update(normalizeMcpPluginConfig(nextConfig))
       this.config = nextConfig

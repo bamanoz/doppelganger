@@ -81,6 +81,8 @@ export function createRuntimeHostPlugin(
   return {
     name: 'doppelganger-runtime-host',
     async apply(ctx: Context) {
+      const logger = ctx.logger('doppelganger-runtime-host')
+      logger.info('component.activation.started')
       const session = runtimeSession(ctx)
       ctx.provide(HOST_CAPABILITIES_SERVICE, capabilities)
       const context = () => ctx.get('doppelgangerContext', false) as ContextProtocol | undefined
@@ -135,15 +137,18 @@ export function createRuntimeHostPlugin(
       })
 
       binding.attach(bridge)
+      logger.info('component.active')
       ctx.on('doppelganger/tools-changed', revision => {
         if (attached) binding.toolCatalogChanged(revision)
       })
       ctx.effect(() => async () => {
+        logger.info('component.disposal.started')
         if (!attached) return
         attached = false
         const protocol = tools()
         if (protocol !== undefined) await protocol.disposeActiveCalls('Runtime Host bridge detached')
         binding.detach(bridge)
+        logger.info('component.disposal.completed')
       }, 'doppelgangerRuntimeHost.detach')
     },
   }

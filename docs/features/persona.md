@@ -46,6 +46,8 @@ The shipped `standard` Runtime Preset is an actor-neutral Persona composition ow
 
 User Runtime Presets may select any identity and ordered traits, opt into Persona Authoring for explicit logical trait targets, and compose storage, memory, embedding, or semantic rows as needed. These capabilities remain ordinary independently configured plugins; no named Persona or preset receives product-level special handling.
 
+Persona activation and disposal transitions emit metadata-only ordinary Cordis events under `doppelganger-persona`; identity and trait content are never logged. The shared event vocabulary and destination behavior are owned by [Runtime logging](runtime-logging.md).
+
 ## Primary implementation
 
 - `packages/extension-persona/src/activation.ts`

@@ -25,7 +25,10 @@ export function createActorIdentityPlugin(actorId?: unknown): Plugin {
   return {
     name: 'doppelganger-actor-identity',
     apply(ctx: Context) {
+      const logger = ctx.logger('doppelganger-actor-identity')
+      logger.info('component.active state=%s', identity.state)
       ctx.provide(ACTOR_IDENTITY_SERVICE, identity)
+      ctx.effect(() => () => { logger.info('component.disposal.started') }, 'doppelgangerActor.logDisposal')
     },
   }
 }

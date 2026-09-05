@@ -148,6 +148,8 @@ Rollback removes the Evolution Loader row and starts a new Runtime Session. Omis
 
 After repository verification succeeds, opt the user-owned Mark Runtime Preset in by adding the exact Evolution row above to `~/.doppelganger/.runtime-presets/mark/runtime.cordis.yml`, preserving its existing session isolation and actor/Persona/SQLite/context/tool rows, then start a new OMP Runtime Session and inspect the projected controls and policy context. This post-implementation deployment change is personal configuration, not a shipped preset change or repository fixture. Shipped `standard` remains Evolution-neutral.
 
+Evolution activation, bounded listing/signal counts, and proposal mutation outcomes emit metadata-only ordinary Cordis events under `doppelganger-evolution`; proposal rationale, evidence, reminders, actor identifiers, and inference material are excluded. The shared event vocabulary and destination behavior are owned by [Runtime logging](runtime-logging.md).
+
 ## Primary implementation and evidence
 
 - `packages/extension-evolution/src/plugin.ts` — Loader entry, strict configuration, and conditional signal composition.

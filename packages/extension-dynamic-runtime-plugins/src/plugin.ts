@@ -140,6 +140,8 @@ export const DynamicRuntimePluginsPlugin: Plugin<DynamicRuntimePluginsConfig> = 
   Config: DynamicRuntimePluginsConfigSchema as NonNullable<Plugin<DynamicRuntimePluginsConfig>['Config']>,
   inject: ['doppelgangerRuntimeSession', 'doppelgangerTools'],
   async apply(ctx: Context, input: DynamicRuntimePluginsConfig = {}) {
+    const logger = ctx.logger('doppelganger-dynamic-runtime-plugins')
+    logger.info('component.activation.started')
     const config = normalizeDynamicRuntimePluginsConfig(input)
     ctx.on('internal/update', (nextInput, _noSave, next) => {
       const nextConfig = normalizeDynamicRuntimePluginsConfig(nextInput)
@@ -150,7 +152,10 @@ export const DynamicRuntimePluginsPlugin: Plugin<DynamicRuntimePluginsConfig> = 
     await group.await()
     const registry = new DynamicRuntimePluginRegistry(group, config)
     for (const definition of definitions(ctx, registry, config)) ctx.doppelgangerTools.register(definition)
-    ctx.effect(() => () => registry.dispose(), 'dynamicRuntimePlugins.dispose')
+    logger.info('component.active')
+    ctx.effect(() => async () => {
+      await registry.dispose()
+    }, 'dynamicRuntimePlugins.dispose')
   },
 }
 

@@ -17,11 +17,12 @@ The requested behavior is therefore not "show logs in OMP." It is an explicit Lo
 - Provide a rolling JSONL file exporter and an isolated Sentry exporter.
 - Preserve OMP stdout framing and keep ordinary logs out of OMP UI and RPC.
 - Make exporter configuration, credentials, resources, reload, and disposal ordinary Cordis Loader concerns.
+- Instrument Composition Runtime and every first-party Runtime Session component with stable operational event names, severity rules, and data-minimizing fields through native `ctx.logger`.
 
 **Non-Goals:**
 
 - Replacing Cordis `LoggerService` or introducing a second application logging API.
-- Adding logging to the Runtime Host API, lifecycle protocol, telemetry, memory, Evolution evidence, or host conversation.
+- Persisting logs into the Runtime Host API, lifecycle payloads, canonical memory, Evolution evidence, or host conversation.
 - Shipping an enabled exporter in `standard` or a first-party console/stdout exporter.
 - Building a daemon, remote log collector, general observability pipeline, metrics, traces, or log-query UI.
 - Claiming automatic secret removal from arbitrary plugin-authored text.
@@ -198,6 +199,14 @@ Add `docs/features/runtime-logging.md` as the single owner of logging behavior, 
 
 Register both exporter packages in `scripts/package-boundaries.json`. Their only internal dependency is Composition Runtime for the public logging service contract; the file package otherwise uses Node built-ins, and the Sentry package owns `@sentry/node`. Update `packages/omp` only to make the optional packages resolvable from its isolated installation, not to activate them.
 
+### 10. First-party Runtime Session components emit bounded operational events
+
+Composition Runtime and first-party session plugins use stable package logger names and native `ctx.logger` calls. `info` records state transitions, `debug` records bounded operation starts/results and counts, `warn` records contained degradation or rejected operations, and `error` is reserved for failures that invalidate activation or cleanup. Logs never include prompt/context content, memory content or subject keys, inference input/output, generated source, credentials, DSNs, endpoint URLs, filesystem paths, lifecycle payloads, or tool inputs/results.
+
+The covered runtime surface is Composition Runtime activation/reload/watch/disposal; actor binding and protected Runtime Host bridge activation; context assembly; tool catalog/invocation; lifecycle publication; instance SQLite open/transaction/close; Persona activation and asset reload; Persona Authoring inspection/revision; canonical memory mutations/search and candidate capture; local embedding acquisition/fallback/execution; semantic vector coordinator and backend lifecycle; Evolution proposal/signal processing; Dynamic Runtime Plugin definition/transitions; CodeGraph discovery/synchronization/exploration; MCP server generation/refresh/failure/disposal; and Pi structured inference invocation/closure. File and Sentry exporters deliberately do not log through the routed service they consume, avoiding recursive delivery.
+
+Control-plane Runtime Preset selection and host-owned OMP process/RPC diagnostics remain outside the Runtime Session router and keep their existing channels. Session-owned exporters can observe disposal-started and teardown failures, but cannot reliably receive a final disposal-completed record because they are themselves disposed within that boundary.
+
 ## Risks / Trade-offs
 
 - **[Risk] Plugins can place secrets or personal data in log text.** → Document that normalization is a safety/bounds boundary, not a content-redaction guarantee; never add raw arguments to Sentry, never log the DSN, and require operators to choose destinations and access controls explicitly.
@@ -205,7 +214,6 @@ Register both exporter packages in `scripts/package-boundaries.json`. Their only
 - **[Risk] A slow destination can overflow its queue and lose records.** → Bound each sink independently, drop oldest pending records deterministically, and emit a coalesced synthetic drop count so recent failure context survives without blocking plugins.
 - **[Risk] Rolling rename is not a transaction across process crashes.** → Serialize operations, preserve complete JSON lines, recover from the actual numbered files on next activation, and document best-effort crash consistency rather than claiming atomic multi-file rotation.
 - **[Risk] Two OS processes writing and rotating the same path can corrupt retention ordering.** → Reject duplicate paths inside one process and document one-writer-per-path; do not add a fragile cross-process lock protocol in this change.
-- **[Risk] Sentry SDK APIs and default integrations evolve.** → Pin the dependency, use a narrow private adapter around manual client/scope creation, test that global state is unchanged, and let dependency updates revalidate the adapter explicitly.
 - **[Risk] Sink failures are intentionally not surfaced in OMP.** → Keep them contained and stop the failed sink. Operators who require independent exporter-health alerting should compose another destination; this change does not create a host UI or recursive logger path.
 - **[Trade-off] Later reload-added sinks do not receive pre-registration history.** → This preserves default-off semantics and bounded lifetime; only initial activation has a temporary replay window.
 

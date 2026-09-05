@@ -1,4 +1,4 @@
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, type Logger } from '@deepseek-ai/cordis'
 
 export type ContextAuthority = 'data' | 'instruction'
 
@@ -51,9 +51,12 @@ declare module '@deepseek-ai/cordis' {
 export class ContextProtocol extends Service {
   private readonly providers = new Map<string, ContextProvider>()
   private readonly estimateTokens: (content: string) => number
+  private readonly logger: Logger
 
   constructor(ctx: Context, config: ContextProtocolConfig = {}) {
     super(ctx, 'doppelgangerContext')
+    this.logger = ctx.logger('doppelganger-context')
+    this.logger.info('component.active')
     this.estimateTokens = config.estimateTokens ?? ((content) => Math.ceil(Buffer.byteLength(content, 'utf8') / 4))
   }
 
@@ -64,18 +67,28 @@ export class ContextProtocol extends Service {
     return this.ctx.effect(() => {
       if (this.providers.has(id)) throw new Error(`context provider "${id}" is already registered`)
       this.providers.set(id, owned)
+      this.logger.debug('context.provider.registered count=%d', this.providers.size)
       return () => {
         if (this.providers.get(id) === owned) this.providers.delete(id)
+        this.logger.debug('context.provider.unregistered count=%d', this.providers.size)
       }
     }, `doppelgangerContext.register(${id})`)
   }
 
   async resolve(request: ContextResolveRequest): Promise<AssembledContext> {
     if (!Number.isSafeInteger(request.tokenBudget) || request.tokenBudget < 0) {
+      this.logger.warn('context.resolve.rejected code=INVALID_TOKEN_BUDGET')
       throw new RangeError('context token budget must be a non-negative safe integer')
     }
     const providers = [...this.providers.values()].sort((left, right) => left.id.localeCompare(right.id))
-    const resolved = await Promise.all(providers.map(provider => provider.resolve(request)))
+    this.logger.debug('context.resolve.started providers=%d tokenBudget=%d', providers.length, request.tokenBudget)
+    let resolved: readonly (readonly ContextContribution[])[]
+    try {
+      resolved = await Promise.all(providers.map(provider => provider.resolve(request)))
+    } catch (error) {
+      this.logger.warn('context.resolve.failed reason=%s', error instanceof Error ? error.name : typeof error)
+      throw error
+    }
     let sequence = 0
     const ranked: RankedContribution[] = []
     for (let providerIndex = 0; providerIndex < providers.length; providerIndex += 1) {
@@ -83,10 +96,12 @@ export class ContextProtocol extends Service {
       const contributions = resolved[providerIndex]!
       for (const contribution of contributions) {
         if (contribution.source.trim().length === 0) {
+          this.logger.warn('context.resolve.failed code=INVALID_PROVIDER_SOURCE')
           throw new TypeError(`context provider "${provider.id}" returned an empty source`)
         }
         if (contribution.content.length === 0) continue
         if (!Number.isFinite(contribution.priority)) {
+          this.logger.warn('context.resolve.failed code=INVALID_PROVIDER_PRIORITY')
           throw new TypeError(`context provider "${provider.id}" returned a non-finite priority`)
         }
         ranked.push({ contribution, providerId: provider.id, sequence: sequence += 1 })
@@ -137,11 +152,13 @@ export class ContextProtocol extends Service {
       content = `${prefix}${truncated}`
     }
 
-    return Object.freeze({
+    const result = Object.freeze({
       content,
       contributions: Object.freeze(accepted),
       omittedSources: Object.freeze(omittedSources),
       tokenCount: this.estimateTokens(content),
     })
+    this.logger.debug('context.resolve.completed accepted=%d omitted=%d', accepted.length, omittedSources.length)
+    return result
   }
 }

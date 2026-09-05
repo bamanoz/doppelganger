@@ -27,10 +27,6 @@ export const TraitsPlugin: Plugin = {
         asset: await createPersonaAsset(ctx, {
           filename,
           kind: 'trait',
-          onDiagnostic: diagnostic => {
-            ctx.logger.warn('trait reload failed for %C', diagnostic.filename)
-            ctx.logger.warn(diagnostic.message)
-          },
         }),
       })
     }

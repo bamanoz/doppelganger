@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, type Logger } from '@deepseek-ai/cordis'
 import type {} from '@doppelganger/doppelganger-persona'
 import { containsCredentialMaterial } from '@doppelganger/doppelganger-protocols'
 import type {} from '@doppelganger/doppelganger-protocols'
@@ -434,6 +434,7 @@ export class MemoryService extends Service {
   static inject = ['doppelgangerInstanceSqlite', 'doppelgangerPersona', 'doppelgangerActor']
 
   private database!: InstanceSqliteDatabase
+  private readonly logger: Logger
 
   /** Coordinator-only access to canonical storage; all writes remain transaction-owned here. */
   get canonicalDatabase(): InstanceSqliteDatabase {
@@ -452,6 +453,7 @@ export class MemoryService extends Service {
 
   constructor(ctx: Context, config: MemoryServiceConfig = {}) {
     super(ctx, 'doppelgangerMemory')
+    this.logger = ctx.logger('doppelganger-memory')
     this.now = config.now ?? (() => new Date())
     this.id = config.id ?? randomUUID
     this.namespace = config.namespace ?? 'memory'
@@ -474,10 +476,29 @@ export class MemoryService extends Service {
   }
 
   async *[Service.init]() {
-    const actor = this.ctx.doppelgangerActor
-    if (actor.state !== 'bound') throw new Error('memory requires a bound host actor')
-    this.database = await this.ctx.doppelgangerInstanceSqlite.open(this.namespace)
-    migrateMemorySchema(this.database, { legacyActorId: actor.actorId })
+    this.logger.info('component.activation.started')
+    try {
+      const actor = this.ctx.doppelgangerActor
+      if (actor.state !== 'bound') throw new Error('memory requires a bound host actor')
+      this.database = await this.ctx.doppelgangerInstanceSqlite.open(this.namespace)
+      migrateMemorySchema(this.database, { legacyActorId: actor.actorId })
+      this.logger.info('component.active')
+    } catch (error) {
+      this.logger.error('component.activation.failed reason=%s', error instanceof MemoryError ? error.code : error instanceof Error ? error.name : typeof error)
+      throw error
+    }
+  }
+
+  private mutate<T>(operation: string, callback: () => T): T {
+    this.logger.debug('memory.mutation.started operation=%s', operation)
+    try {
+      const result = callback()
+      this.logger.info('memory.mutation.completed operation=%s', operation)
+      return result
+    } catch (error) {
+      this.logger.warn('memory.mutation.rejected operation=%s code=%s', operation, error instanceof MemoryError ? error.code : 'MEMORY_OPERATION_FAILED')
+      throw error
+    }
   }
 
   private timestamp(): string {
@@ -655,11 +676,11 @@ export class MemoryService extends Service {
   }
 
   remember(request: RememberMemoryRequest): MemoryRecord {
-    return this.create(request, 'active', 'explicit')
+    return this.mutate('remember', () => this.create(request, 'active', 'explicit'))
   }
 
   propose(request: RememberMemoryRequest): MemoryRecord {
-    return this.create(request, 'candidate', 'inferred')
+    return this.mutate('propose', () => this.create(request, 'candidate', 'inferred'))
   }
 
   private create(
@@ -791,29 +812,31 @@ export class MemoryService extends Service {
   }
 
   observe(request: ObserveMemoryRequest): MemoryRecord {
-    const operationId = requiredId('memory operationId', request.operationId)
-    const commandDigest = digest('observe', request)
-    const existing = this.receipt(this.database, operationId)
-    if (existing !== undefined) return this.replayRecord(existing, commandDigest)
-    return this.database.transaction(storage => {
-      const replay = this.receipt(storage, operationId)
-      if (replay !== undefined) return this.replayRecord(replay, commandDigest)
-      const record = this.requireRecord(storage, request.recordId, ['active', 'candidate'])
-      const timestamp = this.timestamp()
-      const evidence = this.insertEvidence(storage, record.id, {
-        turnId: request.turnId,
-        role: request.role,
-        relation: request.relation,
-        excerpt: request.excerpt,
-      }, timestamp)
-      if (record.status === 'candidate') {
-        storage.prepare('INSERT OR IGNORE INTO memory_candidate_evidence(candidate_id, evidence_id) VALUES (?, ?)')
-          .run(record.id, evidence.id)
-        this.maybePromote(storage, record.id, timestamp)
-      }
-      const result = this.requireRecord(storage, record.id)
-      this.insertReceipt(storage, operationId, 'observe', commandDigest, 'record', result.id, result.revision.id, timestamp)
-      return result
+    return this.mutate('observe', () => {
+      const operationId = requiredId('memory operationId', request.operationId)
+      const commandDigest = digest('observe', request)
+      const existing = this.receipt(this.database, operationId)
+      if (existing !== undefined) return this.replayRecord(existing, commandDigest)
+      return this.database.transaction(storage => {
+        const replay = this.receipt(storage, operationId)
+        if (replay !== undefined) return this.replayRecord(replay, commandDigest)
+        const record = this.requireRecord(storage, request.recordId, ['active', 'candidate'])
+        const timestamp = this.timestamp()
+        const evidence = this.insertEvidence(storage, record.id, {
+          turnId: request.turnId,
+          role: request.role,
+          relation: request.relation,
+          excerpt: request.excerpt,
+        }, timestamp)
+        if (record.status === 'candidate') {
+          storage.prepare('INSERT OR IGNORE INTO memory_candidate_evidence(candidate_id, evidence_id) VALUES (?, ?)')
+            .run(record.id, evidence.id)
+          this.maybePromote(storage, record.id, timestamp)
+        }
+        const result = this.requireRecord(storage, record.id)
+        this.insertReceipt(storage, operationId, 'observe', commandDigest, 'record', result.id, result.revision.id, timestamp)
+        return result
+      })
     })
   }
 
@@ -978,11 +1001,11 @@ export class MemoryService extends Service {
   }
 
   approve(request: CandidateDecisionRequest): MemoryRecord {
-    return this.decideCandidate(request, 'approve')
+    return this.mutate('approve-candidate', () => this.decideCandidate(request, 'approve'))
   }
 
   reject(request: CandidateDecisionRequest): MemoryRecord {
-    return this.decideCandidate(request, 'reject')
+    return this.mutate('reject-candidate', () => this.decideCandidate(request, 'reject'))
   }
 
   private decideCandidate(request: CandidateDecisionRequest, decision: 'approve' | 'reject'): MemoryRecord {
@@ -1201,6 +1224,7 @@ export class MemoryService extends Service {
       occurredAt: this.timestamp(),
       message: `semantic retrieval ${code} failure`,
     })
+    this.logger.warn('memory.search.semantic.failed code=%s', code)
   }
 
   private validSemanticHit(value: unknown, generationId: string): MemorySemanticHit | undefined {
@@ -1239,6 +1263,7 @@ export class MemoryService extends Service {
   }
 
   async search(request: MemorySearchRequest): Promise<readonly MemorySearchResult[]> {
+    this.logger.debug('memory.search.started semantic=%s', this.ctx.get('doppelgangerMemorySemantic') === undefined ? 'absent' : 'available')
     const query = request.query.trim()
     if (query.length === 0) throw new MemoryError('INVALID_QUERY', 'memory search query must be non-empty')
     if (!Number.isSafeInteger(request.tokenBudget) || request.tokenBudget < 0) {
@@ -1360,6 +1385,8 @@ export class MemoryService extends Service {
         ...(candidate.semanticRank === undefined ? {} : { semanticRank: candidate.semanticRank }),
       }))
     }
-    return Object.freeze(selected)
+    const result = Object.freeze(selected)
+    this.logger.debug('memory.search.completed results=%d semanticFailure=%s', result.length, this.lastSemanticFailure?.code ?? 'none')
+    return result
   }
 }

@@ -247,6 +247,8 @@ export async function publishLifecycleEvent(
   input: LifecycleEvent,
   options: PublishLifecycleOptions = {},
 ): Promise<void> {
+  const logger = context.logger('doppelganger-lifecycle')
+  logger.debug('lifecycle.publish.started type=%s', input.type)
   let event: LifecycleEvent
   try {
     event = normalizeLifecycleEvent(input)
@@ -255,12 +257,15 @@ export async function publishLifecycleEvent(
       code: 'INVALID_LIFECYCLE_EVENT',
       message: cause instanceof Error ? cause.message : String(cause),
     })
+    logger.warn('lifecycle.publish.rejected reason=%s', cause instanceof Error ? cause.name : typeof cause)
     options.onDiagnostic?.(diagnostic)
     throw cause
   }
   try {
     await context.parallel(EVENT_NAMES[event.type], event as never)
+    logger.debug('lifecycle.publish.completed type=%s', event.type)
   } catch (cause) {
+    logger.warn('lifecycle.publish.failed type=%s reason=%s', event.type, cause instanceof Error ? cause.name : typeof cause)
     const diagnostic: LifecycleDiagnostic = Object.freeze({
       code: 'LIFECYCLE_SUBSCRIBER_FAILED',
       deliveryId: event.deliveryId,

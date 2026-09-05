@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Logger } from '@deepseek-ai/cordis'
 import {
   activeMemorySemanticGeneration,
   completeMemoryProjectionDeletion,
@@ -107,6 +107,7 @@ function entryFrom(source: MemoryProjectionSource, vector: Float32Array): Memory
 }
 
 export class MemoryVectorCoordinator implements MemorySemanticRetriever {
+  private readonly logger: Logger
   private readonly memory: MemoryService
   private readonly embedder: MemoryEmbedder
   private readonly index: MemoryVectorIndex
@@ -123,6 +124,7 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
   private rebuildPromise: Promise<void> | undefined
 
   constructor(ctx: Context, config: MemoryVectorCoordinatorConfig = {}) {
+    this.logger = ctx.logger('doppelganger-memory-vector-coordinator')
     this.memory = ctx.doppelgangerMemory
     this.embedder = ctx.doppelgangerMemoryEmbedder
     this.index = ctx.doppelgangerMemoryVectorIndex
@@ -152,7 +154,9 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
   }
 
   private rememberFailure(error: unknown): void {
-    this.lastFailure = safeFailure(failureCode(error))
+    const code = failureCode(error)
+    this.lastFailure = safeFailure(code)
+    this.logger.warn('semantic.operation.failed code=%s', code)
   }
 
   private async ensureGeneration(): Promise<void> {
@@ -169,15 +173,18 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
   }
 
   async start(): Promise<void> {
+    this.logger.info('component.activation.started backend=%s', this.index.identity.backend)
     if (this.timer !== undefined) return
     this.stopped = false
     await this.ensureGeneration()
     if (this.stopped) return
     this.timer = setInterval(() => { void this.drain() }, this.pollIntervalMs)
     await this.drain()
+    this.logger.info('component.active backend=%s', this.index.identity.backend)
   }
 
   async stop(): Promise<void> {
+    this.logger.info('component.disposal.started')
     this.stopped = true
     if (this.timer !== undefined) clearInterval(this.timer)
     this.timer = undefined
@@ -188,6 +195,7 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
         delay(this.operationTimeoutMs),
       ])
     }
+    this.logger.info('component.disposal.completed')
   }
 
   private recoverLeases(timestamp: string): void {
@@ -215,6 +223,7 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     const availableAt = new Date(Date.now() + backoff).toISOString()
     this.database.prepare(`UPDATE ${table} SET state = 'failed', available_at = ?, last_failure_code = ?, updated_at = ?, lease_until = NULL WHERE id = ? AND state = 'leased'`).run(availableAt, code, now(), row.id)
     this.lastFailure = safeFailure(code)
+    this.logger.warn('semantic.projection.retry kind=%s attempt=%d code=%s', table === 'memory_vector_deletions' ? 'delete' : 'upsert', attempts, code)
   }
   private async deliverUpsert(row: WorkRow): Promise<void> {
     const source = loadMemoryProjectionSource(this.database, row.id, now())
@@ -256,10 +265,19 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
   }
 
   async rebuild(): Promise<void> {
+    this.logger.info('semantic.rebuild.started')
     if (this.rebuildPromise !== undefined) return this.rebuildPromise
     const operation = this.performRebuild()
     this.rebuildPromise = operation
-    try { await operation } finally { if (this.rebuildPromise === operation) this.rebuildPromise = undefined }
+    try {
+      await operation
+      this.logger.info('semantic.rebuild.completed')
+    } catch (error) {
+      this.rememberFailure(error)
+      throw error
+    } finally {
+      if (this.rebuildPromise === operation) this.rebuildPromise = undefined
+    }
   }
 
   private async performRebuild(): Promise<void> {
@@ -311,6 +329,7 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     }
   }
   async rollback(generationId: string): Promise<void> {
+    this.logger.info('semantic.rollback.started')
     if (typeof generationId !== 'string' || generationId.length === 0) throw new TypeError('generationId is required')
     const row = this.database.prepare(`SELECT id, state, embedder_identity_json, vector_index_identity_json FROM memory_semantic_generations WHERE id = ? AND instance_id = ?`).get(generationId, this.instanceId) as { id: string; state: string; embedder_identity_json: string; vector_index_identity_json: string } | undefined
     if (row === undefined || row.state !== 'retained') throw new Error('generation is not retained for rollback')
@@ -333,6 +352,7 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
       storage.prepare(`INSERT INTO memory_semantic_active_generation(instance_id, generation_id, updated_at) VALUES (?, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET generation_id = excluded.generation_id, updated_at = excluded.updated_at`).run(this.instanceId, generationId, timestamp)
       for (const entry of indexed) storage.prepare(`DELETE FROM memory_vector_projection_work WHERE generation_id = ? AND record_id = ? AND revision_id = ?`).run(entry.generation_id, entry.record_id, entry.revision_id)
     })
+    this.logger.info('semantic.rollback.completed')
   }
 
   private eligibleHit(hit: { readonly generationId: string; readonly recordId: string; readonly revisionId: string }, request: MemorySemanticSearchRequest): boolean {
@@ -347,6 +367,7 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
   }
 
   async search(request: MemorySemanticSearchRequest): Promise<readonly MemorySemanticHit[]> {
+    this.logger.debug('semantic.search.started limit=%d', request.limit)
     if (request.instanceId !== this.instanceId || request.limit <= 0) return Object.freeze([])
     const generationId = activeMemorySemanticGeneration(this.database, this.instanceId)
     if (generationId === undefined) return Object.freeze([])
@@ -368,9 +389,12 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
         hits.push({ generationId, recordId: hit.recordId, revisionId: hit.revisionId, rank: 0, score: hit.score })
       }
       hits.sort((left, right) => right.score - left.score || left.recordId.localeCompare(right.recordId) || left.revisionId.localeCompare(right.revisionId))
-      return Object.freeze(hits.slice(0, request.limit).map((hit, index) => Object.freeze({ generationId, recordId: hit.recordId, revisionId: hit.revisionId, rank: index + 1 })))
+      const result = Object.freeze(hits.slice(0, request.limit).map((hit, index) => Object.freeze({ generationId, recordId: hit.recordId, revisionId: hit.revisionId, rank: index + 1 })))
+      this.logger.debug('semantic.search.completed results=%d', result.length)
+      return result
     } catch (error) {
       this.rememberFailure(error)
+      this.logger.debug('semantic.search.completed results=0 degraded=true')
       return Object.freeze([])
     }
   }
@@ -402,6 +426,7 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
   }
 
   async maintenance(kind: MemoryVectorMaintenanceKind): Promise<MemoryVectorMaintenanceResult> {
+    this.logger.info('semantic.maintenance.started kind=%s', kind)
     if (kind !== 'cleanup-generation') return bounded(this.track(this.index.maintenance(kind)), this.operationTimeoutMs)
     const startedAt = now()
     const active = activeMemorySemanticGeneration(this.database, this.instanceId)

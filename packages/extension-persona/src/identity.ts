@@ -17,10 +17,6 @@ export const IdentityPlugin: Plugin<IdentityPluginConfig> = {
     const asset = await createPersonaAsset(ctx, {
       filename: identity.path,
       kind: 'identity',
-      onDiagnostic: diagnostic => {
-        ctx.logger.warn('identity reload failed for %C', diagnostic.filename)
-        ctx.logger.warn(diagnostic.message)
-      },
     })
     ctx.doppelgangerContext.register({
       id: source,

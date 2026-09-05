@@ -361,6 +361,7 @@ function registerTools(
   targets: Map<string, PersonaTarget>,
   config: NormalizedPersonaAuthoringConfig,
 ): void {
+  const logger = ctx.logger('doppelganger-persona-authoring')
   const observer = createPersonaReloadObserver(ctx)
   let mutationQueue = Promise.resolve()
   const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -376,13 +377,16 @@ function registerTools(
     async invoke(input, _context) {
       const record = inputObject(input, ['target'])
       const target = selectedTarget(targets, record.target ?? null)
+      logger.debug('persona.inspect.started target=%s', target.target)
       const asset = await inspectPersonaAsset(target.filename, config.maximumAssetBytes)
-      return Object.freeze({
+      const result = Object.freeze({
         target: target.target,
         writable: target.writable,
         content: asset.content,
         revision: asset.revision,
       })
+      logger.debug('persona.inspect.completed target=%s', target.target)
+      return result
     },
   })
 
@@ -397,7 +401,17 @@ function registerTools(
     invoke(input, _context) {
       const command = reviseInput(input)
       const target = selectedTarget(targets, command.target)
-      return enqueue(() => revisePersona(observer, target, command, config))
+      return enqueue(async () => {
+        logger.info('persona.revise.started target=%s', target.target)
+        try {
+          const result = await revisePersona(observer, target, command, config)
+          logger.info('persona.revise.completed target=%s', target.target)
+          return result
+        } catch (error) {
+          logger.warn('persona.revise.failed target=%s code=%s', target.target, error instanceof ToolInvocationError ? error.code : 'PERSONA_REVISION_FAILED')
+          throw error
+        }
+      })
     },
   })
 
@@ -416,10 +430,13 @@ export const PersonaAuthoringPlugin: Plugin<PersonaAuthoringConfig> = {
   async apply(ctx: Context, input: PersonaAuthoringConfig) {
     const config = normalizePersonaAuthoringConfig(input)
     const targets = activeTargets(ctx.doppelgangerPersona, config.writableTargets)
+    const logger = ctx.logger('doppelganger-persona-authoring')
     for (const target of targets.values()) {
       if (target.writable) await inspectPersonaAsset(target.filename, config.maximumAssetBytes)
     }
     registerTools(ctx, ctx.doppelgangerTools, targets, config)
+    logger.info('component.active targets=%d writable=%d', targets.size, config.writableTargets.length)
+    ctx.effect(() => () => { logger.info('component.disposal.started') }, 'personaAuthoring.logDisposal')
   },
 }
 

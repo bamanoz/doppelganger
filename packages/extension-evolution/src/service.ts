@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, type Logger } from '@deepseek-ai/cordis'
 import type {} from '@doppelganger/doppelganger-composition-runtime'
 import type {} from '@doppelganger/doppelganger-persona'
 import type {} from '@doppelganger/doppelganger-protocols'
@@ -89,6 +89,7 @@ export class EvolutionService extends Service {
   ]
 
   private stores!: Stores
+  private readonly logger: Logger
   private readonly namespace: string
   private readonly remindersEnabled: boolean
   private readonly cooldownMs: number
@@ -98,6 +99,7 @@ export class EvolutionService extends Service {
 
   constructor(ctx: Context, config: EvolutionServiceConfig = {}) {
     super(ctx, 'doppelgangerEvolution')
+    this.logger = ctx.logger('doppelganger-evolution')
     this.namespace = config.namespace ?? 'evolution'
     if (!/^[a-z][a-z0-9-]*$/.test(this.namespace)) throw new TypeError('evolution namespace is invalid')
     this.remindersEnabled = config.remindersEnabled ?? true
@@ -116,27 +118,34 @@ export class EvolutionService extends Service {
   }
 
   async *[Service.init]() {
-    const actor = this.ctx.doppelgangerActor
-    if (actor.state !== 'bound') throw new Error('Evolution requires a bound host actor')
-    const persona = this.ctx.doppelgangerPersona
-    const runtime = this.ctx.doppelgangerRuntimeSession
-    if (runtime.workspaceRoot !== persona.projectRoot) {
-      throw new Error('Evolution requires consistent Runtime Session and Persona project metadata')
-    }
-    const database = await this.ctx.doppelgangerInstanceSqlite.open(this.namespace)
-    const global = new GlobalEvolutionStore(database, { instanceId: persona.instanceId, actorId: actor.actorId })
-    const project = runtime.workspaceRoot === undefined
-      ? undefined
-      : new ProjectEvolutionStore({
-          root: runtime.workspaceRoot,
-          instanceId: persona.instanceId,
-          actorId: actor.actorId,
-          projectId: persona.projectId!,
-        }, this.projectLockTimeoutMs)
-    this.stores = {
-      global,
-      signals: new GlobalEvolutionSignalStore(database, { instanceId: persona.instanceId, actorId: actor.actorId }),
-      ...(project === undefined ? {} : { project }),
+    this.logger.info('component.activation.started')
+    try {
+      const actor = this.ctx.doppelgangerActor
+      if (actor.state !== 'bound') throw new Error('Evolution requires a bound host actor')
+      const persona = this.ctx.doppelgangerPersona
+      const runtime = this.ctx.doppelgangerRuntimeSession
+      if (runtime.workspaceRoot !== persona.projectRoot) {
+        throw new Error('Evolution requires consistent Runtime Session and Persona project metadata')
+      }
+      const database = await this.ctx.doppelgangerInstanceSqlite.open(this.namespace)
+      const global = new GlobalEvolutionStore(database, { instanceId: persona.instanceId, actorId: actor.actorId })
+      const project = runtime.workspaceRoot === undefined
+        ? undefined
+        : new ProjectEvolutionStore({
+            root: runtime.workspaceRoot,
+            instanceId: persona.instanceId,
+            actorId: actor.actorId,
+            projectId: persona.projectId!,
+          }, this.projectLockTimeoutMs)
+      this.stores = {
+        global,
+        signals: new GlobalEvolutionSignalStore(database, { instanceId: persona.instanceId, actorId: actor.actorId }),
+        ...(project === undefined ? {} : { project }),
+      }
+      this.logger.info('component.active projectScope=%s', project === undefined ? 'absent' : 'available')
+    } catch (error) {
+      this.logger.error('component.activation.failed reason=%s', error instanceof EvolutionError ? error.code : error instanceof Error ? error.name : typeof error)
+      throw error
     }
   }
 
@@ -145,6 +154,7 @@ export class EvolutionService extends Service {
   }
 
   async list(request: EvolutionListRequest = {}): Promise<EvolutionListResult> {
+    this.logger.debug('evolution.list.started')
     await this.resumeExpiredSnoozes()
     const global = this.stores.global.list()
     const project = await this.projectSnapshot()
@@ -156,10 +166,12 @@ export class EvolutionService extends Service {
       .filter(proposal => request.query === undefined || relevanceScore(proposal, request.query) > 0)
       .filter(proposal => request.dueOnly !== true || proposalIsReminderEligible(proposal, now, this.cooldownMs))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-    return deepFreeze({
+    const result = deepFreeze({
       proposals: Object.freeze(proposals),
       diagnostics: Object.freeze([...project.diagnostics, ...this.stores.signals.listDiagnostics()]),
     })
+    this.logger.debug('evolution.list.completed proposals=%d diagnostics=%d', result.proposals.length, result.diagnostics.length)
+    return result
   }
 
   async inspect(id: string): Promise<EvolutionInspectResult> {
@@ -214,7 +226,10 @@ export class EvolutionService extends Service {
     return ranked[0]?.proposal
   }
   recordSignals(request: RecordEvolutionSignalsRequest): RecordEvolutionSignalsResult {
-    return this.stores.signals.record(request)
+    this.logger.debug('evolution.signals.record.started occurrences=%d', request.occurrences.length)
+    const result = this.stores.signals.record(request)
+    this.logger.debug('evolution.signals.record.completed occurrences=%d aggregates=%d duplicate=%s', result.occurrences.length, result.aggregates.length, result.duplicate)
+    return result
   }
 
   recordSignalDiagnostic(
@@ -283,12 +298,20 @@ export class EvolutionService extends Service {
   }
 
   private async mutate(scope: 'global' | 'project', command: EvolutionMutationCommand): Promise<EvolutionProposal> {
-    const context = this.mutationContext()
-    if (scope === 'global') return this.stores.global.mutate(command, context)
-    if (this.stores.project === undefined) {
-      throw new EvolutionError('PROJECT_UNAVAILABLE', 'project scope requires Runtime Session workspace metadata')
+    this.logger.debug('evolution.mutation.started operation=%s scope=%s', command.kind, scope)
+    try {
+      const context = this.mutationContext()
+      const result = scope === 'global'
+        ? this.stores.global.mutate(command, context)
+        : this.stores.project === undefined
+          ? (() => { throw new EvolutionError('PROJECT_UNAVAILABLE', 'project scope requires Runtime Session workspace metadata') })()
+          : await this.stores.project.mutate(command, context)
+      this.logger.info('evolution.mutation.completed operation=%s scope=%s status=%s', command.kind, scope, result.status)
+      return result
+    } catch (error) {
+      this.logger.warn('evolution.mutation.rejected operation=%s scope=%s code=%s', command.kind, scope, error instanceof EvolutionError ? error.code : 'EVOLUTION_OPERATION_FAILED')
+      throw error
     }
-    return this.stores.project.mutate(command, context)
   }
 
   private async mutateExisting(command: Exclude<EvolutionMutationCommand, { readonly kind: 'propose' }>): Promise<EvolutionProposal> {

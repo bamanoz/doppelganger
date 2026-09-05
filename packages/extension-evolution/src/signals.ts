@@ -108,6 +108,8 @@ export function createEvolutionSignalCapturePlugin(config: EvolutionSignalConfig
     name: 'doppelganger-evolution-signals',
     inject,
     apply(ctx: Context) {
+      const logger = ctx.logger('doppelganger-evolution-signals')
+      logger.info('component.activation.started inference=%s', config.signalInferenceEnabled)
       const persona = ctx.doppelgangerPersona
       const actor = ctx.doppelgangerActor
       if (actor.state !== 'bound') throw new Error('Evolution signal capture requires a bound host actor')
@@ -133,9 +135,12 @@ export function createEvolutionSignalCapturePlugin(config: EvolutionSignalConfig
       ctx.on('doppelganger/tool-completed', event => { correlation.observe(event) })
       ctx.on('doppelganger/turn-committed', event => { correlation.observe(event) })
       ctx.on('doppelganger/session-disposed', event => { correlation.observe(event) })
+      logger.info('component.active')
       ctx.effect(() => async () => {
+        logger.info('component.disposal.started')
         correlation.clear()
         await worker.dispose()
+        logger.info('component.disposal.completed')
       }, 'doppelgangerEvolutionSignals.dispose')
     },
   }

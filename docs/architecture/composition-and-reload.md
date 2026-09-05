@@ -28,6 +28,8 @@ Runtime-owned entry and import identities are reserved. Authored presets and cal
 
 Activation loads and validates every source, builds the effective entry list, mounts a session-owned Include tree, waits for nested plugin Fibers, and audits every enabled entry. Missing dependencies, duplicate services, invalid entries, or failed plugins prevent the Runtime Session from being returned. Partial activation is disposed. A Loader Fiber being active proves its synchronous composition contract, not the readiness of optional external dependencies that the plugin explicitly owns as background operational state.
 
+Each Runtime Session owner installs one `doppelgangerLogging` router before mounting the authored Include tree. The router reuses the session owner's existing Fiber-subtree tracking, normalizes only that session's ordinary Cordis `ctx.logger` records, and retains at most a bounded activation FIFO. Composition Runtime emits operational activation, audit, reload, rollback, watch, and disposal-start events through that same route. Initial exporter rows receive the retained suffix once; successful audit releases it, so exporter omission leaves no later retained history or destination work. See [Runtime logging](../features/runtime-logging.md).
+
 The optional MCP import row validates its complete authored shape, publishes its service and local server slots, and returns before external processes or endpoints finish initialization and discovery. Each server then reports `connecting`, `active`, or operational `failed` through its feature-owned snapshot. A slow or unavailable MCP server therefore does not delay or invalidate the Runtime Session; malformed MCP configuration still fails the Loader row synchronously.
 
 Direct Composition Definition construction and serialized host activation use one package-private canonicalizer. It enforces non-empty identifiers, lowercase kebab-case Runtime Preset IDs, absolute supported Loader paths, cloned and deeply frozen patch data, omitted absent optional fields, and deterministic field-labelled diagnostics. Public entry points add only their context-specific activation fields.
@@ -53,6 +55,8 @@ The runtime watches the selected base file and all applicable optional patch pat
 
 A candidate generation commits only after Loader update, Fiber settlement, and activation audit succeed. A failure restores the previous effective generation and records reload diagnostics. The active session remains usable. For watched config changes, success/failure observers are published after one configured HMR quiet window while the refresh remains active; an immediate observer-driven follow-up write is therefore marked dirty and processed instead of being coalesced into the prior event. A committed generation changes the effective revision and affects the next host interaction.
 
+Logging exporters are ordinary Loader rows. Valid addition, replacement, or removal owns sink registration and destination resources through the candidate generation; invalid reload keeps the previous audited sink generation. A later-added sink receives records only after registration rather than reconstructed history.
+
 Reload resets plugin-local runtime state. Plugin-owned persistent state survives according to its provider. Authored base and patch files remain byte-for-byte inputs and are never Loader write-back targets.
 
 Optional feature plugins may coordinate an authored asset mutation with this same reload owner; they do not create a second watcher or activation path. Persona Authoring writes one exact configured trait candidate under its own lock, waits for Persona's URL-and-byte-revision reload outcome, and reports success only after the candidate is active. A rejected or timed-out candidate is atomically restored and the previous revision is awaited. Composition Runtime remains the sole generation and rollback authority.
@@ -67,6 +71,8 @@ An explicitly composed MCP import row separates structural Loader validity from 
 
 Session disposal is idempotent and first waits for the serialized mutation queue. It then attempts every owned cleanup stage even if another rejects: exact config watches are removed, the session Fiber is disposed to Cordis quiescence, and runtime ownership is removed in a `finally`-equivalent path. Because Cordis deliberately contains individual effect-disposer exceptions, the session owner collects error-level records from only its own Fiber subtree during teardown and includes them in the final cleanup failure. Failures are reported only after all reachable session cleanup settles.
 
+Runtime logging cleanup uses the same session owner and Fiber correlation as cleanup-error collection. The router's low-level Cordis exporter remains registered through child Fiber disposal so contained disposer errors join the final cleanup result; explicit session cleanup then removes it. Sink registration is removed before destination close, accepted work drains within the destination contract, and one failed sink or destination cleanup cannot bypass exhaustive sibling/session cleanup.
+
 Runtime disposal snapshots every active session and attempts all of them before disposing the runtime owner and any runtime-owned Cordis root. A caller-owned root is never disposed. Multiple cleanup failures are reported together after exhaustive settlement; repeated disposal reuses the completed or rejected disposal result without reviving ownership or repeating side effects.
 
 ## Primary implementation
@@ -79,6 +85,9 @@ Runtime disposal snapshots every active session and attempts all of them before 
 - `packages/composition-runtime/src/serialized-activation.ts` — serialized host activation decoding.
 - `packages/composition-runtime/src/patches.ts` — patch validation and layering.
 - `packages/composition-runtime/src/runtime.ts` — activation, audit, reload, exhaustive disposal, and ownership.
+- `packages/composition-runtime/src/runtime-logging.ts` — bounded normalized records, session Fiber correlation, activation replay, independent sink queues, and lifecycle cleanup.
+- `packages/extension-logging-file/` — optional rolling JSONL destination.
+- `packages/extension-logging-sentry/` — optional private-client Sentry destination.
 - `packages/extension-dynamic-runtime-plugins/src/registry.ts` — feature-owned Package transitions and child-Fiber cleanup.
 - `packages/extension-codegraph/src/adapter.ts` — feature-owned discovery, freshness, synchronization, exploration queue, and subprocess cleanup.
 - `packages/composition-runtime/src/activation-audit.ts` — structured Loader diagnostics.

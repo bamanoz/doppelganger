@@ -20,8 +20,11 @@ export const LocalEmbeddingPlugin: Plugin<LocalEmbeddingPluginConfig> = {
   Config: LocalEmbeddingPluginConfigSchema as unknown as NonNullable<Plugin<LocalEmbeddingPluginConfig>['Config']>,
   provide: MEMORY_EMBEDDER_SERVICE,
   apply(ctx: Context, config: LocalEmbeddingPluginConfig = {}) {
-    const embedder = new LocalMemoryEmbedder(config)
+    const logger = ctx.logger('doppelganger-embedding-local')
+    logger.info('component.activation.started')
+    const embedder = new LocalMemoryEmbedder(config, undefined, undefined, logger)
     ctx.provide(MEMORY_EMBEDDER_SERVICE, embedder)
+    logger.info('component.active model=%s', embedder.identity.modelId)
     ctx.effect(() => async () => {
       await embedder.close()
     }, 'doppelgangerEmbeddingLocal.close')

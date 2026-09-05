@@ -63,6 +63,8 @@ The Loader Fiber owns discovery cache, synchronization, exploration queue, activ
 
 CodeGraph is trusted local process code, not a sandbox. It runs with the Runtime Session user's filesystem authority and can read the bound repository. Exact-root confinement prevents this integration from deliberately selecting a broader index, but it does not contain a malicious executable. Graph-ranked source and call-path content returned by `codegraph.explore` enters the model context through the host's normal tool-result path. Operators must treat the executable and indexed source as trusted and account for model disclosure and residual context size.
 
+Component lifecycle, status/exploration outcomes, synchronization, bounded failure categories, and cleanup emit ordinary Cordis events under `doppelganger-codegraph`; queries, source output, workspace paths, executable paths, stdout, and stderr are excluded. The shared event vocabulary and destination behavior are owned by [Runtime logging](runtime-logging.md).
+
 ## Primary implementation
 
 - `packages/extension-codegraph/src/plugin.ts` — Loader plugin, schemas, and portable registrations.

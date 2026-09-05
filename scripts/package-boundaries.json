@@ -55,6 +55,18 @@
         "@doppelganger/doppelganger-protocols"
       ]
     },
+    "@doppelganger/doppelganger-logging-file": {
+      "directory": "extension-logging-file",
+      "dependencies": [
+        "@doppelganger/doppelganger-composition-runtime"
+      ]
+    },
+    "@doppelganger/doppelganger-logging-sentry": {
+      "directory": "extension-logging-sentry",
+      "dependencies": [
+        "@doppelganger/doppelganger-composition-runtime"
+      ]
+    },
     "@doppelganger/doppelganger-memory": {
       "directory": "extension-memory",
       "dependencies": [
@@ -80,6 +92,8 @@
         "@doppelganger/doppelganger-extension-mcp",
         "@doppelganger/doppelganger-host-omp",
         "@doppelganger/doppelganger-inference-pi",
+        "@doppelganger/doppelganger-logging-file",
+        "@doppelganger/doppelganger-logging-sentry",
         "@doppelganger/doppelganger-persona",
         "@doppelganger/doppelganger-persona-authoring",
         "@doppelganger/doppelganger-protocols",

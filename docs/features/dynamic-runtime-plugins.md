@@ -79,6 +79,8 @@ OMP projects the seven control tools and any generated portable tools through it
 
 The `doppelganger-capability-evolution` skill may select this workflow only for reversible behavior owned by the current Runtime Session and supported by inspected catalog contracts. Research consent or an Evolution state transition never authorizes generated code. The runtime-plugin skill's inspection, trust warning, immutable Package metadata, lifecycle, and separate native approval gates remain mandatory. Persistent behavior, dependency installation, permanent product code, and maintained Loader packages route to the separately invoked `doppelganger-plugin-development` skill, which obtains an explicit implementation repository before mutation. Runtime Preset deployment and host Client UI remain owned by their respective workflows; generated Package state is never promoted automatically.
 
+Component lifecycle and Package definition, transition, stop, undefine, rejection, and cleanup outcomes emit metadata-only ordinary Cordis events under `doppelganger-dynamic-runtime-plugins`; generated source, purpose text, and tool payloads are excluded. The shared event vocabulary and destination behavior are owned by [Runtime logging](runtime-logging.md).
+
 ## Primary implementation and evidence
 
 - `packages/extension-dynamic-runtime-plugins/src/plugin.ts` — Loader plugin and portable control tools.

@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, normalize } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, type Logger } from '@deepseek-ai/cordis'
 
 export interface InstanceSqliteConfig {
   readonly home: string
@@ -38,9 +38,12 @@ export class InstanceSqliteService extends Service {
   private readonly databases = new Map<string, OpenDatabase>()
   private readonly home: string
   private readonly busyTimeoutMs: number
+  private readonly logger: Logger
 
   constructor(ctx: Context, config: InstanceSqliteConfig) {
     super(ctx, 'doppelgangerInstanceSqlite')
+    this.logger = ctx.logger('doppelganger-sqlite')
+    this.logger.info('component.active')
     this.home = normalize(config.home)
     if (!isAbsolute(this.home)) throw new TypeError('instance SQLite home must be absolute')
     this.busyTimeoutMs = config.busyTimeoutMs ?? 5000
@@ -51,6 +54,7 @@ export class InstanceSqliteService extends Service {
 
   async open(namespace: string): Promise<InstanceSqliteDatabase> {
     namespace = validateNamespace(namespace)
+    this.logger.debug('sqlite.open.started namespace=%s', namespace)
     if (this.databases.has(namespace)) throw new Error(`storage namespace "${namespace}" is already open`)
     const directory = join(this.home, 'storage')
     await mkdir(directory, { recursive: true })
@@ -61,6 +65,7 @@ export class InstanceSqliteService extends Service {
       enableForeignKeyConstraints: true,
       enableDoubleQuotedStringLiterals: false,
     })
+    const logger = this.logger
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;')
     let closed = false
     let dispose: (() => void) | undefined
@@ -86,6 +91,7 @@ export class InstanceSqliteService extends Service {
           return result
         } catch (error) {
           database.exec('ROLLBACK')
+          logger.warn('sqlite.transaction.failed namespace=%s reason=%s', namespace, error instanceof Error ? error.name : typeof error)
           throw error
         }
       },
@@ -96,14 +102,17 @@ export class InstanceSqliteService extends Service {
     try {
       dispose = this.ctx.effect(() => {
         this.databases.set(namespace, { handle })
+        logger.info('sqlite.open.completed namespace=%s', namespace)
         return () => {
           if (closed) return
           closed = true
           if (this.databases.get(namespace)?.handle === handle) this.databases.delete(namespace)
+          logger.debug('sqlite.close.completed namespace=%s', namespace)
           database.close()
         }
       }, `doppelgangerInstanceSqlite.open(${namespace})`)
     } catch (error) {
+      this.logger.warn('sqlite.open.failed namespace=%s reason=%s', namespace, error instanceof Error ? error.name : typeof error)
       closed = true
       database.close()
       throw error

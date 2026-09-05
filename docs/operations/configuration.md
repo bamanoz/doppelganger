@@ -91,6 +91,26 @@ Precedence is explicit host/session choice, project `runtimePreset`, user `defau
 
 A preset's Loader rows own feature configuration, credentials by environment-variable reference, state directories, databases, migrations, partitions, and assets. The runtime does not create Persona Instance directories or assign storage. Persona rows own agent identity only; actor-aware persistence injects the separate host-owned `doppelgangerActor` service.
 
+Runtime logging destinations are opt-in Loader rows and never fields in `config.yaml`, project selection manifests, host options, Runtime Session metadata, or Runtime Host capabilities. Both rows require and isolate `doppelgangerLogging` in the `session` realm:
+
+```yaml
+- id: runtime-logs-file
+  name: "@doppelganger/doppelganger-logging-file/loader"
+  inject: [doppelgangerLogging]
+  isolate: { doppelgangerLogging: session }
+  config:
+    path: "/absolute/path/doppelganger.jsonl"
+
+- id: runtime-logs-sentry
+  name: "@doppelganger/doppelganger-logging-sentry/loader"
+  inject: [doppelgangerLogging]
+  isolate: { doppelgangerLogging: session }
+  config:
+    dsnEnv: DOPPELGANGER_SENTRY_DSN
+```
+
+The file path must be absolute and normalized. `dsnEnv` names exactly one environment variable resolved for that Loader generation; no DSN value belongs in authored YAML. Unknown fields and invalid bounds fail activation or candidate reload. The complete configuration, defaults, filtering, rotation, and credential rules are owned by [Runtime logging](../features/runtime-logging.md).
+
 Dynamic Runtime Plugins are opt-in Loader configuration. The row uses `@doppelganger/doppelganger-dynamic-runtime-plugins/loader`, requires `doppelgangerRuntimeSession` and `doppelgangerTools`, and isolates both services in the session realm. Its optional bounded integer configuration controls VM evaluation time, source/name/purpose sizes, Plugin and Package counts, aggregate stored source, inspection output, and diagnostic message/stack sizes. Unknown or invalid fields fail activation before control tools register. Definitions, Package source, pointers, runs, and diagnostics remain process memory owned by that row; they never write Runtime Presets, patches, configuration, repositories, or durable state. The shipped `standard` preset omits the row.
 
 Evolution is opt-in Loader configuration. The row uses `@doppelganger/doppelganger-evolution`, requires session-isolated Runtime Session metadata, bound Actor Identity, Persona, instance SQLite, context, and tools, and provides session-isolated `doppelgangerEvolution`. Deterministic proactive signal capture defaults on only when this row is composed; `proactiveSignalsEnabled: false` restores proposal-only behavior. Inference calls default off. `signalInferenceEnabled: true` requires an explicitly injected and session-isolated `doppelgangerInference` service in the same realm. Unknown or invalid fields fail before controls or listeners register. Installation alone is inert; shipped `standard` omits the row.

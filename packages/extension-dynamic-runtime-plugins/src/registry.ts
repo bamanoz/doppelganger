@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { Fiber, Plugin } from '@deepseek-ai/cordis'
+import type { Fiber, Logger, Plugin } from '@deepseek-ai/cordis'
 import type { JsonValue } from '@doppelganger/doppelganger-protocols'
 import type { NormalizedDynamicRuntimePluginsConfig } from './config.ts'
 import { errorMessage, errorStack, RuntimePluginError } from './errors.ts'
@@ -67,6 +67,7 @@ export class DynamicRuntimePluginRegistry {
   private readonly group: Fiber
   private readonly disposalDiagnostics = new WeakMap<Fiber, RuntimePluginDiagnostic>()
   private readonly config: NormalizedDynamicRuntimePluginsConfig
+  private readonly logger: Logger
   private nextPlugin = 1
   private nextPackage = 1
   private nextRun = 1
@@ -77,6 +78,7 @@ export class DynamicRuntimePluginRegistry {
 
   constructor(group: Fiber, config: NormalizedDynamicRuntimePluginsConfig) {
     this.group = group
+    this.logger = group.ctx.logger('doppelganger-dynamic-runtime-plugins')
     this.config = config
     group.ctx.on('internal/status', fiber => {
       for (const plugin of this.plugins.values()) {
@@ -143,7 +145,8 @@ export class DynamicRuntimePluginRegistry {
   }
 
   define(input: RuntimePluginDefineInput): Promise<JsonValue> {
-    return this.enqueue(() => {
+    this.logger.debug('runtimePlugin.define.started existing=%s', input.plugin.kind === 'existing')
+    const result = this.enqueue(() => {
       const name = input.name.trim()
       const purpose = input.purpose.trim()
       if (name.length === 0 || name.length > this.config.maximumNameLength) {
@@ -210,6 +213,13 @@ export class DynamicRuntimePluginRegistry {
         purpose,
         sourceDigest: definition.sourceDigest,
       })
+    })
+    return result.then(value => {
+      this.logger.info('runtimePlugin.define.completed')
+      return value
+    }, error => {
+      this.logger.warn('runtimePlugin.define.rejected code=%s', error instanceof RuntimePluginError ? error.code : 'RUNTIME_PLUGIN_DEFINE_FAILED')
+      throw error
     })
   }
 
@@ -314,6 +324,7 @@ export class DynamicRuntimePluginRegistry {
   }
 
   run(input: RuntimePluginRunInput): Promise<JsonValue> {
+    this.logger.info('runtimePlugin.transition.started mode=%s', input.mode)
     if (this.transitioning.has(input.pluginId)) {
       return Promise.reject(new RuntimePluginError(
         'TRANSITION_IN_PROGRESS',
@@ -390,19 +401,30 @@ export class DynamicRuntimePluginRegistry {
         ...(waitingFor.length === 0 ? {} : { waitingFor: Object.freeze(waitingFor) }),
       })
     })
-    return result.finally(() => { this.transitioning.delete(input.pluginId) })
+    return result.then(value => {
+      this.logger.info('runtimePlugin.transition.completed mode=%s', input.mode)
+      return value
+    }, error => {
+      this.logger.warn('runtimePlugin.transition.failed mode=%s code=%s', input.mode, error instanceof RuntimePluginError ? error.code : 'RUNTIME_PLUGIN_TRANSITION_FAILED')
+      throw error
+    }).finally(() => { this.transitioning.delete(input.pluginId) })
   }
 
   stop(pluginId: string): Promise<JsonValue> {
+    this.logger.info('runtimePlugin.stop.started')
     return this.enqueue(async () => {
       const plugin = this.plugin(pluginId)
       const wasRunning = plugin.activeRun !== undefined
       await this.disposeRun(plugin)
       return Object.freeze({ pluginId, stopped: true, wasRunning })
+    }).then(value => {
+      this.logger.info('runtimePlugin.stop.completed')
+      return value
     })
   }
 
   undefine(pluginId: string): Promise<JsonValue> {
+    this.logger.info('runtimePlugin.undefine.started')
     return this.enqueue(async () => {
       const plugin = this.plugin(pluginId)
       const wasRunning = plugin.activeRun !== undefined
@@ -410,10 +432,14 @@ export class DynamicRuntimePluginRegistry {
       for (const definition of plugin.packages.values()) this.storedSourceBytes -= definition.sourceBytes
       this.plugins.delete(pluginId)
       return Object.freeze({ pluginId, removed: true, wasRunning })
+    }).then(value => {
+      this.logger.info('runtimePlugin.undefine.completed')
+      return value
     })
   }
 
   dispose(): Promise<void> {
+    this.logger.info('component.disposal.started')
     this.disposing = true
     return this.disposalTask ??= this.mutationQueue.then(async () => {
       const errors: unknown[] = []
@@ -427,6 +453,11 @@ export class DynamicRuntimePluginRegistry {
       this.plugins.clear()
       this.storedSourceBytes = 0
       if (errors.length > 0) throw new AggregateError(errors, 'dynamic runtime plugin cleanup failed')
+    }).then(() => {
+      this.logger.info('component.disposal.completed')
+    }, error => {
+      this.logger.error('component.disposal.failed reason=%s', error instanceof Error ? error.name : typeof error)
+      throw error
     })
   }
 }

@@ -25,7 +25,11 @@ import {
   loadCompositionPatchFile,
   type CompositionPatchLayer,
 } from './patches.ts'
-import { createRuntimeSessionMetadataPlugin } from './session-metadata.ts'
+import {
+  createRuntimeSessionMetadata,
+  createRuntimeSessionMetadataPlugin,
+} from './session-metadata.ts'
+import { RUNTIME_LOGGING_SERVICE, RuntimeLoggingRouter } from './runtime-logging.ts'
 
 const runtimeOwnerPlugin: Plugin = { name: 'doppelganger-composition-runtime-owner', apply: () => undefined }
 const sessionOwnerPlugin: Plugin = { name: 'doppelganger-composition-session-owner', apply: () => undefined }
@@ -244,10 +248,13 @@ function sessionTree(
           if (!treeSet.has(entry.parent.tree as Include)) return next()
           const isolate = entry.options.isolate
           if (isolate !== undefined && isolate !== null) {
-            entry.options.isolate = Object.fromEntries(Object.entries(isolate).map(([name, label]) => [
-              name,
-              typeof label === 'string' && !label.startsWith(namespace) ? `${namespace}${label}` : label,
-            ]))
+            entry.options.isolate = Object.fromEntries(Object.entries(isolate).flatMap(([name, label]) => {
+              if (name === RUNTIME_LOGGING_SERVICE && label === 'session') return []
+              return [[
+                name,
+                typeof label === 'string' && !label.startsWith(namespace) ? `${namespace}${label}` : label,
+              ]]
+            }))
           }
           return next()
         }, { prepend: true })
@@ -320,11 +327,12 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
       const runtimePlugins = validRuntimePlugins(request.runtimePlugins)
       const runtimePluginIsolation = validRuntimePluginIsolation(runtimePlugins, request.runtimePluginIsolation)
       const trustedRuntimeLayer = runtimeLayer(runtimePlugins, runtimePluginIsolation)
-      const metadataPlugin = createRuntimeSessionMetadataPlugin({
+      const metadata = createRuntimeSessionMetadata({
         sessionId: request.sessionId,
         runtimePresetId: request.composition.id,
         ...(request.workspaceRoot === undefined ? {} : { workspaceRoot: request.workspaceRoot }),
       })
+      const metadataPlugin = createRuntimeSessionMetadataPlugin(metadata)
       await ready
       if (disposed) throw new Error('composition runtime is disposed')
 
@@ -334,15 +342,33 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
       sessionOwner.ctx.on('internal/plugin', fiber => {
         if (sessionFibers.has(fiber.parent.fiber)) sessionFibers.add(fiber)
       }, { global: true })
+      const sessionContext = sessionOwner.ctx.isolate(RUNTIME_LOGGING_SERVICE)
       let collectSessionCleanupFailures = false
       const loggedSessionCleanupFailures: unknown[] = []
+      const logging = new RuntimeLoggingRouter(sessionContext, metadata, sessionFibers, args => {
+        if (collectSessionCleanupFailures) loggedSessionCleanupFailures.push(loggedFailure(args))
+      }, owner.ctx)
+      const logger = sessionContext.logger('doppelganger-composition-runtime')
+      logger.info('runtime.session.activation.started')
+      const disposeSessionOwner = async () => {
+        collectSessionCleanupFailures = true
+        await settleCleanup([
+          () => disposeFiber(sessionOwner),
+          async () => {
+            if (loggedSessionCleanupFailures.length > 0) {
+              throw new AggregateError(loggedSessionCleanupFailures, 'session-owned cleanup failed')
+            }
+          },
+          () => logging.dispose(),
+        ], `failed to dispose composition session owner ${request.sessionId}`)
+      }
       let mounted: SessionTreeMount | undefined
       let generation: CompositionGeneration | undefined
       let initialDiagnostics: CompositionDiagnostics | undefined
       try {
         generation = await loadGeneration(request.composition, trustedRuntimeLayer)
         mounted = sessionTree(metadataPlugin, runtimePlugins)
-        await sessionOwner.ctx.plugin(mounted.plugin, {
+        await sessionContext.plugin(mounted.plugin, {
           path: pathToFileURL(request.composition.loaderPath).href,
           patches: [...generation.patches],
         })
@@ -350,8 +376,12 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
         if (tree === undefined) throw new Error('composition tree did not mount')
         await tree.await()
         initialDiagnostics = await auditComposition(request.composition, generation.revision, tree)
+        logger.debug('runtime.session.audit.completed entries=%d failures=%d', initialDiagnostics.entries.length, activationFailures(initialDiagnostics).length)
         if (activationFailures(initialDiagnostics).length > 0) throw new CompositionActivationError(initialDiagnostics)
+        logging.settleActivation()
+        logger.info('runtime.session.activation.completed revision=%s entries=%d', generation.revision, initialDiagnostics.entries.length)
       } catch (error) {
+        logger.error('runtime.session.activation.failed reason=%s', error instanceof CompositionActivationError ? 'audit' : error instanceof Error ? error.name : typeof error)
         let failure = error
         if (!(failure instanceof CompositionActivationError)) {
           const tree = mounted?.trees[0]
@@ -366,23 +396,19 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
               )
           failure = new CompositionActivationError(diagnostics, error)
         }
-        await disposeFiber(sessionOwner)
+        try {
+          await disposeSessionOwner()
+        } catch (cleanupError) {
+          failure = new AggregateError([failure, cleanupError], `failed to clean up composition activation ${request.sessionId}`)
+        }
         throw failure
       }
 
       const tree = mounted.trees[0]
       if (tree === undefined || generation === undefined || initialDiagnostics === undefined) {
-        await disposeFiber(sessionOwner)
+        await disposeSessionOwner()
         throw new Error('composition activation completed without an audited tree')
       }
-      const removeCleanupExporter = owner.ctx.logger.exporter({
-        export(message) {
-          if (!collectSessionCleanupFailures || message.type !== 'error') return
-          const fiber = message.fiber?.deref()
-          if (fiber === undefined || !sessionFibers.has(fiber)) return
-          loggedSessionCleanupFailures.push(loggedFailure(message.args))
-        },
-      })
       let currentGeneration = generation
       let diagnostics = initialDiagnostics
       let mutation = Promise.resolve()
@@ -396,14 +422,20 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
           const previousGeneration = currentGeneration
           const previousDiagnostics = diagnostics
           try {
+            logger.info('runtime.session.reload.started revision=%s', previousGeneration.revision)
             const nextGeneration = await loadGeneration(request.composition, trustedRuntimeLayer)
-            if (nextGeneration.revision === previousGeneration.revision) return
+            if (nextGeneration.revision === previousGeneration.revision) {
+              logger.debug('runtime.session.reload.unchanged revision=%s', previousGeneration.revision)
+              return
+            }
             await tree.root.update(structuredClone(nextGeneration.effective) as EntryOptions[])
             await tree.await()
             const nextDiagnostics = await auditComposition(request.composition, nextGeneration.revision, tree)
+            logger.debug('runtime.session.audit.completed entries=%d failures=%d', nextDiagnostics.entries.length, activationFailures(nextDiagnostics).length)
             if (activationFailures(nextDiagnostics).length > 0) throw new CompositionActivationError(nextDiagnostics)
             currentGeneration = nextGeneration
             diagnostics = nextDiagnostics
+            logger.info('runtime.session.reload.completed revision=%s', nextGeneration.revision)
             if (watchSettleMs > 0) {
               await new Promise<void>(resolve => setTimeout(resolve, watchSettleMs))
             }
@@ -417,11 +449,15 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
               // Observers cannot invalidate a committed Loader update.
             }
           } catch (error) {
+            logger.warn('runtime.session.reload.failed revision=%s reason=%s', previousGeneration.revision, error instanceof CompositionActivationError ? 'audit' : error instanceof Error ? error.name : typeof error)
+            logger.info('runtime.session.rollback.started revision=%s', previousGeneration.revision)
             let failure = error
             try {
               await tree.root.update(structuredClone(previousGeneration.effective) as EntryOptions[])
               await tree.await()
+              logger.info('runtime.session.rollback.completed revision=%s', previousGeneration.revision)
             } catch (rollbackError) {
+              logger.error('runtime.session.rollback.failed revision=%s reason=%s', previousGeneration.revision, rollbackError instanceof Error ? rollbackError.name : typeof rollbackError)
               failure = new AggregateError(
                 [error, rollbackError],
                 `failed to roll back composition ${request.composition.id}`,
@@ -447,7 +483,6 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
             } catch {
               // Failure observers cannot invalidate the restored Loader generation.
             }
-            throw failure
           }
         })
         mutation = task.catch(() => undefined)
@@ -475,18 +510,13 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
         refresh,
         dispose: () => (sessionDisposal ??= (async () => {
           disposing = true
+          logger.info('runtime.session.disposal.started')
           collectSessionCleanupFailures = true
           try {
             await settleCleanup([
               () => mutation,
               removeInputWatches,
-              () => disposeFiber(sessionOwner),
-              async () => {
-                if (loggedSessionCleanupFailures.length > 0) {
-                  throw new AggregateError(loggedSessionCleanupFailures, 'session-owned cleanup failed')
-                }
-              },
-              async () => { await removeCleanupExporter() }
+              disposeSessionOwner,
             ], `failed to dispose composition session ${request.sessionId}`)
           } finally {
             sessions.delete(session)
@@ -510,12 +540,18 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
               }
               const registration = await registrationTask
               registration.sessions.add(session)
+              logger.debug('runtime.session.watch.registered')
             }
           } catch (error) {
-            await removeInputWatches()
-            await disposeFiber(sessionOwner)
+            logger.error('runtime.session.watch.failed reason=%s', error instanceof Error ? error.name : typeof error)
+            let failure = error
+            try {
+              await settleCleanup([removeInputWatches, disposeSessionOwner], `failed to clean up composition watch setup ${request.sessionId}`)
+            } catch (cleanupError) {
+              failure = new AggregateError([error, cleanupError], `failed to register composition watches ${request.sessionId}`)
+            }
             sessions.delete(session)
-            throw error
+            throw failure
           }
         }
       }

@@ -1,4 +1,4 @@
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Logger } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRegistry, ToolSetRegistration } from '@doppelganger/doppelganger-protocols'
 import { McpClientGeneration, type McpClientOwner } from './client.ts'
 import type { NormalizedMcpPluginConfig, NormalizedMcpServerConfig } from './config.ts'
@@ -21,6 +21,7 @@ function sameConfig(left: NormalizedMcpServerConfig, right: NormalizedMcpServerC
 
 export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
   readonly #tools: ToolRegistry
+  readonly #logger: Logger
   readonly #servers = new Map<string, ServerSlot>()
   readonly #diagnostics: McpDiagnostic[] = []
   readonly #background = new Set<Promise<void>>()
@@ -31,6 +32,7 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
   #disposed = false
 
   constructor(ctx: Context, config: NormalizedMcpPluginConfig) {
+    this.#logger = ctx.logger('doppelganger-mcp')
     this.#tools = ctx.doppelgangerTools
     this.#config = config
   }
@@ -45,6 +47,7 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
   }
 
   recordDiagnostic(serverId: string, level: 'warning' | 'error', code: string, message: string): void {
+    this.#logger[level === 'error' ? 'warn' : 'debug']('mcp.diagnostic level=%s code=%s server=%s', level, code, serverId)
     this.#diagnostics.push(Object.freeze({
       sequence: ++this.#diagnosticSequence,
       timestamp: Date.now(),
@@ -70,11 +73,13 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
     slot.registration.replace(definitions)
     slot.definitions = definitions
     generation.markCommitted(definitions.length)
+    this.#logger.info('mcp.server.refresh.completed server=%s tools=%d', generation.id, definitions.length)
   }
 
   failGeneration(generation: McpClientGeneration, code: string, message: string): void {
     const slot = this.#servers.get(generation.id)
     if (this.#disposed || slot?.generation !== generation) return
+    this.#logger.warn('mcp.server.failed server=%s code=%s', generation.id, code)
     if (slot.definitions.length > 0) {
       try {
         slot.registration.replace([])
@@ -87,6 +92,7 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
   }
 
   start(): void {
+    this.#logger.info('component.activation.started servers=%d', this.#config.servers.filter(server => server.enabled).length)
     if (this.#disposed) throw new Error('MCP runtime is disposed')
     if (this.#started) return
     this.#started = true
@@ -106,9 +112,11 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
       throw cause
     }
     for (const slot of installed) this.#launch(slot)
+    this.#logger.info('component.active servers=%d', installed.length)
   }
 
   update(config: NormalizedMcpPluginConfig): void {
+    this.#logger.info('mcp.configuration.update.started servers=%d', config.servers.filter(server => server.enabled).length)
     if (this.#disposed) throw new Error('MCP runtime is disposed')
     if (!this.#started) throw new Error('MCP runtime is not started')
 
@@ -166,9 +174,11 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
 
     this.#config = config
     for (const slot of launch) this.#launch(slot)
+    this.#logger.info('mcp.configuration.update.completed activeServers=%d refreshedServers=%d', this.#servers.size, launch.length)
   }
 
   async dispose(): Promise<void> {
+    this.#logger.info('component.disposal.started servers=%d', this.#servers.size)
     if (this.#disposed) return
     this.#disposed = true
     const slots = [...this.#servers.values()]
@@ -182,6 +192,7 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
       if (settlement.status === 'rejected') failures.push(settlement.reason)
     }
     if (failures.length > 0) throw new AggregateError(failures, 'MCP runtime cleanup failed')
+    this.#logger.info('component.disposal.completed')
   }
 
   #installSlot(config: NormalizedMcpServerConfig): ServerSlot {
@@ -198,6 +209,7 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
   }
 
   #launch(slot: ServerSlot): void {
+    this.#logger.debug('mcp.server.start.started server=%s transport=%s', slot.config.id, slot.config.transport.type)
     const startup = slot.generation.start()
     slot.startup = startup
     this.#track(startup, slot.config.id, 'MCP_STARTUP_UNHANDLED')

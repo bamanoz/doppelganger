@@ -20,6 +20,7 @@ Persona is the first product layer built on the runtime. It is composed from ord
 - A versioned framed JSON-RPC bridge for Oh My Pi (OMP).
 - Dynamic OMP tools translated from runtime JSON Schemas.
 - Optional session-owned Dynamic Runtime Plugins with source-verified inspection, immutable Packages, guarded JavaScript evaluation, and exact one-shot approval.
+- Optional default-off session logging to rolling JSONL files or a private Sentry client without OMP output or RPC projection.
 
 Doppelganger does **not** implement an agent loop or model provider. It extends an existing host.
 
@@ -60,6 +61,8 @@ packages/
 ├── extension-persona-authoring  Logical inspection and approved exact trait revision
 ├── extension-dynamic-runtime-plugins  Opt-in inspected temporary Cordis plugin workflow
 ├── extension-codegraph  Optional workspace-bound CodeGraph status and graph exploration
+├── extension-logging-file  Opt-in rolling JSONL destination for normalized Runtime Session logs
+├── extension-logging-sentry  Opt-in private-client Sentry destination for normalized Runtime Session logs
 ├── extension-sqlite    Directly loadable SQLite infrastructure
 ├── extension-memory    Canonical memory, lexical/hybrid retrieval, tools, capture, and semantic contracts
 ├── extension-embedding-local  Lazy EmbeddingGemma/MiniLM Loader plugin and validated model cache
@@ -247,6 +250,35 @@ runtimePreset: my-assistant
 Start a new OMP session after changing selection. Edit the copied tree rather than the package-owned `standard` source.
 
 The same roster is available to in-process Cordis hosts through `@doppelganger/doppelganger-runtime-presets/plugin` as `ctx.doppelgangerRuntimePresets`. OMP deliberately consumes the pure API before its child runtime exists.
+
+### Runtime logging
+
+Plugins continue to use ordinary Cordis `ctx.logger`. Logging produces no destination output unless an effective Runtime Preset or ordered Runtime Patch explicitly inserts a file or Sentry row. The shipped `standard` preset omits both.
+
+```yaml
+- id: runtime-logs-file
+  name: "@doppelganger/doppelganger-logging-file/loader"
+  inject: [doppelgangerLogging]
+  isolate: { doppelgangerLogging: session }
+  config:
+    path: "/absolute/path/doppelganger.jsonl"
+    level: info
+    maxBytes: 10485760
+    maxFiles: 5
+    maximumPendingRecords: 2048
+
+- id: runtime-logs-sentry
+  name: "@doppelganger/doppelganger-logging-sentry/loader"
+  inject: [doppelgangerLogging]
+  isolate: { doppelgangerLogging: session }
+  config:
+    dsnEnv: DOPPELGANGER_SENTRY_DSN
+    level: error
+    flushTimeoutMs: 2000
+    maximumPendingRecords: 1024
+```
+
+The file destination requires an absolute normalized operator-owned path and exactly one active operating-system writer per concrete path. `dsnEnv` references one environment variable; do not place the DSN in YAML. OMP keeps ordinary logs inside the child destination layer: stdout remains framed JSON-RPC and no log record is projected into reports, tools, context, or UI. See [Runtime logging](docs/features/runtime-logging.md) for filtering, bounds, rotation, failure containment, reload, and disposal.
 
 ### Optional full-stack user presets
 

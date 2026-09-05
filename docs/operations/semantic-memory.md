@@ -75,6 +75,8 @@ Coordinator tools expose status, rebuild, rollback, and backend-declared mainten
 
 Pending remote deletion retains opaque identities until confirmation. Canonical absence suppresses stale hits; never delete tombstones or reintroduce deleted content manually to clear operational debt.
 
+The local embedder, vector backends, and semantic coordinator emit ordinary Cordis lifecycle, generation, retry, degraded-search, and maintenance events through the optional Runtime Session logging route. Records contain only backend kinds, dimensions, counts, maintenance kinds, and failure categories; model paths, endpoints, credentials, canonical content, queries, and vectors are excluded. The vocabulary and destination contract are owned by [Runtime logging](../features/runtime-logging.md).
+
 ## Design provenance
 
 The backend matrix and rebuild-oriented operations were informed by MemPalace. Doppelganger's TypeScript implementation was independently written against its own Cordis and canonical-memory contracts; no substantial MemPalace implementation text is incorporated.

@@ -93,15 +93,20 @@ export const CodeGraphPlugin: Plugin<CodeGraphPluginConfig> = {
   Config: CodeGraphPluginConfigSchema as NonNullable<Plugin<CodeGraphPluginConfig>['Config']>,
   inject: ['doppelgangerRuntimeSession', 'doppelgangerTools'],
   apply(ctx: Context, input: CodeGraphPluginConfig = {}) {
+    const logger = ctx.logger('doppelganger-codegraph')
+    logger.info('component.activation.started')
     const config = normalizeCodeGraphPluginConfig(input)
     ctx.on('internal/update', (nextInput, _noSave, next) => {
       const nextConfig = normalizeCodeGraphPluginConfig(nextInput)
       if (sameConfig(config, nextConfig)) return
       return next()
     })
-    const adapter = new CodeGraphAdapter(ctx.doppelgangerRuntimeSession.workspaceRoot, config)
+    const adapter = new CodeGraphAdapter(ctx.doppelgangerRuntimeSession.workspaceRoot, config, logger)
     for (const definition of definitions(adapter, config)) ctx.doppelgangerTools.register(definition)
-    ctx.effect(() => () => adapter.dispose(), 'codegraph.dispose')
+    logger.info('component.active workspace=%s', ctx.doppelgangerRuntimeSession.workspaceRoot === undefined ? 'absent' : 'available')
+    ctx.effect(() => async () => {
+      await adapter.dispose()
+    }, 'codegraph.dispose')
   },
 }
 

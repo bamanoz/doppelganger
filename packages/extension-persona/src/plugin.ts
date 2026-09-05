@@ -111,10 +111,14 @@ export const PersonaPlugin: Plugin<PersonaPluginConfig> = {
   provide: 'doppelgangerPersona',
   inject: ['doppelgangerRuntimeSession', 'doppelgangerContext'],
   async apply(ctx: Context, input: PersonaPluginConfig) {
+    const logger = ctx.logger('doppelganger-persona')
+    logger.info('component.activation.started')
     const config = normalizeConfig(ctx, input)
     await ctx.plugin(createPersonaActivationPlugin(config.activation)).await()
     await ctx.plugin(IdentityPlugin, config.identity).await()
     await ctx.plugin(TraitsPlugin).await()
+    logger.info('component.active identity=%s traits=%d', config.activation.identity === undefined ? 'absent' : 'configured', config.activation.traits.length)
+    ctx.effect(() => () => { logger.info('component.disposal.started') }, 'doppelgangerPersona.logDisposal')
   },
 }
 

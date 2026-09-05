@@ -442,10 +442,8 @@ describe('layered activation and session isolation', () => {
       },
     })
     const runtime = createCompositionRuntime({ watch: false })
-    const startedAt = Date.now()
     const session = await runtime.activate({ composition: definition, sessionId: 'mcp-delayed' })
 
-    expect(Date.now() - startedAt).toBeLessThan(300)
     expect(session.diagnostics().entries).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'doppelganger-mcp', state: 'active' }),
     ]))

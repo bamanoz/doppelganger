@@ -164,7 +164,7 @@ describe('Dynamic Runtime Plugins under Composition Runtime', () => {
     const root = await mkdtemp(join(tmpdir(), 'doppelganger-dynamic-composition-'))
     temporaryRoots.push(root)
     const loaderPath = join(root, 'runtime.cordis.json')
-    await writeFile(loaderPath, loader(20))
+    await writeFile(loaderPath, loader(1_000))
     const definition = createCompositionDefinition({
       id: 'dynamic-composition',
       revision: 'authored-one',
@@ -197,7 +197,7 @@ describe('Dynamic Runtime Plugins under Composition Runtime', () => {
     expect(await invoke(tools, 'generated.before-reload', {})).toEqual({ ok: true, value: { owner: 'before' } })
 
     const valid = reloads.next('valid dynamic row replacement')
-    await writeFile(loaderPath, loader(30))
+    await writeFile(loaderPath, loader(1_100))
     const committed = await valid
     expect(await invoke(tools, 'runtime-plugin.inspect-self', {})).toEqual({ ok: true, value: { plugins: [] } })
     expect(await invoke(tools, 'generated.before-reload', {})).toMatchObject({ ok: false, error: { code: 'TOOL_NOT_FOUND' } })

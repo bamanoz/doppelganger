@@ -1,4 +1,4 @@
-import type { Context, Plugin } from '@deepseek-ai/cordis'
+import type { Context, Logger, Plugin } from '@deepseek-ai/cordis'
 import { containsCredentialMaterial, type TurnCommittedEvent } from '@doppelganger/doppelganger-protocols'
 import { stripRecursiveMemoryContent } from './content-policy.ts'
 import type { MemoryKind, MemoryRole, RememberMemoryRequest } from './service.ts'
@@ -125,7 +125,8 @@ function capturePolicy(config: MemoryCapturePluginConfig) {
   }
 }
 
-function diagnostic(policy: ReturnType<typeof capturePolicy>, code: MemoryCaptureDiagnostic['code']): void {
+function diagnostic(policy: ReturnType<typeof capturePolicy>, logger: Logger, code: MemoryCaptureDiagnostic['code']): void {
+  logger.warn('memory.capture.degraded code=%s', code)
   try { policy.onDiagnostic?.(Object.freeze({ code })) } catch { /* diagnostics are best effort */ }
 }
 
@@ -208,14 +209,18 @@ async function applyNeighbors(
       try { policy.onSuggestion?.(validated) } catch { /* observer failures are contained */ }
     }
   } catch {
-    diagnostic(policy, 'neighbor')
+    diagnostic(policy, ctx.logger('doppelganger-memory-capture'), 'neighbor')
   }
 }
 
 function applyMemoryCapture(ctx: Context, config: MemoryCapturePluginConfig): void {
+  const logger = ctx.logger('doppelganger-memory-capture')
   const policy = capturePolicy(config)
+  logger.info('component.active enabled=%s', policy.enabled)
+  ctx.effect(() => () => { logger.info('component.disposal.started') }, 'doppelgangerMemoryCapture.logDisposal')
   ctx.on('doppelganger/turn-committed', async (event: TurnCommittedEvent) => {
     if (!policy.enabled || event.outcome !== 'completed') return
+    logger.debug('memory.capture.started')
     try {
       const principalInput = filteredText(event.principalInput.value, policy.maxInputLength)
       const assistantOutput = filteredText(event.assistantOutput.value, policy.maxOutputLength)
@@ -226,14 +231,15 @@ function applyMemoryCapture(ctx: Context, config: MemoryCapturePluginConfig): vo
       try {
         extracted = await policy.extractor.extract(material)
       } catch {
-        diagnostic(policy, 'extractor')
+        diagnostic(policy, logger, 'extractor')
         return
       }
-      if (!Array.isArray(extracted)) { diagnostic(policy, 'extractor'); return }
+      if (!Array.isArray(extracted)) { diagnostic(policy, logger, 'extractor'); return }
       let ordinal = 0
+      let proposed = 0
       for (const rawCandidate of extracted.slice(0, policy.maxCandidatesPerTurn)) {
         const candidate = validatedCandidate(rawCandidate)
-        if (candidate === undefined) { diagnostic(policy, 'validation'); continue }
+        if (candidate === undefined) { diagnostic(policy, logger, 'validation'); continue }
         await applyNeighbors(ctx, policy, candidate)
         try {
           const request: RememberMemoryRequest = {
@@ -247,12 +253,14 @@ function applyMemoryCapture(ctx: Context, config: MemoryCapturePluginConfig): vo
             evidence: { turnId: event.turnId, role: candidate.evidenceRole ?? 'principal', relation: 'support', excerpt: candidate.content },
           }
           ctx.doppelgangerMemory.propose(request)
+          proposed += 1
         } catch {
-          diagnostic(policy, 'write')
+          diagnostic(policy, logger, 'write')
         }
       }
+      logger.debug('memory.capture.completed extracted=%d proposed=%d', extracted.length, proposed)
     } catch {
-      diagnostic(policy, 'validation')
+      diagnostic(policy, logger, 'validation')
     }
   })
 }

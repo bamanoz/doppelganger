@@ -1,3 +1,4 @@
+import type { Logger } from '@deepseek-ai/cordis'
 import type { JsonValue } from '@doppelganger/doppelganger-protocols'
 import { CODEGRAPH_LIMITS, type NormalizedCodeGraphPluginConfig } from './config.ts'
 import { CodeGraphError, boundedMessage } from './errors.ts'
@@ -39,6 +40,7 @@ export class CodeGraphAdapter {
   readonly #workspaceRoot: string | undefined
   readonly #config: NormalizedCodeGraphPluginConfig
   readonly #runner: CodeGraphProcessRunner
+  readonly #logger: Logger | undefined
   readonly #queue: QueueWaiter[] = []
   readonly #operations = new Set<Promise<unknown>>()
   #activeExplorations = 0
@@ -48,20 +50,35 @@ export class CodeGraphAdapter {
   #sync: Promise<void> | undefined
   #disposal: Promise<void> | undefined
 
-  constructor(workspaceRoot: string | undefined, config: NormalizedCodeGraphPluginConfig) {
+  constructor(workspaceRoot: string | undefined, config: NormalizedCodeGraphPluginConfig, logger?: Logger) {
     this.#workspaceRoot = workspaceRoot
     this.#config = config
+    this.#logger = logger
     this.#runner = new CodeGraphProcessRunner(config.shutdownTimeoutMs)
   }
 
   status(): Promise<CodeGraphStatus> {
     if (!this.#accepting) return Promise.reject(new CodeGraphError('CODEGRAPH_DISPOSED', 'CodeGraph integration is disposing'))
-    return this.#track(this.#status())
+    this.#logger?.debug('codegraph.status.started')
+    return this.#track(this.#status()).then(result => {
+      this.#logger?.debug('codegraph.status.completed available=%s compatible=%s initialized=%s', result.binary.available, result.binary.compatible, result.index?.initialized ?? false)
+      return result
+    }, error => {
+      this.#logger?.warn('codegraph.status.failed code=%s', error instanceof CodeGraphError ? error.code : 'CODEGRAPH_STATUS_FAILED')
+      throw error
+    })
   }
 
   explore(query: string, maxFiles: number): Promise<CodeGraphExploreResult> {
     if (!this.#accepting) return Promise.reject(new CodeGraphError('CODEGRAPH_DISPOSED', 'CodeGraph integration is disposing'))
-    return this.#track(this.#explore(query, maxFiles))
+    this.#logger?.debug('codegraph.explore.started maxFiles=%d', maxFiles)
+    return this.#track(this.#explore(query, maxFiles)).then(result => {
+      this.#logger?.debug('codegraph.explore.completed maxFiles=%d outputBytes=%d', maxFiles, Buffer.byteLength(result.content, 'utf8'))
+      return result
+    }, error => {
+      this.#logger?.warn('codegraph.explore.failed code=%s', error instanceof CodeGraphError ? error.code : 'CODEGRAPH_QUERY_FAILED')
+      throw error
+    })
   }
 
   async #status(): Promise<CodeGraphStatus> {
@@ -89,8 +106,10 @@ export class CodeGraphAdapter {
       let index = await this.#readStatus(binary)
       let safety = classifyCodeGraphSafety(this.#workspaceRoot, binary, index)
       if (safety.repairable) {
+        this.#logger?.info('codegraph.sync.started')
         await this.#synchronize(binary)
         index = await this.#readStatus(binary)
+        this.#logger?.info('codegraph.sync.completed')
         safety = classifyCodeGraphSafety(this.#workspaceRoot, binary, index)
       }
       if (!safety.safe) throw this.#unsafeIndex(index, safety.diagnostic)
@@ -263,6 +282,7 @@ export class CodeGraphAdapter {
   }
 
   dispose(): Promise<void> {
+    this.#logger?.info('component.disposal.started')
     if (this.#disposal !== undefined) return this.#disposal
     this.#accepting = false
     const failure = new CodeGraphError('CODEGRAPH_DISPOSED', 'CodeGraph integration is disposing')
@@ -270,7 +290,12 @@ export class CodeGraphAdapter {
     this.#disposal = (async () => {
       await this.#runner.dispose()
       await Promise.allSettled([...this.#operations])
-    })()
+    })().then(() => {
+      this.#logger?.info('component.disposal.completed')
+    }, error => {
+      this.#logger?.error('component.disposal.failed reason=%s', error instanceof Error ? error.name : typeof error)
+      throw error
+    })
     return this.#disposal
   }
 }

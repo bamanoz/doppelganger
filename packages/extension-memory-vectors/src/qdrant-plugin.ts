@@ -25,9 +25,16 @@ export const QdrantVectorPlugin: Plugin<QdrantVectorPluginConfig> = {
   Config: QdrantVectorPluginConfigSchema as unknown as NonNullable<Plugin<QdrantVectorPluginConfig>['Config']>,
   provide: MEMORY_VECTOR_INDEX_SERVICE,
   async apply(ctx: Context, config: QdrantVectorPluginConfig) {
+    const logger = ctx.logger('doppelganger-memory-vectors-qdrant')
+    logger.info('component.activation.started')
     const index = await createQdrantMemoryVectorIndex(config)
     ctx.provide(MEMORY_VECTOR_INDEX_SERVICE, index)
-    ctx.effect(() => async () => { await index.close() }, 'doppelgangerMemoryVectors.qdrant.close')
+    logger.info('component.active')
+    ctx.effect(() => async () => {
+      logger.info('component.disposal.started')
+      await index.close()
+      logger.info('component.disposal.completed')
+    }, 'doppelgangerMemoryVectors.qdrant.close')
   },
 }
 

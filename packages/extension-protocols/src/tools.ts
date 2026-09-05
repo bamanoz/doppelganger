@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, type Logger } from '@deepseek-ai/cordis'
 
 export type JsonPrimitive = boolean | number | string | null
 export type JsonValue = JsonPrimitive | { readonly [key: string]: JsonValue } | readonly JsonValue[]
@@ -267,10 +267,16 @@ export class ToolRegistry extends Service {
   private toolSequence = 0
   private singleOwnerSequence = 0
   private currentSnapshot: ToolCatalogSnapshot = Object.freeze({ revision: 'catalog:0', tools: Object.freeze([]) })
+  private readonly logger: Logger
 
   constructor(ctx: Context) {
     super(ctx, 'doppelgangerTools')
-    ctx.effect(() => () => this.disposeActiveCalls('tool registry disposed'), 'doppelgangerTools.cancelActiveCalls')
+    this.logger = ctx.logger('doppelganger-tools')
+    this.logger.info('component.active')
+    ctx.effect(() => () => {
+      this.logger.info('component.disposal.started activeCalls=%d', this.activeCalls.size)
+      this.disposeActiveCalls('tool registry disposed')
+    }, 'doppelgangerTools.cancelActiveCalls')
   }
 
   private nextToolRevision(): string {
@@ -293,6 +299,7 @@ export class ToolRegistry extends Service {
     const revision = `catalog:${++this.catalogSequence}`
     this.currentSnapshot = Object.freeze({ revision, tools: Object.freeze(descriptors) })
     this.ctx.emit('doppelganger/tools-changed', revision)
+    this.logger.debug('tools.catalog.changed tools=%d revision=%s', descriptors.length, revision)
     return revision
   }
 
@@ -390,37 +397,44 @@ export class ToolRegistry extends Service {
       if (request.turnId !== undefined) nonEmpty('tool invocation turnId', request.turnId)
       clonedInput = jsonClone(request.input, `tool "${name}" input`)
     } catch (cause) {
+      this.logger.warn('tools.invoke.rejected tool=unknown code=INVALID_INPUT')
       return failure('INVALID_INPUT', cause instanceof Error ? cause.message : String(cause))
     }
 
-    const current = [...this.ownerSets.values()].map(owner => owner.tools.get(name)).find(tool => tool !== undefined)
-    if (current === undefined) return failure('TOOL_NOT_FOUND', `tool "${name}" is not registered`)
-    if (current.revision !== toolRevision) {
-      return failure('TOOL_REVISION_STALE', `tool "${name}" revision is stale`)
+    const rejected = (code: string, message: string): ToolInvocationResult => {
+      this.logger.warn('tools.invoke.rejected tool=%s code=%s', name, code)
+      return failure(code, message)
     }
-    if (!current.definition.available) return failure('TOOL_UNAVAILABLE', `tool "${name}" is unavailable`)
-    if (this.activeCalls.has(callId)) return failure('TOOL_CALL_ACTIVE', `tool call "${callId}" is already active`)
+
+    this.logger.debug('tools.invoke.started tool=%s', name)
+    const current = [...this.ownerSets.values()].map(owner => owner.tools.get(name)).find(tool => tool !== undefined)
+    if (current === undefined) return rejected('TOOL_NOT_FOUND', `tool "${name}" is not registered`)
+    if (current.revision !== toolRevision) {
+      return rejected('TOOL_REVISION_STALE', `tool "${name}" revision is stale`)
+    }
+    if (!current.definition.available) return rejected('TOOL_UNAVAILABLE', `tool "${name}" is unavailable`)
+    if (this.activeCalls.has(callId)) return rejected('TOOL_CALL_ACTIVE', `tool call "${callId}" is already active`)
 
     if (current.definition.approval === undefined) {
       if (request.approval !== undefined) {
-        return failure('TOOL_APPROVAL_INVALID', `tool "${name}" does not accept an approval grant`)
+        return rejected('TOOL_APPROVAL_INVALID', `tool "${name}" does not accept an approval grant`)
       }
     } else {
       if (request.approval === undefined) {
-        return failure('TOOL_APPROVAL_REQUIRED', `tool "${name}" requires explicit approval`)
+        return rejected('TOOL_APPROVAL_REQUIRED', `tool "${name}" requires explicit approval`)
       }
       let approval: ToolApprovalGrant
       try {
         approval = validateGrant(request.approval)
       } catch (cause) {
-        return failure('TOOL_APPROVAL_INVALID', cause instanceof Error ? cause.message : String(cause))
+        return rejected('TOOL_APPROVAL_INVALID', cause instanceof Error ? cause.message : String(cause))
       }
       if (this.consumedApprovalGrants.has(approval.grantId)) {
-        return failure('TOOL_APPROVAL_INVALID', `tool approval grant "${approval.grantId}" was already consumed`)
+        return rejected('TOOL_APPROVAL_INVALID', `tool approval grant "${approval.grantId}" was already consumed`)
       }
       const inputDigest = createHash('sha256').update(canonicalJson(clonedInput)).digest('hex')
       if (approval.callId !== callId || approval.toolRevision !== toolRevision || approval.inputDigest !== inputDigest) {
-        return failure('TOOL_APPROVAL_INVALID', 'tool approval grant does not match the invocation')
+        return rejected('TOOL_APPROVAL_INVALID', 'tool approval grant does not match the invocation')
       }
       this.consumedApprovalGrants.add(approval.grantId)
     }
@@ -440,8 +454,10 @@ export class ToolRegistry extends Service {
         await current.definition.invoke(clonedInput, invocationContext),
         `tool "${name}" result`,
       )
+      this.logger.debug('tools.invoke.completed tool=%s outcome=completed', name)
       return Object.freeze({ ok: true, value })
     } catch (cause) {
+      this.logger.warn('tools.invoke.completed tool=%s outcome=failed code=%s', name, controller.signal.aborted ? 'TOOL_CANCELLED' : cause instanceof ToolInvocationError ? cause.code : 'TOOL_EXECUTION_FAILED')
       if (controller.signal.aborted) return failure('TOOL_CANCELLED', `tool "${name}" was cancelled`)
       if (cause instanceof ToolInvocationError) {
         return failure(
@@ -452,6 +468,7 @@ export class ToolRegistry extends Service {
       }
       return failure('TOOL_EXECUTION_FAILED', cause instanceof Error ? cause.message : String(cause))
     } finally {
+      this.logger.debug('tools.invoke.settled tool=%s', name)
       this.activeCalls.delete(callId)
       settle()
     }

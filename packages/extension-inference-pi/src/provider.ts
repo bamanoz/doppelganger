@@ -1,3 +1,4 @@
+import type { Logger } from '@deepseek-ai/cordis'
 import {
   StructuredInferenceError,
   type JsonValue,
@@ -114,9 +115,10 @@ export class PiStructuredInferenceProvider implements StructuredInferenceProvide
   readonly #models: Models
   readonly #model: Model<Api>
   readonly #active = new Set<ActiveCall>()
+  readonly #logger: Logger | undefined
   #closed = false
 
-  constructor(config: NormalizedPiInferencePluginConfig, models: Models = configuredModels(config)) {
+  constructor(config: NormalizedPiInferencePluginConfig, models: Models = configuredModels(config), logger?: Logger) {
     const provider = models.getProvider(config.provider)
     if (provider === undefined) throw new TypeError(`Pi inference provider ${JSON.stringify(config.provider)} is not installed`)
     const model = models.getModel(config.provider, config.model)
@@ -126,9 +128,11 @@ export class PiStructuredInferenceProvider implements StructuredInferenceProvide
     this.#config = Object.freeze({ ...config })
     this.#models = models
     this.#model = Object.freeze(structuredClone(model)) as Model<Api>
+    this.#logger = logger
   }
 
   async infer(request: StructuredInferenceRequest): Promise<StructuredInferenceResult> {
+    this.#logger?.debug('inference.invoke.started inputCharacters=%d', request.input.length)
     if (this.#closed) throw new StructuredInferenceError('UNAVAILABLE', 'Pi structured inference provider is closed')
     if (request.input.length > this.#config.maximumInputCharacters) {
       throw new StructuredInferenceError(
@@ -189,10 +193,15 @@ export class PiStructuredInferenceProvider implements StructuredInferenceProvide
       if (request.signal?.aborted === true) {
         throw new StructuredInferenceError('ABORTED', 'Pi structured inference request was aborted')
       }
-      return normalizeResult(message, this.#config.maximumResponseCharacters)
+      const result = normalizeResult(message, this.#config.maximumResponseCharacters)
+      this.#logger?.debug('inference.invoke.completed')
+      return result
     } catch (cause) {
-      if (cause instanceof StructuredInferenceError) throw cause
-      throw new StructuredInferenceError(providerFailureCode(cause), 'Pi structured inference provider failed')
+      const error = cause instanceof StructuredInferenceError
+        ? cause
+        : new StructuredInferenceError(providerFailureCode(cause), 'Pi structured inference provider failed')
+      this.#logger?.warn('inference.invoke.failed code=%s', error.code)
+      throw error
     } finally {
       clearTimeout(timer)
       request.signal?.removeEventListener('abort', abortFromCaller)
@@ -202,6 +211,7 @@ export class PiStructuredInferenceProvider implements StructuredInferenceProvide
   }
 
   close(): void {
+    this.#logger?.info('component.disposal.started activeCalls=%d', this.#active.size)
     if (this.#closed) return
     this.#closed = true
     for (const active of this.#active) {
@@ -209,6 +219,7 @@ export class PiStructuredInferenceProvider implements StructuredInferenceProvide
       active.reject(new StructuredInferenceError('UNAVAILABLE', 'Pi structured inference provider was disposed'))
     }
     this.#active.clear()
+    this.#logger?.info('component.disposal.completed')
   }
 
   #resolveApiKey(): string | undefined {

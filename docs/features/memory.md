@@ -63,6 +63,8 @@ The default local multilingual profile is pinned EmbeddingGemma q8 with normaliz
 
 Operational details are in [Semantic memory](../operations/semantic-memory.md).
 
+Canonical activation, mutation outcomes, search counts, and semantic degradation emit metadata-only ordinary Cordis events under `doppelganger-memory`; memory content, subjects, evidence, and actor identifiers are excluded. The shared event vocabulary and destination behavior are owned by [Runtime logging](runtime-logging.md).
+
 ## Primary implementation
 
 - `packages/extension-memory/src/service.ts` — canonical behavior and mutation interface.

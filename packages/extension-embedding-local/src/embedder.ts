@@ -3,6 +3,7 @@ import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { Logger } from '@deepseek-ai/cordis'
 import type { MemoryEmbedder, MemoryEmbedderIdentity } from '@doppelganger/doppelganger-memory'
 import { localEmbeddingModel, type LocalEmbeddingModelDefinition, type LocalEmbeddingModelName } from './models.ts'
 
@@ -185,11 +186,13 @@ export class LocalMemoryEmbedder implements MemoryEmbedder {
   private readonly closedRuntimes = new WeakSet<LocalEmbeddingRuntime>()
   private closePromise?: Promise<void>
   private closed = false
+  private readonly logger: Logger | undefined
 
   constructor(
     config: LocalEmbeddingConfig = {},
     runtimeLoader: LocalEmbeddingRuntimeLoader = loadTransformersRuntime,
     artifactValidator: LocalEmbeddingArtifactValidator = validateCachedArtifacts,
+    logger?: Logger,
   ) {
     this.model = localEmbeddingModel(config.model ?? 'embeddinggemma-300m')
     this.identity = this.model.identity
@@ -201,6 +204,7 @@ export class LocalMemoryEmbedder implements MemoryEmbedder {
     this.acquisitionTimeoutMs = positiveInteger('acquisitionTimeoutMs', config.acquisitionTimeoutMs ?? 120_000, 600_000)
     this.runtimeLoader = runtimeLoader
     this.artifactValidator = artifactValidator
+    this.logger = logger
   }
   executionStatus(): LocalEmbeddingExecutionStatus {
     return Object.freeze({
@@ -255,15 +259,21 @@ export class LocalMemoryEmbedder implements MemoryEmbedder {
   private runtime(): Promise<LocalEmbeddingRuntime> {
     if (this.closed) return Promise.reject(new LocalEmbeddingError('MODEL_LOAD', 'local embedder is closed'))
     if (this.runtimePromise !== undefined) return this.runtimePromise
+    this.logger?.info('embedding.runtime.acquisition.started device=%s offline=%s', this.requestedDevice, this.offline)
     this.runtimePromise = (async () => {
       try {
-        return await this.loadOn(this.requestedDevice)
+        const runtime = await this.loadOn(this.requestedDevice)
+        this.logger?.info('embedding.runtime.acquisition.completed device=%s fallback=false', this.requestedDevice)
+        return runtime
       } catch (error) {
         if (this.closed) throw new LocalEmbeddingError('MODEL_LOAD', 'local embedder is closed')
         if (error instanceof LocalEmbeddingError && (error.code === 'CORRUPT_CACHE' || error.code === 'OFFLINE_MODEL_UNAVAILABLE')) throw error
         if (this.requestedDevice !== 'cpu') {
           this.cpuFallback = true
-          return this.loadOn('cpu')
+          this.logger?.warn('embedding.runtime.fallback requested=%s active=cpu', this.requestedDevice)
+          const runtime = await this.loadOn('cpu')
+          this.logger?.info('embedding.runtime.acquisition.completed device=cpu fallback=true')
+          return runtime
         }
         throw new LocalEmbeddingError(
           this.offline ? 'OFFLINE_MODEL_UNAVAILABLE' : 'MODEL_LOAD',
@@ -271,10 +281,14 @@ export class LocalMemoryEmbedder implements MemoryEmbedder {
         )
       }
     })()
+    void this.runtimePromise.catch(error => {
+      this.logger?.warn('embedding.runtime.acquisition.failed code=%s', error instanceof LocalEmbeddingError ? error.code : 'MODEL_LOAD')
+    })
     return this.runtimePromise
   }
 
   private async embed(texts: readonly string[], mode: 'query' | 'document'): Promise<readonly Float32Array[]> {
+    this.logger?.debug('embedding.batch.started mode=%s count=%d', mode, texts.length)
     if (!Array.isArray(texts) || texts.length === 0) {
       throw new LocalEmbeddingError('INVALID_INPUT', 'embedding batch must be a non-empty array')
     }
@@ -292,7 +306,9 @@ export class LocalMemoryEmbedder implements MemoryEmbedder {
         vectors.push(l2Project(tensor.data, index * this.model.sourceDimensions, this.identity.dimensions))
       }
     }
-    return Object.freeze(vectors)
+    const result = Object.freeze(vectors)
+    this.logger?.debug('embedding.batch.completed mode=%s count=%d', mode, result.length)
+    return result
   }
 
   embedDocuments(texts: readonly string[]): Promise<readonly Float32Array[]> {
@@ -306,12 +322,19 @@ export class LocalMemoryEmbedder implements MemoryEmbedder {
   }
 
   close(): Promise<void> {
+    if (this.closePromise !== undefined) return this.closePromise
+    this.logger?.info('component.disposal.started')
     this.closed = true
-    return this.closePromise ??= (async () => {
-      const candidate = this.acquisitionCandidate
-      if (candidate !== undefined) await this.closeRuntime(candidate)
-      const runtime = await this.runtimePromise?.catch(() => undefined)
-      if (runtime !== undefined) await this.closeRuntime(runtime)
+    this.closePromise = (async () => {
+      try {
+        const candidate = this.acquisitionCandidate
+        if (candidate !== undefined) await this.closeRuntime(candidate)
+        const runtime = await this.runtimePromise?.catch(() => undefined)
+        if (runtime !== undefined) await this.closeRuntime(runtime)
+      } finally {
+        this.logger?.info('component.disposal.completed')
+      }
     })()
+    return this.closePromise
   }
 }

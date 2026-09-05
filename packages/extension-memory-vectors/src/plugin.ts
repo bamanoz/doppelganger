@@ -99,9 +99,16 @@ export const SQLiteExactVectorPlugin: Plugin<SQLiteExactVectorPluginConfig> = {
   Config: SQLiteExactVectorPluginConfigSchema as unknown as NonNullable<Plugin<SQLiteExactVectorPluginConfig>['Config']>,
   provide: MEMORY_VECTOR_INDEX_SERVICE,
   async apply(ctx: Context, config: SQLiteExactVectorPluginConfig) {
+    const logger = ctx.logger('doppelganger-memory-vectors-sqlite-exact')
+    logger.info('component.activation.started')
     const index = await createSQLiteExactMemoryVectorIndex(config)
     ctx.provide(MEMORY_VECTOR_INDEX_SERVICE, index)
-    ctx.effect(() => async () => { await index.close() }, 'doppelgangerMemoryVectors.sqliteExact.close')
+    logger.info('component.active')
+    ctx.effect(() => async () => {
+      logger.info('component.disposal.started')
+      await index.close()
+      logger.info('component.disposal.completed')
+    }, 'doppelgangerMemoryVectors.sqliteExact.close')
   },
 }
 

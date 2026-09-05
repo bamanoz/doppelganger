@@ -28,9 +28,12 @@ export const PiInferencePlugin: Plugin<PiInferencePluginConfig> = {
   Config: PiInferencePluginConfigSchema as unknown as NonNullable<Plugin<PiInferencePluginConfig>['Config']>,
   provide: STRUCTURED_INFERENCE_SERVICE,
   apply(ctx: Context, input: PiInferencePluginConfig) {
+    const logger = ctx.logger('doppelganger-inference-pi')
+    logger.info('component.activation.started provider=%s model=%s', input.provider, input.model)
     const config = normalizePiInferencePluginConfig(input)
-    const provider = new PiStructuredInferenceProvider(config)
+    const provider = new PiStructuredInferenceProvider(config, undefined, logger)
     ctx.provide(STRUCTURED_INFERENCE_SERVICE, createStructuredInference(provider))
+    logger.info('component.active')
     ctx.effect(() => () => provider.close(), 'doppelgangerInferencePi.close')
   },
 }

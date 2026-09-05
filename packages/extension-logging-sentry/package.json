@@ -1,0 +1,37 @@
+{
+  "name": "@doppelganger/doppelganger-logging-sentry",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./loader": {
+      "types": "./src/plugin.ts",
+      "import": "./src/plugin.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.1",
+    "@doppelganger/doppelganger-composition-runtime": "0.0.0",
+    "@sentry/node": "10.73.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@types/node": "26.4.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -21,6 +21,21 @@ export {
   type CompositionWatchOptions,
 } from './runtime.ts'
 export {
+  RUNTIME_LOGGING_LIMITS,
+  RUNTIME_LOGGING_SERVICE,
+  RuntimeLoggingRouter,
+  compareRuntimeLogSeverity,
+  runtimeLogLevelAllows,
+  truncateRuntimeLogUtf8,
+  type RuntimeLogError,
+  type RuntimeLoggingLimits,
+  type RuntimeLoggingService,
+  type RuntimeLogRecord,
+  type RuntimeLogSeverity,
+  type RuntimeLogSink,
+  type RuntimeLogSinkOptions,
+} from './runtime-logging.ts'
+export {
   CompositionActivationError,
   activationFailures,
   type CompositionDiagnostics,

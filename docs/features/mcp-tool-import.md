@@ -96,6 +96,8 @@ MCP servers and stdio executables are trusted external dependencies, not sandbox
 
 Operators must trust each executable or endpoint, constrain its own filesystem/network authority, select credentials narrowly, review imported schemas and approval policy, and account for data disclosure. Stable server IDs are configuration identities; server-reported names and annotations do not grant authority.
 
+Component lifecycle, server startup/refresh/failure, configuration replacement, sanitized diagnostic codes, and cleanup emit ordinary Cordis events under `doppelganger-mcp`; credentials, endpoints, commands, arguments, schemas, and tool results are excluded. The shared event vocabulary and destination behavior are owned by [Runtime logging](runtime-logging.md).
+
 ## Primary implementation
 
 - `packages/extension-mcp/src/config.ts` — strict Loader configuration, startup timeout, and credential references.

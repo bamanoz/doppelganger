@@ -26,9 +26,16 @@ export const PgVectorPlugin: Plugin<PgVectorPluginConfig> = {
   Config: PgVectorPluginConfigSchema as unknown as NonNullable<Plugin<PgVectorPluginConfig>['Config']>,
   provide: MEMORY_VECTOR_INDEX_SERVICE,
   async apply(ctx: Context, config: PgVectorPluginConfig) {
+    const logger = ctx.logger('doppelganger-memory-vectors-pgvector')
+    logger.info('component.activation.started')
     const index = await createPgVectorMemoryVectorIndex(config)
     ctx.provide(MEMORY_VECTOR_INDEX_SERVICE, index)
-    ctx.effect(() => async () => { await index.close() }, 'doppelgangerMemoryVectors.pgvector.close')
+    logger.info('component.active')
+    ctx.effect(() => async () => {
+      logger.info('component.disposal.started')
+      await index.close()
+      logger.info('component.disposal.completed')
+    }, 'doppelgangerMemoryVectors.pgvector.close')
   },
 }
 

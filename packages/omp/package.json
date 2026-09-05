@@ -36,6 +36,8 @@
     "@doppelganger/doppelganger-extension-mcp": "0.0.0",
     "@doppelganger/doppelganger-host-omp": "0.0.0",
     "@doppelganger/doppelganger-inference-pi": "0.0.0",
+    "@doppelganger/doppelganger-logging-file": "0.0.0",
+    "@doppelganger/doppelganger-logging-sentry": "0.0.0",
     "@doppelganger/doppelganger-persona": "0.0.0",
     "@doppelganger/doppelganger-persona-authoring": "0.0.0",
     "@doppelganger/doppelganger-protocols": "0.0.0",

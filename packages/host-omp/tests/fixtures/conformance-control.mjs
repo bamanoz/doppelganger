@@ -4,7 +4,6 @@ import { writeFile } from 'node:fs/promises'
 // Test-only control plane. Tested operations still use the real OMP RPC surface.
 export default {
   name: 'conformance-control',
-  inject: ['doppelgangerActor'],
   async apply(ctx, config) {
     const registry = ctx.get('doppelgangerTools', false)
     const owners = new Map()
@@ -51,7 +50,11 @@ export default {
           case 'snapshot': break
           default: throw new Error('unknown fixture operation')
         }
-        response.end(JSON.stringify({ revision: registry?.snapshot().revision ?? 'catalog:0', actor: ctx.doppelgangerActor }))
+        const actor = ctx.get('doppelgangerActor', false)
+        response.end(JSON.stringify({
+          revision: registry?.snapshot().revision ?? 'catalog:0',
+          ...(actor === undefined ? {} : { actor }),
+        }))
       } catch (error) {
         response.statusCode = 409
         response.end(JSON.stringify({ error: error.message }))

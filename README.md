@@ -4,14 +4,14 @@ Doppelganger is a portable extension runtime for AI-agent environments, built on
 
 Persona is the first product layer built on the runtime. It is composed from ordinary Cordis plugins rather than encoded as a fixed model in the kernel.
 
-> Status: experimental, private workspace. The authoritative Runtime Preset roster and OMP vertical slice are implemented; the DeepSeek Harness host is deferred.
+> Status: experimental, private workspace. The authoritative Runtime Preset roster and OMP vertical slice are implemented. The native OpenClaw adapter is certified by an installed-Gateway smoke against `openclaw@2026.9.1` build `ad6fe23`; DeepSeek Harness remains deferred.
 
 ## What it provides
 
 - Isolated runtime session and Cordis plugin tree per agent session.
 - Declarative composition with transactional hot reload and rollback.
 - Ordered `system`/`user` Runtime Preset roots, a shipped actor-neutral `standard` default, copy-only authoring, and an optional Cordis roster service.
-- Host-neutral context, tool, and lifecycle protocols.
+- Host-neutral context, tool, lifecycle, Actor Identity, and exact-host Host Extension composition contracts.
 - Persona identity and ordered traits as portable plugins.
 - Optional logical-target Persona inspection and one-shot approved trait revision with exact-byte CAS and HMR-confirmed rollback.
 - SQLite- or PostgreSQL-backed, actor-partitioned canonical memory with immutable revisions and provenance.
@@ -19,6 +19,7 @@ Persona is the first product layer built on the runtime. It is composed from ord
 - Provider-backed lexical and optional semantic top-K retrieval, deterministic reciprocal-rank fusion, fresh canonical revalidation, temporal eligibility, and hard budgets.
 - A versioned framed JSON-RPC bridge for Oh My Pi (OMP).
 - Dynamic OMP tools translated from runtime JSON Schemas.
+- A native OpenClaw plugin with audited finite-catalog preparation, direct Runtime Sessions, per-turn context, exact approval/cancellation, explicit actor routing, and deterministic teardown.
 - Optional session-owned Dynamic Runtime Plugins with source-verified inspection, immutable Packages, guarded JavaScript evaluation, and exact one-shot approval.
 - Optional default-off session logging to rolling JSONL files or a private Sentry client without OMP output or RPC projection.
 
@@ -29,6 +30,7 @@ Doppelganger does **not** implement an agent loop or model provider. It extends 
 - Node.js 26 or newer
 - npm
 - OMP 18.x for the host integration
+- OpenClaw 2026.9.1 for the current native integration candidate
 
 ## Development
 
@@ -58,6 +60,7 @@ npm run check:security
 packages/
 ├── runtime-presets      Ordered roster, shipped standard preset, copy-only authoring, and Cordis facade
 ├── composition-runtime Cordis composition, sessions, patches, diagnostics, and reload
+├── host-extension-runtime Versioned definitions, explicit catalogs, normalized plans, and protected entries
 ├── extension-protocols Context, tools, and normalized lifecycle contracts
 ├── extension-persona   Persona activation metadata, identity, traits, and Loader root
 ├── extension-persona-authoring  Logical inspection and approved exact trait revision
@@ -70,6 +73,7 @@ packages/
 ├── extension-embedding-local  Lazy EmbeddingGemma/MiniLM Loader plugin and validated model cache
 ├── extension-memory-vectors   Derived semantic coordinator and SQLite exact/Chroma/Qdrant/pgvector Loader backends
 ├── host-omp            Generic OMP adapter, child runtime, and framed RPC transport
+├── host-openclaw       Native OpenClaw adapter, finite deployment preparation, and direct Runtime Session ownership
 └── omp                 Private local OMP plugin install unit and neutral entrypoint
 
 skills/                  Installable cross-host Agent Skills grouped by owning feature
@@ -90,7 +94,9 @@ explicit choice   ─┐
 project choice    ─┼─> Runtime Preset + user/project patches
 user default      ─┤                    │
 deployment default─┘                    ▼
-                             serialized activation
+                             authored composition
+                                        │
+trusted host modules/config ─> Host Extension plan
                                         │
                                         ▼
                            isolated Runtime Session
@@ -108,10 +114,11 @@ Core concepts:
 - **Runtime Preset** — a complete, self-contained Cordis Loader tree in one directory under an ordered `system` or `user` root.
 - **Runtime Preset roster** — deterministic multi-root discovery, health, selection, copy/remove authoring, and deployment-default policy outside Runtime Sessions.
 - **Runtime Patch** — an optional Cordis Include patch list layered over the selected preset.
+- **Host Extension** — a versioned definition for one exact host kind, installed and selected through trusted host-native configuration, then instantiated from closed session facts as a fresh protected entry.
 - **Runtime Session** — one isolated activation inside one host agent session.
 - **Persona Instance** — optional identity and state lineage owned by Persona extensions, not by the kernel or host.
 
-The kernel knows composition, isolation, diagnostics, reload, and teardown. It does not know what Persona, identity, traits, memory, actors, storage, context, or tools mean. The protected shared Runtime Host bridge is actor-neutral and projects standard protocols only when the selected composition provides them. A compatible host may mount Actor Identity as a separate protected absent, unbound, or bound capability; an empty Runtime Preset remains valid.
+The kernel knows composition, isolation, diagnostics, reload, and teardown. It does not know what Persona, identity, traits, memory, actors, storage, context, or tools mean. Runtime Presets cannot select or target Host Extensions. The standard `runtime-host` Host Extension installs the actor-neutral shared bridge; a host may independently select `actor` for bound or unbound Actor Identity or omit it for provider absence. Host Extension changes replace the Runtime Session rather than hot-mutating authority beneath live closures.
 
 ## Local OMP installation and dogfooding
 
@@ -148,7 +155,25 @@ The home path may be absent before launch. The first Runtime Preset selection cr
 
 The project-local `.omp/extensions/doppelganger.ts` is only a default re-export from that same package entrypoint. Repository integration tests exercise it with generated temporary Runtime Presets and test actors; they do not consume a personal preset or durable user state.
 
-The extension starts one child runtime for its committed OMP binding, appends assembled runtime context to each model turn, and exposes available runtime tools with the `doppelganger_` prefix.
+The extension starts one child runtime for its committed OMP binding, imports any explicitly configured `hostKind: "omp"` Host Extension modules before child creation, instantiates fresh protected entries, appends assembled runtime context to each model turn, and exposes available runtime tools with the `doppelganger_` prefix. Programmatic embedders configure exact module specifiers and ordered selections through `DoppelgangerOmpExtensionOptions.hostExtensions`; Runtime Presets and project manifests cannot add them.
+
+## Local OpenClaw preparation and installation
+
+OpenClaw requires concrete native tool names at registration, so Doppelganger separates artifact preparation from native installation. Preparation activates one selected Runtime Preset as trusted code, snapshots its portable catalog, imports and bundles exact trusted `hostKind: "openclaw"` Host Extension modules, disposes the temporary Runtime Session, validates separately fingerprinted tool and Host Extension metadata, and atomically publishes only that output:
+
+```bash
+npm exec --workspace @doppelganger/doppelganger-host-openclaw -- \
+  doppelganger-openclaw-prepare \
+  --output /absolute/path/to/openclaw-doppelganger \
+  --preset my-assistant \
+  --workspace /absolute/path/to/project
+```
+
+Use repeatable `--host-extension <module>` and `--enable-host-extension <id>` or `<id>=<JSON>` to prepare custom definitions. Runtime `hostExtensions` selections are restricted to those prepared IDs; module or available-ID changes require regeneration and native restart. This repository does not publish `@doppelganger/doppelganger-host-openclaw`. For local source-checkout use on Node.js 26, expose each private TypeScript workspace package through a package-name symlink whose resolved source realpath remains outside `node_modules`; copying raw TypeScript package trees under `node_modules` fails Loader imports with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`, and no compiled-package fallback is claimed. Then install or link the generated artifact with OpenClaw's normal plugin manager. Configure `plugins.entries.doppelganger.hooks.allowConversationAccess: true`, keep `allowPromptInjection` enabled, configure the same roster/preset, prepared Host Extension selection, and exact actor routes under the plugin's `config`, then restart and inspect the active Gateway.
+
+MCP discovery is background by default. Use `startupMode: await-ready` in the operator-owned MCP Loader row before preparation when the initial generated manifest must contain those tools. The OpenClaw warmup default is 10 seconds, which can expire before MCP's default 60-second startup deadline; neither deadline bounds final cleanup. New names or incompatible descriptor contracts require regeneration and native restart. Arbitrary generated Runtime Plugin names, external harnesses, automatic committed-turn capture, and actor inference from channel senders are unsupported.
+
+See [OpenClaw](./docs/hosts/openclaw.md) for installation, configuration, identity, capabilities, approval, lifecycle, trust, and disposal details.
 
 ## Runtime Preset configuration
 
@@ -224,7 +249,7 @@ Optional patch files use Cordis Include patch syntax and apply in this order:
 $DOPPELGANGER_HOME/runtime.cordis.patch.yml
 <project>/.doppelganger/runtime.cordis.patch.yml
 explicit host patches
-protected runtime-owned plugins (shared Runtime Host, optional Actor Identity, typed host extensions)
+protected Host Extension composition (shared Runtime Host, optional Actor Identity, typed host extensions)
 ```
 
 The runtime watches the selected preset and applicable patch paths. A valid generation replaces the active tree; an invalid update rolls back without mutating authored files.
@@ -612,4 +637,4 @@ This syntax is intentionally conservative. Alternative extractors can implement 
 
 ## Current boundary
 
-The current implemented boundary supports one portable Persona Definition across the generic runtime and the OMP host, including persistence, candidate capture, lifecycle transport, dynamic tools, hot reload, optional Dynamic Runtime Plugins, and optional Evolution proposals/reminders. Public release remains deferred. A native DeepSeek Harness host is the next integration milestone; it should reuse the same definitions and feature plugins without duplicating Persona or Evolution logic.
+The completed OMP milestone proves one portable Persona Definition across the generic runtime and the transported OMP host, including persistence, candidate capture, lifecycle transport, dynamic tools, hot reload, optional Dynamic Runtime Plugins, and optional Evolution proposals/reminders. The direct OpenClaw adapter reuses the same Runtime Preset and protocol layers with a deliberately narrower prepared-catalog and empty-lifecycle profile and is certified against the installed `openclaw@2026.9.1` build `ad6fe23`. DeepSeek Harness is still the next deferred host integration and should reuse the same definitions and feature plugins without duplicating Persona or Evolution logic.

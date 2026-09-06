@@ -67,13 +67,15 @@ describe('identity plugin', () => {
     const session = await runtime.activate({
       composition: { id: 'identity-composition', revision: 'one', loaderPath, patches: [] },
       sessionId: 'identity-session',
-      runtimePlugins: {
-        host,
-        persona: createPersonaActivationPlugin({
+      protectedComposition: {
+        entries: [
+          { id: 'host', plugin: host },
+          { id: 'persona', plugin: createPersonaActivationPlugin({
           instanceId: 'test-persona',
           sessionId: 'identity-session',
           identity: { path: identityPath, priority: 500 },
-        }),
+        }) },
+        ],
       },
     })
     if (resolveContext === undefined || observeReload === undefined || notifyChange === undefined) {

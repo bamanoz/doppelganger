@@ -7,24 +7,31 @@ Defines host-authoritative, session-isolated actor identity for actor-aware exte
 ## Requirements
 
 ### Requirement: Host-authoritative actor binding
-When a compatible host supplies actor identity, it SHALL bind at most one validated actor identifier to a Runtime Session through a separate protected runtime-owned actor plugin. The binding SHALL be immutable for the lifetime of that Runtime Session and SHALL be exposed to extensions as a session-isolated `doppelgangerActor` service with a frozen discriminated value: `{ state: "bound", actorId }` or `{ state: "unbound" }`. The shared Runtime Host bridge, capability profile, requests, tool-catalog callback, context, tools, and lifecycle contracts SHALL NOT construct, require, contain, or infer that binding.
+When a compatible host supplies Actor Identity, its trusted Host Extension Composition SHALL bind at most one validated actor identifier to a Runtime Session through an independent Actor Identity extension. Host-specific resolution SHALL consume only closed immutable host-session facts and deployment-owned configuration; it SHALL remain outside the core adapter, Runtime Preset, Runtime Patches, Persona state, model context, and tool input. The resulting binding SHALL be immutable for the Runtime Session lifetime and exposed as a session-isolated `doppelgangerActor` service with a frozen discriminated value: `{ state: "bound", actorId }` or `{ state: "unbound" }`. The shared Runtime Host bridge and capability profile SHALL contain no actor fields.
 
 #### Scenario: Host starts a bound session
 - **ID**: `actor.identity.host-starts-a-bound-session`
-- **EVIDENCE**: `packages/extension-protocols/tests/actor.spec.ts::isolates immutable actor bindings between concurrent sessions`
-- **WHEN** a host activates a Runtime Session with a valid actor identifier and actor-aware plugins
-- **THEN** it mounts a separate actor provider and every extension in that service's isolation realm observes the same frozen actor identity
+- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::mounts an actor-neutral bridge, optional actor provider, and typed host sibling in isolated session realms`
+- **WHEN** a trusted Actor Host Extension resolves a valid identifier for one native session and an actor-aware plugin is composed
+- **THEN** it provides one frozen actor binding and every consumer in that service's isolation realm observes the same value
+
+#### Scenario: Two hosts use different resolution extensions
+- **ID**: `actor.identity.host-specific-resolution-extensions`
+- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::isolates bound actors, exposes unbound state, and retains the host binding across reload`
+- **EVIDENCE**: `packages/host-openclaw/tests/identity.spec.ts::isolates trusted actor and workspace bindings across gateway sessions in one adapter`
+- **WHEN** OMP resolves an admitted activation actor and OpenClaw resolves an exact native route mapping
+- **THEN** both Host Extensions provide the same Actor Identity interface while neither resolution policy enters the common bridge or feature plugins
 
 #### Scenario: Two sessions use different actors
 - **ID**: `actor.identity.two-sessions-use-different-actors`
-- **EVIDENCE**: `packages/extension-protocols/tests/actor.spec.ts::isolates immutable actor bindings between concurrent sessions`
-- **WHEN** two concurrent Runtime Sessions are activated with different actor identifiers
-- **THEN** each separate actor provider exposes only its own immutable identity and neither binding changes through composition reload
+- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::isolates bound actors, exposes unbound state, and retains the host binding across reload`
+- **WHEN** two concurrent Runtime Sessions activate Host Extension Compositions that resolve different actors
+- **THEN** each session exposes only its own immutable identity and neither binding changes through Runtime Preset reload
 
-#### Scenario: Shared bridge activates without actor identity
+#### Scenario: Shared bridge activates without Actor Identity
 - **ID**: `actor.identity.shared-bridge-activates-without-actor-identity`
-- **EVIDENCE**: `packages/extension-protocols/tests/actor.spec.ts::validates and freezes bound and unbound identities`
-- **WHEN** an actor-independent Runtime Preset activates through the common Runtime Host API
+- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
+- **WHEN** an actor-independent Runtime Preset activates with a Host Extension Composition that omits the Actor Identity extension
 - **THEN** the bridge activates without receiving an actor identifier, creating an actor provider, or synthesizing actor state
 
 ### Requirement: Actor identity is outside authored Persona state
@@ -43,41 +50,23 @@ Runtime Presets, Persona configuration, project selection manifests, model conte
 - **THEN** the tool derives actor identity from the session service and exposes no actor identifier or actor-switch field in its input
 
 ### Requirement: Actor binding is optional for generic composition
-Actor Identity SHALL have three distinct observable states. If `doppelgangerActor` is absent, the host does not support or did not install the capability. If it is present with `{ state: "unbound" }`, the host supports the capability but has no resolved user. If it is present with `{ state: "bound", actorId }`, the host resolved one immutable user. Generic compositions SHALL remain valid in the first two states. An actor-aware persistent extension SHALL require the service and additionally require `bound`; it SHALL fail visibly for absent or unbound state and SHALL NOT create an implicit anonymous, default, Persona-authored, bridge-derived, or model-selected partition.
+Actor Identity SHALL retain three distinct observable states. If `doppelgangerActor` is absent, the Host Extension Composition did not install the capability. If present with `{ state: "unbound" }`, the installed extension supports Actor Identity but resolved no user. If present with `{ state: "bound", actorId }`, the extension resolved one immutable user. Generic compositions SHALL remain valid in the first two states. An actor-aware persistent extension SHALL require the service and additionally require `bound`; it SHALL fail visibly for absent or unbound state and SHALL NOT create an implicit anonymous, default, Persona-authored, bridge-derived, model-selected, or adapter-global partition.
 
-#### Scenario: Host does not install Actor Identity
+#### Scenario: Host omits the Actor Identity extension
 - **ID**: `actor.identity.host-does-not-install-actor-identity`
-- **EVIDENCE**: `packages/extension-protocols/tests/actor.spec.ts::validates and freezes bound and unbound identities`
-- **WHEN** a compatible host activates an actor-independent Runtime Preset without mounting the provider
-- **THEN** `doppelgangerActor` is absent and the Runtime Session plus shared bridge activate normally without synthetic actor state
+- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::mounts an actor-neutral bridge, optional actor provider, and typed host sibling in isolated session realms`
+- **WHEN** a compatible host activates an actor-independent Runtime Preset without the Actor Identity Host Extension
+- **THEN** `doppelgangerActor` is absent and the Runtime Session plus shared bridge activate normally
 
-#### Scenario: Host supports Actor Identity without a resolved user
+#### Scenario: Host installs Actor Identity without a resolved user
 - **ID**: `actor.identity.host-supports-actor-identity-without-a-resolved-user`
-- **EVIDENCE**: `packages/extension-protocols/tests/actor.spec.ts::validates and freezes bound and unbound identities`
-- **WHEN** an adapter such as OMP mounts its independent actor provider without an `actorId`
-- **THEN** consumers observe explicit `unbound` state and can distinguish it from an unsupported or omitted provider
-
-#### Scenario: Host resolves one user
-- **ID**: `actor.identity.host-resolves-one-user`
-- **EVIDENCE**: `packages/extension-protocols/tests/actor.spec.ts::validates and freezes bound and unbound identities`
-- **WHEN** the provider receives a valid host-authoritative actor identifier
-- **THEN** consumers observe immutable `bound` state for the lifetime of that Runtime Session
+- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::mounts an actor-neutral bridge, optional actor provider, and typed host sibling in isolated session realms`
+- **WHEN** the trusted Host Extension Composition installs Actor Identity in explicit unbound mode
+- **THEN** consumers distinguish it from both an omitted provider and a bound user
 
 #### Scenario: Persistent memory has no bound actor
 - **ID**: `actor.identity.persistent-memory-has-no-bound-actor`
-- **EVIDENCE**: `packages/extension-protocols/tests/actor.spec.ts::validates and freezes bound and unbound identities`
-- **WHEN** a Runtime Preset includes persistent memory but the separate actor service is unbound or unavailable
-- **THEN** audited activation fails with an actor-identity diagnostic before memory tools or recall become available
-
-#### Scenario: Empty preset has no actor binding
-- **ID**: `actor.binding.unbound-generic`
-- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::isolates bound actors, exposes unbound state, and retains the host binding across reload`
-- **WHEN** a compatible host activates an empty or actor-independent Runtime Preset without an actor identifier
-- **THEN** the Runtime Session activates with explicit unbound actor state
-
-#### Scenario: Persistent memory has no actor binding
-- **ID**: `actor.binding.required-memory`
-- **EVIDENCE**: `packages/extension-memory/tests/memory-mutations.spec.ts::rejects an unbound actor before opening canonical storage`
 - **EVIDENCE**: `packages/host-omp/tests/vertical.spec.ts::fails memory activation before canonical storage opens when the host actor is unbound`
-- **WHEN** a Runtime Preset includes persistent memory but the actor service is unbound or unavailable
-- **THEN** audited activation fails with an actor-identity diagnostic before memory tools or recall become available
+- **EVIDENCE**: `packages/host-omp/tests/vertical.spec.ts::fails memory activation before canonical storage opens when Actor Identity is omitted`
+- **WHEN** a Runtime Preset includes persistent memory but the Actor Identity Host Extension is absent or unbound
+- **THEN** audited activation fails with an actor-identity diagnostic before memory tools or canonical storage become available

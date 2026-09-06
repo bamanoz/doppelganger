@@ -69,16 +69,18 @@ describe('traits plugin', () => {
     const session = await runtime.activate({
       composition: { id: 'traits-composition', revision: 'one', loaderPath, patches: [] },
       sessionId: 'traits-session',
-      runtimePlugins: {
-        host,
-        persona: createPersonaActivationPlugin({
+      protectedComposition: {
+        entries: [
+          { id: 'host', plugin: host },
+          { id: 'persona', plugin: createPersonaActivationPlugin({
           instanceId: 'stable-aiden',
           sessionId: 'traits-session',
           traits: [
             { name: 'engineer', path: engineerPath },
             { name: 'concise', path: concisePath },
           ],
-        }),
+        }) },
+        ],
       },
     })
     if (resolveContext === undefined || observeReload === undefined || notifyChange === undefined) {

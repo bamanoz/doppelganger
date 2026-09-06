@@ -5,7 +5,11 @@ import { fileURLToPath } from 'node:url'
 import { it } from 'vitest'
 import { defineAssembledContext, type ActorIdentity, type RuntimeHostBridge } from '@doppelganger/doppelganger-protocols'
 import {
-  conformanceApproval, conformanceCallLifecycle, conformanceCatalog, runtimeHostConformance,
+  conformanceApproval,
+  conformanceCallLifecycle,
+  conformanceCatalog,
+  expectRuntimeHostActorState,
+  runtimeHostConformance,
   type RuntimeHostConformanceFactory,
 } from '@doppelganger/doppelganger-protocols/test-support/runtime-host-conformance'
 import { OmpAdapterSession, type OmpChildConnection } from '../src/adapter.ts'
@@ -16,10 +20,9 @@ const childPath = fileURLToPath(new URL('../src/child.ts', import.meta.url))
 const controlPath = fileURLToPath(new URL('./fixtures/conformance-control.mjs', import.meta.url))
 
 const ompFactory: RuntimeHostConformanceFactory = {
-  actorStates: ['unbound', 'bound'],
+  actorStates: ['absent', 'unbound', 'bound'],
   fixedCapabilities: true,
   async create(options = {}) {
-    if (options.actor === 'absent') throw new Error('OMP always mounts an Actor Identity provider')
     const root = await mkdtemp(join(tmpdir(), 'doppelganger-omp-conformance-'))
     const loaderPath = join(root, 'runtime.cordis.yml')
     const endpointPath = join(root, 'control.endpoint')
@@ -37,7 +40,18 @@ const ompFactory: RuntimeHostConformanceFactory = {
       activation: {
         composition: { id: 'omp-conformance', revision: 'one', loaderPath, patches: [] },
         hostKind: 'omp', sessionId: options.sessionId ?? crypto.randomUUID(), workspaceRoot: root, watch: false,
-        ...(typeof options.actor === 'object' ? { actorId: options.actor.actorId } : {}),
+        hostExtensions: {
+          modules: [],
+          selections: [
+            ...(options.actor === 'absent' ? [] : [{ id: 'actor', config: null }]),
+            { id: 'omp-host-events', config: null },
+            { id: 'runtime-host', config: null },
+          ],
+          facts: {
+            hostKind: 'omp',
+            ...(typeof options.actor === 'object' ? { actorId: options.actor.actorId } : {}),
+          },
+        },
       },
       childFactory: {
         async start() {
@@ -70,10 +84,14 @@ const ompFactory: RuntimeHostConformanceFactory = {
       const connection = adapter.connection()!
       if (connection.processId === undefined) throw new Error('conformance must own an actual child process')
       const endpoint = await readFile(endpointPath, 'utf8')
-      async function control(command: Record<string, unknown>): Promise<{ revision: string; actor: ActorIdentity }> {
+      async function control(command: Record<string, unknown>): Promise<{ revision: string; actor?: ActorIdentity }> {
         if (disposed) throw new Error('conformance session is disposed')
-        const response = await fetch(endpoint, { method: 'POST', body: JSON.stringify(command), signal: AbortSignal.timeout(5000) })
-        const result = await response.json() as { revision: string; actor: ActorIdentity; error?: string }
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          body: JSON.stringify(command),
+          signal: AbortSignal.timeout(5000),
+        })
+        const result = await response.json() as { revision: string; actor?: ActorIdentity; error?: string }
         if (!response.ok) throw new Error(result.error)
         return result
       }
@@ -121,6 +139,18 @@ const ompFactory: RuntimeHostConformanceFactory = {
 
 runtimeHostConformance('OMP adapter', ompFactory)
 
+it('keeps Actor Identity absent, unbound, and bound through the real OMP adapter', async () => {
+  const absent = await ompFactory.create({ actor: 'absent' })
+  const unbound = await ompFactory.create({ actor: 'unbound' })
+  const bound = await ompFactory.create({ actor: { actorId: 'actor-one' } })
+  try {
+    expectRuntimeHostActorState(absent.actorIdentity, 'absent')
+    expectRuntimeHostActorState(unbound.actorIdentity, 'unbound')
+    expectRuntimeHostActorState(bound.actorIdentity, { actorId: 'actor-one' })
+  } finally {
+    await Promise.all([absent.dispose(), unbound.dispose(), bound.dispose()])
+  }
+})
 it('preserves catalog and stale-revision semantics through the real OMP adapter', async () => { await conformanceCatalog(ompFactory) })
 it('enforces one-shot approval through the real OMP adapter', async () => { await conformanceApproval(ompFactory) })
 it('settles cancellation and disposal through the real OMP adapter', async () => { await conformanceCallLifecycle(ompFactory) })

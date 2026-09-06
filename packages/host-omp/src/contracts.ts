@@ -5,6 +5,11 @@ import {
   type CanonicalCompositionDefinition,
   type CanonicalCompositionInput,
 } from '@doppelganger/doppelganger-composition-runtime'
+import type {
+  HostExtensionSelection,
+  HostExtensionSelectionInput,
+  HostSessionFacts,
+} from '@doppelganger/doppelganger-host-extensions'
 import {
   RUNTIME_HOST_PROTOCOL_VERSION,
   cloneJsonValue,
@@ -26,7 +31,7 @@ import {
   type ToolInvocationResult,
 } from '@doppelganger/doppelganger-protocols'
 
-export const OMP_RPC_PROTOCOL_VERSION = 4 as const
+export const OMP_RPC_PROTOCOL_VERSION = 5 as const
 
 export const OMP_RUNTIME_HOST_CAPABILITIES: RuntimeHostCapabilities = defineRuntimeHostCapabilities({
   protocolVersion: RUNTIME_HOST_PROTOCOL_VERSION,
@@ -45,13 +50,29 @@ export const OMP_RUNTIME_HOST_CAPABILITIES: RuntimeHostCapabilities = defineRunt
   },
 })
 
+export interface OmpHostExtensionConfiguration {
+  readonly modules?: readonly string[]
+  readonly enabled?: readonly HostExtensionSelectionInput[]
+}
+
+export interface OmpHostSessionFacts extends HostSessionFacts {
+  readonly hostKind: 'omp'
+  readonly actorId?: string
+}
+
+export interface PreparedOmpHostExtensions {
+  readonly modules: readonly string[]
+  readonly selections: readonly HostExtensionSelection[]
+  readonly facts: OmpHostSessionFacts
+}
+
 export interface SerializedOmpActivation {
   readonly composition: CanonicalCompositionInput
   readonly sessionId: string
   readonly workspaceRoot?: string
   readonly hostKind: 'omp'
   readonly watch?: boolean
-  readonly actorId?: string
+  readonly hostExtensions: PreparedOmpHostExtensions
 }
 
 export interface DefinedSerializedOmpActivation {
@@ -60,7 +81,7 @@ export interface DefinedSerializedOmpActivation {
   readonly workspaceRoot?: string
   readonly hostKind: 'omp'
   readonly watch?: boolean
-  readonly actorId?: string
+  readonly hostExtensions: PreparedOmpHostExtensions
 }
 
 export interface DefinedSessionActivateParams extends DefinedSerializedOmpActivation {
@@ -145,13 +166,40 @@ function approvalGrant(value: unknown, label: string): ToolApprovalGrant {
     inputDigest: nonEmpty(record.inputDigest, `${label}.inputDigest`),
   })
 }
+function definePreparedOmpHostExtensions(value: unknown, label: string): PreparedOmpHostExtensions {
+  const record = object(value, label)
+  exactKeys(record, ['modules', 'selections', 'facts'], [], label)
+  if (!Array.isArray(record.modules)) throw new TypeError(`${label}.modules must be an array`)
+  const modules = Object.freeze(record.modules.map((specifier, index) => nonEmpty(specifier, `${label}.modules[${index}]`)))
+  if (new Set(modules).size !== modules.length) throw new TypeError(`${label}.modules must not contain duplicates`)
+  if (!Array.isArray(record.selections)) throw new TypeError(`${label}.selections must be an array`)
+  const selectedIds = new Set<string>()
+  const selections = Object.freeze(record.selections.map((candidate, index): HostExtensionSelection => {
+    const selection = object(candidate, `${label}.selections[${index}]`)
+    exactKeys(selection, ['id', 'config'], [], `${label}.selections[${index}]`)
+    const id = nonEmpty(selection.id, `${label}.selections[${index}].id`)
+    if (selectedIds.has(id)) throw new TypeError(`${label}.selections contains duplicate id "${id}"`)
+    selectedIds.add(id)
+    return Object.freeze({ id, config: jsonClone(selection.config, `${label}.selections[${index}].config`) })
+  }))
+  const factsRecord = object(record.facts, `${label}.facts`)
+  exactKeys(factsRecord, ['hostKind'], ['actorId'], `${label}.facts`)
+  if (factsRecord.hostKind !== 'omp') throw new TypeError(`${label}.facts.hostKind must equal "omp"`)
+  const actor = createActorIdentity(factsRecord.actorId)
+  const facts: OmpHostSessionFacts = Object.freeze({
+    hostKind: 'omp',
+    ...(actor.state === 'bound' ? { actorId: actor.actorId } : {}),
+  })
+  return Object.freeze({ modules, selections, facts })
+}
+
 
 export function defineSerializedOmpActivation(input: unknown): DefinedSerializedOmpActivation {
   const record = object(jsonClone(input, 'activation'), 'activation')
-  exactKeys(record, ['composition', 'sessionId', 'hostKind'], ['workspaceRoot', 'watch', 'actorId'], 'activation')
+  exactKeys(record, ['composition', 'sessionId', 'hostKind', 'hostExtensions'], ['workspaceRoot', 'watch'], 'activation')
   if (record.hostKind !== 'omp') throw new TypeError('activation.hostKind must equal "omp"')
   if (record.watch !== undefined && typeof record.watch !== 'boolean') throw new TypeError('activation.watch must be a boolean')
-  const actor = createActorIdentity(record.actorId as string | undefined)
+  const hostExtensions = definePreparedOmpHostExtensions(record.hostExtensions, 'activation.hostExtensions')
   return Object.freeze({
     composition: canonicalizeCompositionDefinition(
       object(record.composition, 'activation.composition') as unknown as CanonicalCompositionInput,
@@ -163,13 +211,13 @@ export function defineSerializedOmpActivation(input: unknown): DefinedSerialized
       : { workspaceRoot: canonicalAbsolutePath('activation.workspaceRoot', nonEmpty(record.workspaceRoot, 'activation.workspaceRoot')) }),
     hostKind: 'omp',
     ...(record.watch === undefined ? {} : { watch: record.watch }),
-    ...(actor.state === 'bound' ? { actorId: actor.actorId } : {}),
+    hostExtensions,
   })
 }
 
 export function defineSessionActivateParams(value: unknown): DefinedSessionActivateParams {
   const record = object(jsonClone(value, 'session.activate params'), 'session.activate params')
-  exactKeys(record, ['protocolVersion', 'capabilities', 'composition', 'sessionId', 'hostKind'], ['workspaceRoot', 'watch', 'actorId'], 'session.activate params')
+  exactKeys(record, ['protocolVersion', 'capabilities', 'composition', 'sessionId', 'hostKind', 'hostExtensions'], ['workspaceRoot', 'watch'], 'session.activate params')
   if (record.protocolVersion !== OMP_RPC_PROTOCOL_VERSION) throw new TypeError(`unsupported OMP RPC protocol version ${String(record.protocolVersion)}`)
   const capabilities = defineRuntimeHostCapabilities(record.capabilities)
   if (JSON.stringify(capabilities) !== JSON.stringify(OMP_RUNTIME_HOST_CAPABILITIES)) throw new TypeError('session.activate capabilities do not match the OMP capability profile')
@@ -182,7 +230,7 @@ export function defineSessionActivateParams(value: unknown): DefinedSessionActiv
       hostKind: record.hostKind,
       ...(record.workspaceRoot === undefined ? {} : { workspaceRoot: record.workspaceRoot }),
       ...(record.watch === undefined ? {} : { watch: record.watch }),
-      ...(record.actorId === undefined ? {} : { actorId: record.actorId }),
+      hostExtensions: record.hostExtensions,
     }),
   })
 }

@@ -150,70 +150,52 @@ Session and runtime disposal SHALL be idempotent, await in-flight lifecycle muta
 - **THEN** the request completes without repeating already completed side effects or reviving removed ownership
 
 ### Requirement: Kernel-only public interface
-The kernel package SHALL expose composition, canonicalization, protected runtime-plugin insertion, session metadata, diagnostics, reload, and disposal contracts while excluding host-specific activation request schemas and all persona, actor, memory, context assembly, tool, lifecycle, MCP, and persistence contracts.
+The kernel package SHALL expose composition canonicalization, one validated protected-composition activation interface, session metadata, diagnostics, reload, and disposal contracts while excluding host-specific activation request schemas and all Persona, actor, memory, context assembly, tool, lifecycle, MCP, persistence, or native host fact contracts. The protected-composition interface SHALL accept a complete deterministic Cordis Loader entry tree plus its runtime-owned module bindings as one unit and SHALL NOT expose separate plugin and isolation maps whose correspondence callers must maintain.
 
 #### Scenario: Consume kernel independently
 - **ID**: `composition.runtime.consume-kernel-independently`
-- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::normalizes and freezes the domain-neutral layered contract`
-- **WHEN** a downstream package imports the kernel public entry point
-- **THEN** it can activate a generic Cordis composition and reuse canonicalization without importing any domain extension or OMP-specific discriminator
+- **EVIDENCE**: `packages/composition-runtime/tests/host-extension-composition.spec.ts::defines a domain-neutral protected composition without host imports`
+- **WHEN** a downstream host package imports the kernel public entry point
+- **THEN** it can activate a generic authored composition plus one protected composition without importing any domain extension, host package, or host-specific discriminator
 
-#### Scenario: OMP decodes transported activation
-- **ID**: `composition.runtime.omp-decodes-transported-activation`
-- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::normalizes and freezes the domain-neutral layered contract`
-- **WHEN** the OMP child validates an activation request containing OMP transport options and optional actor-provider configuration
-- **THEN** the decoder is exported by `host-omp`, supplies only generic canonical composition and session fields to Composition Runtime, and mounts actor identity independently from the shared bridge
+#### Scenario: Legacy parallel maps are supplied
+- **ID**: `composition.runtime.protected-composition.clean-cutover`
+- **EVIDENCE**: `packages/composition-runtime/tests/host-extension-composition.spec.ts::exposes only the unified protected composition activation contract`
+- **WHEN** a caller attempts to use the removed `runtimePlugins` or `runtimePluginIsolation` activation fields
+- **THEN** the public TypeScript and runtime admission contracts reject them and every repository caller uses the unified protected composition
 
 ### Requirement: Protected host integration and layered audit
-Runtime-owned plugins SHALL be inserted after caller-controlled layers as one deterministic protected set. The set MAY include the shared Runtime Host bridge, a separate actor provider in adapter-selected absent, unbound, or bound state, and explicitly typed host-specific providers; none SHALL be folded into another provider's public contract. Every required and optional isolated service declared for those plugins SHALL resolve only inside the owning Runtime Session. The fully layered composition SHALL be audited before a Runtime Session is returned.
+A Runtime Session activation MAY supply one complete protected composition owned by its adapter. Composition Runtime SHALL validate and insert that composition after every caller-controlled base, Runtime Patch, and explicit host patch as one deterministic final Loader layer. It MAY contain the shared Runtime Host bridge, narrow typed host-session fact providers, a separate Actor Identity extension in absent, unbound, or bound deployment state, and explicitly typed host-specific providers; none SHALL be folded into another provider's public contract. Authored layers SHALL NOT forge, replace, remove, target, or configure protected entries. Every declared injection and isolated service realm SHALL resolve only inside the owning Runtime Session, and the fully layered tree SHALL pass the ordinary activation audit before the Runtime Session is returned.
 
-#### Scenario: Mount shared host bridge last
+#### Scenario: Mount shared host bridge through the protected composition
 - **ID**: `composition.runtime.mount-shared-host-bridge-last`
-- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::mounts an actor-neutral bridge, optional actor provider, and typed host sibling in isolated session realms`
+- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::activates arbitrary modules, protected root plugins, and immutable metadata`
 - **WHEN** a valid effective composition is activated by any supported host
-- **THEN** the runtime inserts that host's shared bridge after caller-controlled layering, isolates its declared portable services to the session, and audits activation before returning the session
+- **THEN** the runtime inserts the complete protected composition after caller-controlled layering, isolates its services to the session, and audits all entries before returning the session
 
-#### Scenario: Mount host-specific sibling provider
+#### Scenario: Mount host-specific sibling extension
 - **ID**: `composition.runtime.mount-host-specific-sibling-provider`
-- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::mounts an actor-neutral bridge, optional actor provider, and typed host sibling in isolated session realms`
-- **WHEN** an adapter supplies an additional typed native capability plugin beside the shared bridge
-- **THEN** both protected plugins activate in deterministic order with their declared isolated service realms and authored layers cannot replace them
+- **EVIDENCE**: `packages/composition-runtime/tests/host-extension-composition.spec.ts::settles dependent host extensions through the protected Loader tree`
+- **WHEN** an adapter supplies a typed native capability extension beside the shared bridge
+- **THEN** both entries activate through Cordis dependency settlement in deterministic order and authored layers cannot replace either entry
 
-#### Scenario: Mount actor provider beside the bridge
+#### Scenario: Mount Actor Identity through a Host Extension
 - **ID**: `composition.runtime.mount-actor-provider-beside-the-bridge`
 - **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::mounts an actor-neutral bridge, optional actor provider, and typed host sibling in isolated session realms`
-- **WHEN** an adapter contract installs Actor Identity in unbound or bound state
-- **THEN** Composition Runtime mounts that separate actor plugin in the protected set while the shared bridge remains actor-neutral; an adapter that does not implement Actor Identity omits the provider
+- **WHEN** the protected composition installs Actor Identity in unbound or bound state
+- **THEN** the separate extension provides `doppelgangerActor` in its session isolation realm while the shared bridge remains actor-neutral; omission leaves the service absent
 
-#### Scenario: Empty composition receives host integration
+#### Scenario: Empty authored composition receives host integration
 - **ID**: `composition.runtime.empty-composition-receives-host-integration`
-- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::mounts an actor-neutral bridge, optional actor provider, and typed host sibling in isolated session realms`
-- **WHEN** the selected preset contains an empty Loader list
-- **THEN** the protected runtime-owned set still activates without requiring a preset-authored placeholder or target group
+- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::activates an empty composition with only runtime-owned plugins`
+- **WHEN** the selected Runtime Preset contains an empty Loader list
+- **THEN** the protected composition still activates without requiring a preset-authored placeholder or mount point
 
-#### Scenario: Layered composition activates successfully
-- **ID**: `composition.runtime.layered-composition-activates-successfully`
-- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::normalizes and freezes the domain-neutral layered contract`
-- **WHEN** every document is valid, every targeted mutation matches, every required mount lands, and every enabled authored and protected plugin settles active
-- **THEN** the runtime returns the audited Runtime Session
-
-#### Scenario: Protected provider has unresolved dependency
+#### Scenario: Protected extension has unresolved dependency
 - **ID**: `composition.runtime.protected-provider-has-unresolved-dependency`
-- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::mounts an actor-neutral bridge, optional actor provider, and typed host sibling in isolated session realms`
-- **WHEN** a shared bridge or host-specific protected plugin has a failed or unresolved dependency
-- **THEN** activation fails, cleans up the attempted tree, and reports the protected entry and missing service without returning a partially attached binding
-
-#### Scenario: Mount host adapter last
-- **ID**: `composition.runtime.activation.host.adapter.last`
-- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::activates arbitrary modules, protected root plugins, and immutable metadata`
-- **WHEN** a valid effective composition is activated by a host
-- **THEN** the runtime inserts that host's bridge at the composition root after caller-controlled layering and audits its activation before returning the session
-
-#### Scenario: Layer causes plugin activation failure
-- **ID**: `composition.runtime.audit.layered.failure`
-- **EVIDENCE**: `packages/composition-runtime/tests/reload.spec.ts::rebuilds edit/create/delete generations and rolls invalid layers back`
-- **WHEN** a patch produces an enabled entry with a failed or unresolved dependency
-- **THEN** activation fails, cleans up the attempted tree, and reports both entry diagnostics and the effective layer context
+- **EVIDENCE**: `packages/composition-runtime/tests/host-extension-composition.spec.ts::exhausts protected and authored cleanup when a host extension fails`
+- **WHEN** a bridge or Host Extension entry has a failed or unresolved dependency
+- **THEN** activation fails, cleans the complete attempted tree, and reports the exact protected entry and missing service without returning a partially attached binding
 
 ### Requirement: Optional filesystem layer set reload
 When watching is enabled, creation or deletion of an optional user or project patch SHALL rebuild the serialized effective composition under the same transactional reload guarantees.
@@ -247,4 +229,3 @@ Composition patch validation SHALL validate entry field types before using them,
 - **EVIDENCE**: `packages/composition-runtime/tests/patches.spec.ts::reports structured diagnostics for malformed inserted entry fields`
 - **WHEN** a patch inserts an entry whose `name` is not a non-empty string
 - **THEN** patch definition fails with a diagnostic identifying the exact entry path and does not invoke string operations on the invalid value
-

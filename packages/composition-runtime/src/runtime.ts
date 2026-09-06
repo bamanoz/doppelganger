@@ -57,12 +57,21 @@ export interface CompositionRuntimeOptions {
   readonly onReload?: (event: CompositionReloadEvent) => void
   readonly onReloadFailure?: (event: CompositionReloadFailureEvent) => void
 }
+export interface ProtectedCompositionEntry {
+  readonly id: string
+  readonly plugin: Plugin
+  readonly isolate?: Readonly<Record<string, 'session'>>
+}
+
+export interface ProtectedComposition {
+  readonly entries: readonly ProtectedCompositionEntry[]
+}
+
 export interface CompositionActivation {
   readonly composition: CompositionDefinition
   readonly sessionId: string
   readonly workspaceRoot?: string
-  readonly runtimePlugins?: Readonly<Record<string, Plugin>>
-  readonly runtimePluginIsolation?: Readonly<Record<string, readonly string[]>>
+  readonly protectedComposition?: ProtectedComposition
 }
 
 export interface CompositionSession {
@@ -126,65 +135,90 @@ function diagnosticFailureText(error: unknown): string {
   return error.cause === undefined ? own : `${own}\nCaused by: ${diagnosticFailureText(error.cause)}`
 }
 
-function validRuntimePlugins(input: Readonly<Record<string, Plugin>> | undefined): Readonly<Record<string, Plugin>> {
-  const result: Record<string, Plugin> = Object.create(null)
-  for (const [name, plugin] of Object.entries(input ?? {})) {
-    if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(name)) {
-      throw new TypeError(`activation.runtimePlugins.${name} must use a lowercase kebab-case name`)
-    }
-    if (name === 'session' || name === 'session-metadata') {
-      throw new TypeError(`activation.runtimePlugins.${name} is reserved by the runtime`)
-    }
-    if (plugin === null || (typeof plugin !== 'object' && typeof plugin !== 'function')) {
-      throw new TypeError(`activation.runtimePlugins.${name} must be a Cordis plugin`)
-    }
-    result[name] = plugin
-  }
-  return Object.freeze(result)
-}
-function validRuntimePluginIsolation(
-  plugins: Readonly<Record<string, Plugin>>,
-  input: Readonly<Record<string, readonly string[]>> | undefined,
-): Readonly<Record<string, readonly string[]>> {
-  const result: Record<string, readonly string[]> = Object.create(null)
-  for (const [name, services] of Object.entries(input ?? {})) {
-    if (plugins[name] === undefined) throw new TypeError(`activation.runtimePluginIsolation.${name} has no runtime plugin`)
-    const unique = new Set<string>()
-    for (const service of services) {
-      if (typeof service !== 'string' || service.trim().length === 0 || service !== service.trim()) {
-        throw new TypeError(`activation.runtimePluginIsolation.${name} contains an invalid service name`)
-      }
-      unique.add(service)
-    }
-    result[name] = Object.freeze([...unique])
-  }
-  return Object.freeze(result)
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  if (value === null || Array.isArray(value) || typeof value !== 'object') return
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) return
+  return value as Record<string, unknown>
 }
 
-function runtimeLayer(
-  runtimePlugins: Readonly<Record<string, Plugin>>,
-  runtimePluginIsolation: Readonly<Record<string, readonly string[]>>,
-): CompositionPatchLayer {
+function exactKeys(value: Record<string, unknown>, allowed: readonly string[], path: string): void {
+  const allowedSet = new Set(allowed)
+  for (const key of Object.keys(value)) {
+    if (!allowedSet.has(key)) throw new TypeError(`${path}.${key} is not supported`)
+  }
+}
+
+function validProtectedComposition(input: ProtectedComposition | undefined): ProtectedComposition {
+  if (input === undefined) return Object.freeze({ entries: Object.freeze([]) })
+  const composition = plainRecord(input)
+  if (composition === undefined) throw new TypeError('activation.protectedComposition must be an object')
+  exactKeys(composition, ['entries'], 'activation.protectedComposition')
+  if (!Array.isArray(composition.entries)) {
+    throw new TypeError('activation.protectedComposition.entries must be an array')
+  }
+  const ids = new Set<string>()
+  const entries = composition.entries.map((candidate, index): ProtectedCompositionEntry => {
+    const path = `activation.protectedComposition.entries[${index}]`
+    const entry = plainRecord(candidate)
+    if (entry === undefined) throw new TypeError(`${path} must be an object`)
+    exactKeys(entry, ['id', 'plugin', 'isolate'], path)
+    if (typeof entry.id !== 'string' || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(entry.id)) {
+      throw new TypeError(`${path}.id must use lowercase kebab-case`)
+    }
+    if (entry.id === 'session' || entry.id === 'session-metadata') {
+      throw new TypeError(`${path}.id is reserved by the runtime`)
+    }
+    if (ids.has(entry.id)) throw new TypeError(`${path}.id duplicates protected entry "${entry.id}"`)
+    ids.add(entry.id)
+    const plugin = entry.plugin
+    if (plugin === null || (typeof plugin !== 'object' && typeof plugin !== 'function')) {
+      throw new TypeError(`${path}.plugin must be a Cordis plugin`)
+    }
+    const isolateInput = entry.isolate
+    let isolate: Readonly<Record<string, 'session'>> | undefined
+    if (isolateInput !== undefined) {
+      const isolateRecord = plainRecord(isolateInput)
+      if (isolateRecord === undefined) throw new TypeError(`${path}.isolate must be an object when present`)
+      const normalized: Record<string, 'session'> = Object.create(null)
+      for (const [service, label] of Object.entries(isolateRecord)) {
+        if (service.trim().length === 0 || service !== service.trim()) {
+          throw new TypeError(`${path}.isolate contains an invalid service name`)
+        }
+        if (label !== 'session') throw new TypeError(`${path}.isolate.${service} must equal "session"`)
+        normalized[service] = 'session'
+      }
+      isolate = Object.freeze(normalized)
+    }
+    return Object.freeze({
+      id: entry.id,
+      plugin: plugin as Plugin,
+      ...(isolate === undefined ? {} : { isolate }),
+    })
+  })
+  return Object.freeze({ entries: Object.freeze(entries) })
+}
+
+function protectedRuntimeLayer(composition: ProtectedComposition): CompositionPatchLayer {
   const insert: EntryOptions[] = [{
     id: RUNTIME_METADATA_ENTRY,
     name: `cordis:${RUNTIME_METADATA_IMPORT}`,
     isolate: { doppelgangerRuntimeSession: 'session' },
   }]
-  for (const name of Object.keys(runtimePlugins).sort()) {
-    const plugin = runtimePlugins[name]!
+  for (const entry of composition.entries) {
     const services = new Set([
-      ...Object.keys(Inject.resolve(plugin.inject)),
-      ...(runtimePluginIsolation[name] ?? []),
+      ...Object.keys(Inject.resolve(entry.plugin.inject)),
+      ...Object.keys(entry.isolate ?? {}),
     ])
     const isolate = Object.fromEntries([...services].map(service => [service, 'session']))
     insert.push({
-      id: `doppelganger-runtime-${name}`,
-      name: `cordis:doppelganger-runtime-${name}`,
+      id: `doppelganger-runtime-${entry.id}`,
+      name: `cordis:doppelganger-runtime-${entry.id}`,
       ...(Object.keys(isolate).length === 0 ? {} : { isolate }),
     })
   }
   return Object.freeze({
-    source: 'runtime-owned plugins',
+    source: 'protected Host Extension Composition',
     baseUrl: process.cwd(),
     patches: Object.freeze([{ insert }]),
   })
@@ -221,14 +255,14 @@ interface SessionTreeMount {
 
 function sessionTree(
   metadataPlugin: Plugin,
-  runtimePlugins: Readonly<Record<string, Plugin>>,
+  protectedComposition: ProtectedComposition,
 ): SessionTreeMount {
   const builtins: Record<string, Plugin> = {
     group: Group,
     [RUNTIME_METADATA_IMPORT]: metadataPlugin,
   }
-  for (const [name, plugin] of Object.entries(runtimePlugins)) {
-    builtins[`doppelganger-runtime-${name}`] = plugin
+  for (const entry of protectedComposition.entries) {
+    builtins[`doppelganger-runtime-${entry.id}`] = entry.plugin
   }
 
   const namespace = `doppelganger-composition-session-${nextSessionNamespace += 1}:`
@@ -321,10 +355,14 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
 
   return {
     async activate(request) {
-      if (request.sessionId.trim().length === 0) throw new TypeError('activation.sessionId must be a non-empty string')
-      const runtimePlugins = validRuntimePlugins(request.runtimePlugins)
-      const runtimePluginIsolation = validRuntimePluginIsolation(runtimePlugins, request.runtimePluginIsolation)
-      const trustedRuntimeLayer = runtimeLayer(runtimePlugins, runtimePluginIsolation)
+      const activation = plainRecord(request)
+      if (activation === undefined) throw new TypeError('activation must be an object')
+      exactKeys(activation, ['composition', 'sessionId', 'workspaceRoot', 'protectedComposition'], 'activation')
+      if (typeof request.sessionId !== 'string' || request.sessionId.trim().length === 0) {
+        throw new TypeError('activation.sessionId must be a non-empty string')
+      }
+      const protectedComposition = validProtectedComposition(request.protectedComposition)
+      const trustedRuntimeLayer = protectedRuntimeLayer(protectedComposition)
       const metadata = createRuntimeSessionMetadata({
         sessionId: request.sessionId,
         runtimePresetId: request.composition.id,
@@ -365,7 +403,7 @@ export function createCompositionRuntime(options: CompositionRuntimeOptions = {}
       let initialDiagnostics: CompositionDiagnostics | undefined
       try {
         generation = await loadGeneration(request.composition, trustedRuntimeLayer)
-        mounted = sessionTree(metadataPlugin, runtimePlugins)
+        mounted = sessionTree(metadataPlugin, protectedComposition)
         await sessionContext.plugin(mounted.plugin, {
           path: pathToFileURL(request.composition.loaderPath).href,
           patches: [...generation.patches],

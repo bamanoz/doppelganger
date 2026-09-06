@@ -152,14 +152,22 @@ describe('Evolution under Composition Runtime', () => {
     const first = await runtime.activate({
       composition: definition,
       sessionId: 'first',
-      runtimePlugins: { actor: hostActor, observer: observer(observed) },
-      runtimePluginIsolation: { actor: ['doppelgangerActor'] },
+      protectedComposition: {
+        entries: [
+          { id: 'actor', plugin: hostActor, isolate: { doppelgangerActor: 'session' } },
+          { id: 'observer', plugin: observer(observed) },
+        ],
+      },
     })
     await runtime.activate({
       composition: definition,
       sessionId: 'second',
-      runtimePlugins: { actor: hostActor, observer: observer(observed) },
-      runtimePluginIsolation: { actor: ['doppelgangerActor'] },
+      protectedComposition: {
+        entries: [
+          { id: 'actor', plugin: hostActor, isolate: { doppelgangerActor: 'session' } },
+          { id: 'observer', plugin: observer(observed) },
+        ],
+      },
     })
     expect(observed.get('first')?.tools).toEqual([
       'evolution.inspect', 'evolution.list', 'evolution.propose', 'evolution.reject',
@@ -180,7 +188,11 @@ describe('Evolution under Composition Runtime', () => {
     await neutralRuntime.activate({
       composition: plainDefinition,
       sessionId: 'neutral',
-      runtimePlugins: { observer: neutralObserver },
+      protectedComposition: {
+        entries: [
+          { id: 'observer', plugin: neutralObserver },
+        ],
+      },
     })
     expect(tools).toEqual([])
     await neutralRuntime.dispose()
@@ -197,8 +209,11 @@ describe('Evolution under Composition Runtime', () => {
     await expect(missingRuntime.activate({
       composition: definition,
       sessionId: 'missing',
-      runtimePlugins: { actor: actor('actor-a') },
-      runtimePluginIsolation: { actor: ['doppelgangerActor'] },
+      protectedComposition: {
+        entries: [
+          { id: 'actor', plugin: actor('actor-a'), isolate: { doppelgangerActor: 'session' } },
+        ],
+      },
     })).rejects.toThrow('missing services: doppelgangerInstanceSqlite')
     await missingRuntime.dispose()
 
@@ -207,8 +222,11 @@ describe('Evolution under Composition Runtime', () => {
     await expect(unboundRuntime.activate({
       composition: definition,
       sessionId: 'unbound',
-      runtimePlugins: { actor: actor() },
-      runtimePluginIsolation: { actor: ['doppelgangerActor'] },
+      protectedComposition: {
+        entries: [
+          { id: 'actor', plugin: actor(), isolate: { doppelgangerActor: 'session' } },
+        ],
+      },
     })).rejects.toThrow('Evolution requires a bound host actor')
     await unboundRuntime.dispose()
 
@@ -218,8 +236,11 @@ describe('Evolution under Composition Runtime', () => {
     const active = await watched.activate({
       composition: definition,
       sessionId: 'watched',
-      runtimePlugins: { actor: actor('actor-a') },
-      runtimePluginIsolation: { actor: ['doppelgangerActor'] },
+      protectedComposition: {
+        entries: [
+          { id: 'actor', plugin: actor('actor-a'), isolate: { doppelgangerActor: 'session' } },
+        ],
+      },
     })
     const next = reloads.next('Evolution config replacement')
     await writeFile(loaderPath, loader(root, { reminders: true }))

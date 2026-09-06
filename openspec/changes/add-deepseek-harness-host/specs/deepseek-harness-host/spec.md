@@ -1,6 +1,6 @@
 ## Purpose
 
-Define the native DeepSeek Harness host boundary that activates isolated Doppelganger Runtime Sessions inside DSH agent scopes, binds the actor-neutral shared Runtime Host API directly in-process, projects context, revisioned tools, cancellation, declared lifecycle events, and independently configured Actor Identity, and preserves reload and failure behavior without an RPC child or parallel bridge.
+Define the native DeepSeek Harness host boundary that activates isolated Doppelganger Runtime Sessions inside DSH agent scopes, resolves one immutable Host Extension plan into a fresh protected composition per session, binds the actor-neutral shared Runtime Host API directly in-process, projects context, revisioned tools, cancellation, declared lifecycle events, and independently selected Actor Identity, and preserves reload and failure behavior without an RPC child or parallel bridge.
 
 ## ADDED Requirements
 
@@ -32,14 +32,14 @@ The native DSH host SHALL resolve the Runtime Preset through the injected author
 - **WHEN** two live DSH agents activate the same Runtime Preset concurrently
 - **THEN** each agent owns distinct plugin instances, registrations, lifecycle state, and reload ownership
 
-### Requirement: DSH supplies host-owned activation inputs and protected plugins
-The native host SHALL derive the stable Runtime Session ID from the DSH session, derive the optional workspace root from the DSH session header, request selection and canonical user/project patch paths from the injected roster service, and install the shared Runtime Host plugin after caller-controlled layers with one immutable closed DSH capability profile. Actor Identity SHALL be mounted only through a separate protected actor plugin in configured absent, unbound, or bound state. Authored Runtime Presets and patches SHALL NOT replace or remove runtime-owned plugins. The host SHALL NOT duplicate roster roots, trust, discovery, authoring, deployment-default policy, protocol service lookup, or shared bridge contracts.
+### Requirement: DSH supplies host-owned activation inputs and a validated Host Extension plan
+The native host SHALL derive the stable Runtime Session ID from the DSH session, derive the optional workspace root from the DSH session header, request selection and canonical user/project patch paths from the injected roster service, and build one immutable Host Extension catalog from API-compatible host-admitted definitions. For each selected Runtime Preset it SHALL normalize an ordered selection containing exactly one standard `runtime-host` Host Extension and zero or one standard `actor` Host Extension, instantiate a fresh protected composition from closed JSON-compatible DSH session facts, and pass that composition to `CompositionRuntime` after caller-controlled layers. Authored Runtime Presets and patches SHALL NOT discover, select, replace, remove, or target Host Extensions. Unknown, duplicate, incompatible, or invalidly configured selections SHALL fail before protected Fiber creation. The host SHALL NOT duplicate roster roots, trust, discovery, authoring, deployment-default policy, Host Extension catalog semantics, protocol service lookup, or shared bridge contracts.
 
 #### Scenario: Project and user patches apply in order
 - **ID**: `host.dsh.activation.patch-order`
 - **EVIDENCE**: `planned:packages/host-dsh/tests/activation.spec.ts::applies user and project patches in canonical order`
 - **WHEN** both optional user and project Runtime Preset patches exist for a DSH workspace
-- **THEN** activation applies the selected preset, user patch, project patch, explicit host patch, and one deterministic protected runtime-owned plugin set in canonical order
+- **THEN** activation applies the selected preset, user patch, project patch, explicit host patch, and one ordered freshly instantiated Host Extension protected composition in canonical order
 
 #### Scenario: Agent has no workspace root
 - **ID**: `host.dsh.activation.workspace-optional`
@@ -47,8 +47,8 @@ The native host SHALL derive the stable Runtime Session ID from the DSH session,
 - **WHEN** a DSH session has no workspace path but user configuration selects a Runtime Preset
 - **THEN** the Runtime Session activates without project discovery and omits workspace metadata
 
-### Requirement: DSH Actor Identity is host-authoritative and independent
-The native host SHALL keep actor state outside the shared Runtime Host bridge, binding, capability profile, requests, tool-catalog callback, and lifecycle contracts. The default configuration SHALL mount a separate actor plugin with a namespaced stable identifier derived from DSH's host-owned anonymous harness-home identity. Configuration MAY instead supply a validated actor identifier, select explicit unbound mode, use a trusted deployment resolver, or disable the actor provider entirely. A mounted bound or unbound state SHALL be snapshotted outside authored Runtime Presets and remain immutable for the Runtime Session; disabled mode SHALL leave `doppelgangerActor` absent while actor-independent shared protocols remain usable.
+### Requirement: DSH Actor Identity is host-authoritative and independently selected
+The native host SHALL keep actor state outside the shared Runtime Host bridge, `runtime-host` Host Extension, binding, capability profile, requests, tool-catalog callback, and lifecycle contracts. The default configuration SHALL select the standard `actor` Host Extension with a namespaced stable identifier derived from DSH's host-owned anonymous harness-home identity. Configuration MAY instead supply a validated actor identifier, select explicit unbound mode, use a trusted deployment resolver, or omit the `actor` selection entirely. The selected `actor` definition SHALL resolve one immutable result and instantiate one fresh session-isolated actor entry outside authored Runtime Presets; omitted mode SHALL leave `doppelgangerActor` absent while actor-independent shared protocols remain usable.
 
 #### Scenario: DSH uses its default installation actor
 - **ID**: `host.dsh.actor.default-anonymous`
@@ -263,8 +263,8 @@ The native host SHALL bind Runtime Session ownership to the DSH agent lifecycle,
 - **WHEN** DSH tears down an agent without an explicit successful session outcome
 - **THEN** the host publishes neutral session disposal and does not publish a fabricated completed session
 
-### Requirement: The native host preserves one trusted Cordis runtime and one shared bridge
-The DSH host package SHALL use the host-provided `@deepseek-ai/cordis` identity as a peer, consume the roster through its public Cordis service in that same root, depend only on the DSH packages whose public APIs it consumes, and run as trusted same-process plugin code. Each selected agent SHALL bind exactly one shared `extension-protocols` Runtime Host bridge directly in-process. `host-dsh` SHALL NOT introduce a second dependency-injection container, Loader tree, roster implementation, agent loop, DSH-local bridge contract, generic runtime notification channel, RPC process, router, sidecar, generated-code runner, sandbox claim, or parallel session-binding path.
+### Requirement: The native host preserves one trusted Cordis runtime, one Host Extension composition, and one shared bridge
+The DSH host package SHALL use the host-provided `@deepseek-ai/cordis` identity as a peer, consume the roster through its public Cordis service in that same root, consume Host Extension catalog and standard definition contracts from `host-extension-runtime`, depend only on the DSH packages whose public APIs it consumes, and run as trusted same-process plugin code. Each selected agent SHALL instantiate one ordered protected composition and bind exactly one standard `runtime-host` Host Extension to one shared `extension-protocols` Runtime Host bridge directly in-process. `host-dsh` SHALL NOT introduce a second dependency-injection container, Loader tree, roster implementation, protected-plugin map, Host Extension planner, agent loop, DSH-local bridge contract, generic runtime notification channel, RPC process, router, sidecar, generated-code runner, sandbox claim, or parallel session-binding path.
 
 #### Scenario: DSH loads the host package
 - **ID**: `host.dsh.architecture.single-cordis-root`
@@ -287,14 +287,14 @@ Before native DSH support is considered implemented, the adapter SHALL pass the 
 - **WHEN** `host-dsh` binds the common bridge directly in-process
 - **THEN** it satisfies the same observable Runtime Host contract as the transported OMP adapter
 
-### Requirement: DSH-only extensions remain typed and host-specific
-A DSH-only service or event SHALL be provided only by an explicitly typed `doppelganger/host/dsh/...` protected Cordis plugin that is isolated to the owning Runtime Session, validates bounded JSON-compatible values, owns registration and cleanup as Cordis effects, and reuses the existing agent-owned in-process binding and lifecycle. It SHALL NOT expose raw DSH runtime objects or create another channel. Promotion into the common Runtime Host API SHALL require two implemented adapters proving equivalent timing, authority, correlation, failure/cancellation/replay semantics, stale behavior, rollback, and disposal.
+### Requirement: DSH-only Host Extensions remain typed and host-specific
+A DSH-only service or event SHALL be provided only by an API-compatible typed Host Extension definition admitted through explicit trusted host configuration. Its factory SHALL receive only closed bounded JSON-compatible DSH session facts, SHALL return a fresh protected Cordis entry isolated to the owning Runtime Session, SHALL validate bounded JSON-compatible values, SHALL own registration and cleanup as Cordis effects, and SHALL reuse the existing agent-owned in-process lifecycle and binding where applicable. It SHALL NOT expose raw DSH runtime objects, accept authored Runtime Preset selection, or create another channel. Promotion into the common Runtime Host API SHALL require two implemented adapters proving equivalent timing, authority, correlation, failure/cancellation/replay semantics, stale behavior, rollback, and disposal.
 
 #### Scenario: DSH exposes a native-only hook
 - **ID**: `host.dsh.architecture.typed-host-extension`
-- **EVIDENCE**: `planned:packages/host-dsh/tests/composition.spec.ts::keeps native-only hooks in typed protected plugins`
+- **EVIDENCE**: `planned:packages/host-dsh/tests/composition.spec.ts::keeps native-only hooks in typed Host Extensions`
 - **WHEN** DSH needs to project a native observation with no proven common semantic equivalent
-- **THEN** it uses one typed DSH-namespaced protected provider in the existing agent binding and does not expand or bypass the shared Runtime Host API
+- **THEN** it uses one typed host-admitted DSH Host Extension definition in the existing protected composition and does not expand or bypass the shared Runtime Host API
 
 ### Requirement: DSH projects opt-in Dynamic Runtime Plugins through the portable surface
 When a selected Runtime Preset explicitly composes Dynamic Runtime Plugins and the optional extension package is resolvable by the DSH deployment, the native host SHALL project the exact portable `runtime-plugin.inspect-list`, `runtime-plugin.inspect-query`, `runtime-plugin.inspect-self`, `runtime-plugin.define`, `runtime-plugin.run`, `runtime-plugin.stop`, and `runtime-plugin.undefine` descriptors through its ordinary scoped tool path. It SHALL NOT import, delegate to, or duplicate `@deepseek-ai/dsh-cordis-host-runner` registry, evaluator, inspection, or version-transition semantics. Every exact `runtime-plugin.run` first run, restart, update, or rollback SHALL require a new native one-shot approval before portable dispatch. Generated context and tools SHALL follow the same committed dynamic projection and stale-closure rules as other portable effects. Ordinary structured extension failures SHALL remain agent-contained, while documentation SHALL state that generated code executes in the native DSH process and is not hostile-code containment. Agent and host teardown SHALL await exhaustive Runtime Session disposal of every reachable generated Fiber.

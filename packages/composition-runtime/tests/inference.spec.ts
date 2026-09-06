@@ -282,7 +282,11 @@ describe('Structured inference under Composition Runtime', () => {
     await runtime.activate({
       composition: definition,
       sessionId: 'pi-reload',
-      runtimePlugins: { observer: inferenceObserver(service => services.push(service)) },
+      protectedComposition: {
+        entries: [
+          { id: 'observer', plugin: inferenceObserver(service => services.push(service)) },
+        ],
+      },
     })
     const first = services.at(-1)!
     const inFlight = first.infer(structuredRequest('hold'))
@@ -339,7 +343,11 @@ describe('Structured inference under Composition Runtime', () => {
     await runtime.activate({
       composition: definition,
       sessionId: 'reload',
-      runtimePlugins: { observer: inferenceObserver(service => services.push(service)) },
+      protectedComposition: {
+        entries: [
+          { id: 'observer', plugin: inferenceObserver(service => services.push(service)) },
+        ],
+      },
     })
     const first = services.at(-1)!
     const inFlight = first.infer({ input: 'hold' })
@@ -375,8 +383,11 @@ describe('Structured inference under Composition Runtime', () => {
     const active = await ordered.activate({
       composition: definition,
       sessionId: 'ordered',
-      runtimePlugins: { actor: actor('actor-a') },
-      runtimePluginIsolation: { actor: ['doppelgangerActor'] },
+      protectedComposition: {
+        entries: [
+          { id: 'actor', plugin: actor('actor-a'), isolate: { doppelgangerActor: 'session' } },
+        ],
+      },
     })
     expect(active.diagnostics().entries.find(entry => entry.id === 'evolution')).toMatchObject({ state: 'active' })
     await ordered.dispose()
@@ -386,8 +397,11 @@ describe('Structured inference under Composition Runtime', () => {
     await expect(missing.activate({
       composition: definition,
       sessionId: 'missing',
-      runtimePlugins: { actor: actor('actor-a') },
-      runtimePluginIsolation: { actor: ['doppelgangerActor'] },
+      protectedComposition: {
+        entries: [
+          { id: 'actor', plugin: actor('actor-a'), isolate: { doppelgangerActor: 'session' } },
+        ],
+      },
     })).rejects.toThrow('doppelgangerInference')
     await missing.dispose()
 
@@ -396,8 +410,11 @@ describe('Structured inference under Composition Runtime', () => {
     const proposalOnly = await disabled.activate({
       composition: definition,
       sessionId: 'disabled',
-      runtimePlugins: { actor: actor('actor-a') },
-      runtimePluginIsolation: { actor: ['doppelgangerActor'] },
+      protectedComposition: {
+        entries: [
+          { id: 'actor', plugin: actor('actor-a'), isolate: { doppelgangerActor: 'session' } },
+        ],
+      },
     })
     expect(proposalOnly.diagnostics().entries.find(entry => entry.id === 'evolution')).toMatchObject({ state: 'active' })
     await disabled.dispose()

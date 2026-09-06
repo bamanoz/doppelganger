@@ -8,11 +8,7 @@ import {
   type CompositionRuntime,
   type CompositionSession,
 } from '@doppelganger/doppelganger-composition-runtime'
-import {
-  createActorIdentityPlugin,
-  createRuntimeHostPlugin,
-  type RuntimeHostBridge,
-} from '@doppelganger/doppelganger-protocols'
+import type { RuntimeHostBridge } from '@doppelganger/doppelganger-protocols'
 import {
   OMP_RPC_PROTOCOL_VERSION,
   defineLifecycleEvent,
@@ -22,10 +18,10 @@ import {
   defineToolInvocationRequest,
 } from './contracts.ts'
 import {
-  createOmpHostEventPlugin,
   defineOmpTodoReminderEvent,
   type OmpHostEventSink,
 } from './omp-host-events.ts'
+import { instantiateOmpHostExtensions } from './host-extensions.ts'
 import { FramedJsonRpcPeer, type RpcNotificationObserverDiagnostic } from './protocol.ts'
 
 export interface OmpRuntimeChild {
@@ -93,26 +89,22 @@ export function serveOmpRuntime(
       ? { watch: false }
       : { watch: { base: dirname(composition.loaderPath), root: ['.'] } })
     try {
+      const protectedComposition = await instantiateOmpHostExtensions(
+        params.hostExtensions,
+        {
+          sessionId: params.sessionId,
+          runtimePresetId: composition.id,
+          ...(params.workspaceRoot === undefined ? {} : { workspaceRoot: params.workspaceRoot }),
+        },
+        binding,
+        ompHostEventBinding,
+        params.capabilities,
+      )
       const activated = await runtime.activate({
         composition,
         sessionId: params.sessionId,
         ...(params.workspaceRoot === undefined ? {} : { workspaceRoot: params.workspaceRoot }),
-        runtimePlugins: {
-          actor: createActorIdentityPlugin(params.actorId),
-          'omp-host-events': createOmpHostEventPlugin(ompHostEventBinding),
-          'runtime-host': createRuntimeHostPlugin(binding, params.capabilities),
-        },
-        runtimePluginIsolation: {
-          actor: ['doppelgangerActor'],
-          'omp-host-events': ['doppelgangerRuntimeSession'],
-          'runtime-host': [
-            'doppelgangerRuntimeSession',
-            'doppelgangerContext',
-            'doppelgangerHostCapabilities',
-            'doppelgangerLifecycle',
-            'doppelgangerTools',
-          ],
-        },
+        protectedComposition,
       })
       session = activated
       const activeBridge = bridge

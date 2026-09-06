@@ -1,24 +1,25 @@
-## 1. Shared Runtime Host integration
+## 1. Shared Runtime Host and Host Extension integration
 
-- [ ] 1.1 Consume the public actor-neutral Runtime Host bridge, closed capability, revisioned tool, approval, cancellation, and lifecycle contracts from `extension-protocols` without adding a DSH-local bridge interface or protocol-service implementation
-- [ ] 1.2 Implement one direct per-agent `RuntimeHostBinding` with single-owner attach/detach and the sole `toolCatalogChanged(revision)` callback; reject second attachment and ignore late callbacks from replaced state
+- [ ] 1.1 Consume the public actor-neutral Runtime Host bridge, closed capability, revisioned tool, approval, cancellation, and lifecycle contracts from `extension-protocols`, and consume catalog, plan, standard definition, and module contracts from `host-extension-runtime` without adding a DSH-local bridge, protected-plugin map, or protocol-service implementation
+- [ ] 1.2 Implement one direct per-agent `RuntimeHostBinding` with single-owner attach/detach and the sole `toolCatalogChanged(revision)` callback; expose it only through the standard `runtime-host` Host Extension, reject second attachment, and ignore late callbacks from replaced state
 - [ ] 1.3 Declare and validate one frozen DSH capability profile for per-turn context, dynamic tools, native required approval, cooperative cancellation, and only faithfully supported lifecycle event kinds
 - [ ] 1.4 Adapt the shared transport-independent Runtime Host conformance fixtures to DSH and require the complete suite without in-process topology exceptions
 
 ## 2. Native DSH package foundation
 
-- [ ] 2.1 Add the `packages/host-dsh` workspace package, strict TypeScript configuration, public exports, exact DSH peer/dev dependencies, and package-boundary manifest entry
-- [ ] 2.2 Define and validate host configuration for explicit Runtime Preset selection, watch mode, context token budget, trusted host patches, and Actor Identity disabled/unbound/bound/resolver modes; inject the authoritative `doppelgangerRuntimePresets` service instead of duplicating roots, discovery, trust, or authoring configuration
-- [ ] 2.3 Implement one plugin-owned state registry with exact Agent identity, per-agent serialized queues, diagnostics, immutable capability state, and idempotent lifecycle transitions
-- [ ] 2.4 Add native composition tests proving one host-provided Cordis root, one direct shared bridge per selected agent, and no OMP child, JSON-RPC transport, DSH-local bridge, second router, or parallel session binding
+- [ ] 2.1 Add the `packages/host-dsh` workspace package, strict TypeScript configuration, public exports, `host-extension-runtime` edge, exact DSH peer/dev dependencies, and package-boundary manifest entry
+- [ ] 2.2 Define and validate host configuration for explicit Runtime Preset selection, watch mode, context token budget, trusted host patches, trusted Host Extension modules, ordered Host Extension selections, and Actor Identity default/disabled/unbound/bound/resolver modes; inject the authoritative `doppelgangerRuntimePresets` service instead of duplicating roots, discovery, trust, or authoring configuration
+- [ ] 2.3 Implement one plugin-owned state registry with exact Agent identity, per-agent serialized queues, diagnostics, immutable capability state, closed bounded DSH session facts, and idempotent lifecycle transitions
+- [ ] 2.4 Add native composition tests proving one host-provided Cordis root, one immutable Host Extension plan, fresh entries per selected agent, one direct shared bridge, and no OMP child, JSON-RPC transport, DSH-local bridge, second router, ad hoc protected-plugin map, or parallel session binding
 
 ## 3. Per-agent activation and actor binding
 
 - [ ] 3.1 Start idempotent activation from scoped DSH agent/session notifications and enumerate already-live visible agents during host hot-load
 - [ ] 3.2 Resolve explicit, project, user-default, and deployment-default states through the injected Runtime Preset roster, including optional-workspace discovery, canonical patch ordering, shipped `standard`, and explicitly defaultless no-selection operation
-- [ ] 3.3 Activate one caller-owned `CompositionRuntime` under each selected `agent.ctx` with DSH session metadata, isolated protocol realms, trusted host patches, the shared Runtime Host plugin, and no copied bridge logic
-- [ ] 3.4 Implement the default namespaced DSH anonymous harness-home Actor Identity plus disabled, explicit unbound, explicit bound, and trusted resolver modes through the separate protected actor plugin, snapshotted once per Runtime Session
-- [ ] 3.5 Cover fresh-home `standard` activation, higher-precedence selection, explicitly defaultless no-selection, optional workspace, patch order, actor absence/unbound/bound state, bridge independence, and concurrent same-preset agent isolation
+- [ ] 3.3 Build one API-compatible Host Extension catalog from the standard `runtime-host` and `actor` definitions plus explicitly trusted DSH-only modules; reject unknown, duplicate, incompatible, invalid, or authored selections before protected Fiber creation
+- [ ] 3.4 Activate one caller-owned `CompositionRuntime` under each selected `agent.ctx` with DSH session metadata, isolated protocol realms, trusted host patches, and a freshly instantiated protected composition whose required `runtime-host` entry uses the state's single binding
+- [ ] 3.5 Resolve default anonymous-home, disabled, explicit unbound, explicit bound, and trusted resolver Actor Identity modes through the independently selected standard `actor` Host Extension, snapshotted once per Runtime Session
+- [ ] 3.6 Cover fresh-home `standard` activation, higher-precedence selection, explicitly defaultless no-selection, optional workspace, patch order, actor absence/unbound/bound state, invalid Host Extension plans, fresh per-agent entries, bridge independence, and concurrent same-preset agent isolation
 
 ## 4. Prompt context projection
 
@@ -59,7 +60,7 @@
 
 - [ ] 8.1 Add a hermetic DSH vertical scenario that activates the shipped actor-neutral `standard` Runtime Preset shape already exercised by OMP, a generated actor-aware full-stack test preset, an opt-in Dynamic Runtime Plugins preset, and an opt-in Evolution preset, observing context, native revisioned tools, actor absence/unbound/bound semantics, lifecycle, persistence, cancellation, exactly approved generated effects, proposal controls, replacement, stop, reload, and teardown end to end
 - [ ] 8.2 Add package-level typecheck/test scripts and include `host-dsh` in workspace checks, single-Cordis verification, manifest-driven package-boundary enforcement, and the shared Runtime Host conformance matrix
-- [ ] 8.3 Update `docs/hosts/deepseek-harness.md` from research gate to implemented host contract, closed capability profile, direct shared binding, configuration, independent Actor Identity semantics, revisioned tools, cancellation, lifecycle availability, failure boundary, and trust model
-- [ ] 8.4 Update the owning architecture, protocols, composition, operations, security, scope/status, verification, and `docs/README.md` topic map documents, including the one-host-transport rule, typed DSH-specific extension convention, and two-adapter common-API promotion gate without duplicating normative ownership
+- [ ] 8.3 Update `docs/hosts/deepseek-harness.md` from research gate to implemented host contract, closed capability profile, immutable Host Extension catalog and selection plan, direct shared binding, configuration, independent Actor Identity selection, revisioned tools, cancellation, lifecycle availability, failure boundary, and trust model
+- [ ] 8.4 Update the owning architecture, protocols, composition, Host Extensions, operations, security, scope/status, verification, and `docs/README.md` topic map documents, including the one-host-transport rule, typed DSH-specific Host Extension convention, closed facts boundary, and two-adapter common-API promotion gate without duplicating normative ownership
 - [ ] 8.5 Update root setup and usage documentation with native DSH installation/composition examples and keep OMP behavior documented as unchanged
 - [ ] 8.6 Run focused `host-dsh` checks, the shared Runtime Host conformance suite against DSH and OMP, OMP regression checks, and a real native DSH composition scenario, then run `npm run check`

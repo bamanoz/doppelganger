@@ -19,6 +19,8 @@ export {
   type CompositionRuntimeOptions,
   type CompositionSession,
   type CompositionWatchOptions,
+  type ProtectedComposition,
+  type ProtectedCompositionEntry,
 } from './runtime.ts'
 export {
   RUNTIME_LOGGING_LIMITS,

@@ -1,6 +1,6 @@
 ## Why
 
-Doppelganger's canonical memory has stronger mutation safety, provenance, isolation, and degraded operation than broad context-database designs, but its retrieval and extraction layers still treat records mostly as flat, whole-text units. The memory engine should gain progressive, hierarchical, budget-aware context assembly and durable asynchronous learning while preserving SQLite authority, candidate review, actor/project isolation, and lexical fallback.
+Doppelganger's canonical memory has stronger mutation safety, provenance, isolation, and degraded operation than broad context-database designs, but its retrieval and extraction layers still treat records mostly as flat, whole-text units. After `add-sqlite-postgresql-memory-backends` establishes the asynchronous `MemoryRepository`/`MemoryUnitOfWork` contract and complete SQLite and PostgreSQL providers at canonical schema version 5, the memory engine should gain progressive, hierarchical, budget-aware context assembly and durable asynchronous learning on both providers while preserving canonical authority, candidate review, actor/project isolation, and lexical fallback.
 
 ## What Changes
 
@@ -13,7 +13,7 @@ Doppelganger's canonical memory has stronger mutation safety, provenance, isolat
 - Record bounded usage feedback for contributed memory and apply a capped recency/frequency hotness boost that cannot bypass canonical eligibility, authority, or conflict rules.
 - Add rebuildable semantic relations between current revisions for retrieval expansion and provenance navigation while retaining `memory_conflicts` as the only authoritative contradiction workflow.
 - Add bounded, secret-free retrieval and extraction diagnostics covering stage latency, fallbacks, stale-hit rejection, budget use, projection tiers, queue state, and zero-result queries.
-- Preserve canonical SQLite records, immutable revisions, mutation receipts, candidate review, evidence, conflicts, hard deletion, actor/project partitioning, and FTS5 as the authoritative and always-available foundation.
+- Preserve canonical records in the selected repository, immutable revisions, mutation receipts, candidate review, evidence, conflicts, hard deletion, actor/project partitioning, each provider's indexed lexical retrieval, and optional semantic fallback as the authoritative and always-available foundation.
 - Implement the design independently; do not add an OpenViking runtime dependency or copy AGPL implementation code.
 
 ## Capabilities
@@ -29,10 +29,10 @@ None.
 
 ## Impact
 
-- Primary packages: `packages/extension-memory`, `packages/extension-memory-vectors`, and the configured capture/extractor Loader rows.
+- Primary packages: `packages/extension-memory`, `packages/extension-memory-vectors`, the SQLite and PostgreSQL canonical providers, and the configured capture/extractor Loader rows.
 - Host lifecycle remains transport-neutral and continues to consume only completed committed-turn events; no host-specific memory path is introduced.
-- Canonical SQLite schema and migrations will gain durable extraction, projection, usage, relation, and working-checkpoint state. External vector schemas may gain derived tier, hierarchy, and relation metadata under new generation identities.
+- This change depends on the completed asynchronous repository/unit-of-work and bounded projection-store cutover from `add-sqlite-postgresql-memory-backends`. Canonical schema version 5 is reserved for that backend change; this change adds its durable extraction, projection, usage, relation, and working-checkpoint state in schema version 6 through both providers and their migration/transfer contracts.
 - Memory context output changes from whole-record-only selection to deterministic progressive tiers, but existing authority, partition, status, temporal, revision, and hard-budget checks remain mandatory.
 - Existing memory tools remain compatible; new operator diagnostics or maintenance controls may be added through the existing namespaced tool protocol.
 - Affected documentation: `docs/features/memory.md`, `docs/operations/semantic-memory.md`, `docs/operations/verification.md`, and `docs/project/status-and-scope.md`.
-- No mandatory external service, Python runtime, or new canonical storage backend is introduced.
+- No mandatory external service, Python runtime, or additional canonical storage backend is introduced.

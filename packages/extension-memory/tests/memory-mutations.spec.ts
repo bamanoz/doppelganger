@@ -1,12 +1,11 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
 import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
-import { InstanceSqliteService } from '@doppelganger/doppelganger-sqlite'
-import { MemoryError, MemoryService } from '../src/index.ts'
+import { MemoryError, MemoryService, SqliteMemoryPlugin } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
 
@@ -34,7 +33,7 @@ async function session(instanceHome: string, options: SessionOptions = {}) {
     }),
   }))
   await context.plugin(createActorIdentityPlugin(options.actorId ?? 'local-user'))
-  await context.plugin(InstanceSqliteService, { home: instanceHome })
+  await context.plugin(SqliteMemoryPlugin, { home: instanceHome })
   await context.plugin(MemoryService, {
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.id === undefined ? {} : { id: options.id }),
@@ -49,27 +48,16 @@ async function root(): Promise<string> {
 }
 
   it('rejects an unbound actor before opening canonical storage', async () => {
+    const instanceHome = await root()
     const context = new Context()
-    let opens = 0
     await context.plugin(createPersonaActivationPlugin({
       instanceId: 'aiden', sessionId: 'unbound-session',
     }))
     await context.plugin(createActorIdentityPlugin())
-    await context.plugin({
-      name: 'sqlite-open-probe',
-      apply(ctx) {
-        ctx.provide('doppelgangerInstanceSqlite', {
-          open() {
-            opens += 1
-            throw new Error('storage must not open for an unbound actor')
-          },
-        } as never)
-      },
-    })
 
-    const memory = context.plugin(MemoryService)
-    await expect(memory.await()).rejects.toThrow('memory requires a bound host actor')
-    expect(opens).toBe(0)
+    const memory = context.plugin(SqliteMemoryPlugin, { home: instanceHome })
+    await expect(memory.await()).rejects.toThrow('memory repository requires a bound host actor')
+    await expect(access(join(instanceHome, 'storage'))).rejects.toMatchObject({ code: 'ENOENT' })
     await context.fiber.dispose()
   })
 
@@ -79,7 +67,7 @@ describe('memory mutations', () => {
     const instanceHome = await root()
     let nextId = 0
     const context = await session(instanceHome, { id: () => `id-${nextId += 1}` })
-    const remembered = context.doppelgangerMemory.remember({
+    const remembered = await context.doppelgangerMemory.remember({
       operationId: 'remember-decision',
       subjectKey: 'project.loader.strategy',
       kind: 'decision',
@@ -95,7 +83,7 @@ describe('memory mutations', () => {
       revision: { id: 'id-2', ordinal: 1, sourceKind: 'explicit' },
     })
 
-    const corrected = context.doppelgangerMemory.correct({
+    const corrected = await context.doppelgangerMemory.correct({
       operationId: 'correct-decision',
       id: remembered.id,
       expectedRevisionId: remembered.revision.id,
@@ -106,12 +94,12 @@ describe('memory mutations', () => {
       supersedesRevisionId: remembered.revision.id,
       sourceKind: 'correction',
     })
-    expect(context.doppelgangerMemory.history(remembered.id).map(revision => revision.content)).toEqual([
+    expect((await context.doppelgangerMemory.history(remembered.id)).map(revision => revision.content)).toEqual([
       'Use Cordis Loader updates.',
       'Use transactional Cordis Loader updates.',
     ])
     try {
-      context.doppelgangerMemory.correct({
+      await context.doppelgangerMemory.correct({
         operationId: 'stale-correction',
         id: remembered.id,
         expectedRevisionId: remembered.revision.id,
@@ -123,11 +111,11 @@ describe('memory mutations', () => {
       expect((error as MemoryError).code).toBe('REVISION_CONFLICT')
     }
 
-    expect(context.doppelgangerMemory.pin({ operationId: 'pin-decision', id: remembered.id, pinned: true }).pinned).toBe(true)
-    expect(context.doppelgangerMemory.forget({ operationId: 'forget-decision', id: remembered.id })).toBe(true)
-    expect(context.doppelgangerMemory.get(remembered.id)).toBeUndefined()
-    expect(() => context.doppelgangerMemory.history(remembered.id)).toThrow('active partition')
-    expect(context.doppelgangerMemory.forget({ operationId: 'forget-decision', id: remembered.id })).toBe(true)
+    expect((await context.doppelgangerMemory.pin({ operationId: 'pin-decision', id: remembered.id, pinned: true })).pinned).toBe(true)
+    expect(await context.doppelgangerMemory.forget({ operationId: 'forget-decision', id: remembered.id })).toBe(true)
+    expect(await context.doppelgangerMemory.get(remembered.id)).toBeUndefined()
+    await expect(context.doppelgangerMemory.history(remembered.id)).rejects.toThrow('active partition')
+    expect(await context.doppelgangerMemory.forget({ operationId: 'forget-decision', id: remembered.id })).toBe(true)
     await context.fiber.dispose()
   })
 
@@ -142,11 +130,11 @@ describe('memory mutations', () => {
       scope: 'relationship' as const,
       evidence: { turnId: 'turn-one', role: 'principal' as const },
     }
-    const created = first.doppelgangerMemory.remember(request)
-    expect(first.doppelgangerMemory.remember(request).id).toBe(created.id)
-    expect(first.doppelgangerMemory.evidence(created.id)).toHaveLength(1)
+    const created = await first.doppelgangerMemory.remember(request)
+    expect((await first.doppelgangerMemory.remember(request)).id).toBe(created.id)
+    expect(await first.doppelgangerMemory.evidence(created.id)).toHaveLength(1)
     try {
-      first.doppelgangerMemory.remember({ ...request, content: 'Prefer detailed responses.' })
+      await first.doppelgangerMemory.remember({ ...request, content: 'Prefer detailed responses.' })
       expect.unreachable('conflicting idempotency operation committed')
     } catch (error) {
       expect((error as MemoryError).code).toBe('IDEMPOTENCY_CONFLICT')
@@ -154,14 +142,14 @@ describe('memory mutations', () => {
     await first.fiber.dispose()
 
     const second = await session(instanceHome, { sessionId: 'second' })
-    const repeated = second.doppelgangerMemory.remember({
+    const repeated = await second.doppelgangerMemory.remember({
       ...request,
       operationId: 'repeat-verbosity',
       evidence: { turnId: 'turn-two', role: 'principal' },
     })
     expect(repeated.id).toBe(created.id)
-    expect(second.doppelgangerMemory.history(created.id)).toHaveLength(1)
-    expect(second.doppelgangerMemory.evidence(created.id).map(evidence => evidence.sourceSessionId)).toEqual([
+    expect(await second.doppelgangerMemory.history(created.id)).toHaveLength(1)
+    expect((await second.doppelgangerMemory.evidence(created.id)).map(evidence => evidence.sourceSessionId)).toEqual([
       'first',
       'second',
     ])
@@ -171,20 +159,20 @@ describe('memory mutations', () => {
   it('isolates actors and projects before direct lookup or mutation', async () => {
     const instanceHome = await root()
     const actorOne = await session(instanceHome, { actorId: 'one', sessionId: 'one-a', projectId: 'alpha' })
-    const relationship = actorOne.doppelgangerMemory.remember({
+    const relationship = await actorOne.doppelgangerMemory.remember({
       operationId: 'one-relationship',
       subjectKey: 'preference.response.format',
       kind: 'preference',
       content: 'Use tables for comparisons.',
       scope: 'relationship',
     })
-    const project = actorOne.doppelgangerMemory.remember({
+    const project = await actorOne.doppelgangerMemory.remember({
       operationId: 'one-project',
       subjectKey: 'project.database.engine',
       kind: 'decision',
       content: 'Project Alpha uses SQLite.',
     })
-    actorOne.doppelgangerMemory.propose({
+    await actorOne.doppelgangerMemory.propose({
       operationId: 'one-candidate',
       subjectKey: 'project.candidate',
       kind: 'fact',
@@ -193,17 +181,17 @@ describe('memory mutations', () => {
     await actorOne.fiber.dispose()
 
     const otherProject = await session(instanceHome, { actorId: 'one', sessionId: 'one-b', projectId: 'beta' })
-    expect(otherProject.doppelgangerMemory.get(relationship.id)?.id).toBe(relationship.id)
-    expect(otherProject.doppelgangerMemory.get(project.id)).toBeUndefined()
+    expect((await otherProject.doppelgangerMemory.get(relationship.id))?.id).toBe(relationship.id)
+    expect(await otherProject.doppelgangerMemory.get(project.id)).toBeUndefined()
     await otherProject.fiber.dispose()
 
     const actorTwo = await session(instanceHome, { actorId: 'two', sessionId: 'two-a', projectId: 'alpha' })
-    expect(actorTwo.doppelgangerMemory.get(relationship.id)).toBeUndefined()
-    expect(actorTwo.doppelgangerMemory.get(project.id)).toBeUndefined()
-    expect(actorTwo.doppelgangerMemory.listCandidates()).toEqual([])
-    expect(() => actorTwo.doppelgangerMemory.history(relationship.id)).toThrow('active partition')
+    expect(await actorTwo.doppelgangerMemory.get(relationship.id)).toBeUndefined()
+    expect(await actorTwo.doppelgangerMemory.get(project.id)).toBeUndefined()
+    expect(await actorTwo.doppelgangerMemory.listCandidates()).toEqual([])
+    await expect(actorTwo.doppelgangerMemory.history(relationship.id)).rejects.toThrow('active partition')
     try {
-      actorTwo.doppelgangerMemory.pin({ operationId: 'cross-actor-pin', id: relationship.id, pinned: true })
+      await actorTwo.doppelgangerMemory.pin({ operationId: 'cross-actor-pin', id: relationship.id, pinned: true })
       expect.unreachable('cross-actor pin committed')
     } catch (error) {
       expect((error as MemoryError).code).toBe('NOT_FOUND')
@@ -214,7 +202,7 @@ describe('memory mutations', () => {
   it('falls back to relationship scope when no project is active', async () => {
     const instanceHome = await root()
     const context = await session(instanceHome, { projectId: null })
-    const remembered = context.doppelgangerMemory.remember({
+    const remembered = await context.doppelgangerMemory.remember({
       operationId: 'no-project',
       subjectKey: 'relationship.shared.fact',
       kind: 'fact',
@@ -228,14 +216,14 @@ describe('memory mutations', () => {
     const instanceHome = await root()
     let clock = new Date('2026-08-28T12:00:00.000Z')
     const context = await session(instanceHome, { now: () => clock })
-    const future = context.doppelgangerMemory.remember({
+    const future = await context.doppelgangerMemory.remember({
       operationId: 'future',
       subjectKey: 'project.release.window',
       kind: 'fact',
       content: 'The release window opens tomorrow.',
       validFrom: '2026-08-29T12:00:00.000Z',
     })
-    const temporary = context.doppelgangerMemory.remember({
+    const temporary = await context.doppelgangerMemory.remember({
       operationId: 'temporary',
       subjectKey: 'project.incident.status',
       kind: 'fact',
@@ -244,20 +232,20 @@ describe('memory mutations', () => {
     })
     expect((await context.doppelgangerMemory.search({ query: 'release incident', tokenBudget: 100 }))
       .map(result => result.record.id)).toEqual([temporary.id])
-    expect(context.doppelgangerMemory.inspect(future.id).temporalState).toBe('not-yet-valid')
+    expect((await context.doppelgangerMemory.inspect(future.id)).temporalState).toBe('not-yet-valid')
 
     clock = new Date('2026-08-29T13:00:00.000Z')
     expect((await context.doppelgangerMemory.search({ query: 'release incident', tokenBudget: 100 }))
       .map(result => result.record.id)).toEqual([future.id])
-    expect(context.doppelgangerMemory.inspect(temporary.id).temporalState).toBe('expired')
-    expect(context.doppelgangerMemory.history(temporary.id)[0]?.content).toBe('The incident is active.')
+    expect((await context.doppelgangerMemory.inspect(temporary.id)).temporalState).toBe('expired')
+    expect((await context.doppelgangerMemory.history(temporary.id))[0]?.content).toBe('The incident is active.')
     await context.fiber.dispose()
   })
 
   it('commits exactly one concurrent-session correction for an expected revision', async () => {
     const instanceHome = await root()
     const seed = await session(instanceHome, { sessionId: 'seed' })
-    const record = seed.doppelgangerMemory.remember({
+    const record = await seed.doppelgangerMemory.remember({
       operationId: 'race-seed',
       subjectKey: 'project.runtime.choice',
       kind: 'decision',
@@ -266,7 +254,7 @@ describe('memory mutations', () => {
     await seed.fiber.dispose()
     const first = await session(instanceHome, { sessionId: 'race-one' })
     const second = await session(instanceHome, { sessionId: 'race-two' })
-    const committed = first.doppelgangerMemory.correct({
+    const committed = await first.doppelgangerMemory.correct({
       operationId: 'race-correction-one',
       id: record.id,
       expectedRevisionId: record.revision.id,
@@ -274,7 +262,7 @@ describe('memory mutations', () => {
     })
     expect(committed.revision.ordinal).toBe(2)
     try {
-      second.doppelgangerMemory.correct({
+      await second.doppelgangerMemory.correct({
         operationId: 'race-correction-two',
         id: record.id,
         expectedRevisionId: record.revision.id,
@@ -284,7 +272,7 @@ describe('memory mutations', () => {
     } catch (error) {
       expect((error as MemoryError).code).toBe('REVISION_CONFLICT')
     }
-    expect(first.doppelgangerMemory.history(record.id).map(revision => revision.content)).toEqual([
+    expect((await first.doppelgangerMemory.history(record.id)).map(revision => revision.content)).toEqual([
       'Use runtime A.',
       'Use runtime B.',
     ])
@@ -295,13 +283,13 @@ describe('memory mutations', () => {
   it('bounds evidence excerpts and rejects secret-bearing evidence atomically', async () => {
     const instanceHome = await root()
     const context = await session(instanceHome)
-    const record = context.doppelgangerMemory.remember({
+    const record = await context.doppelgangerMemory.remember({
       operationId: 'evidence-seed',
       subjectKey: 'project.evidence.policy',
       kind: 'fact',
       content: 'Evidence is bounded.',
     })
-    context.doppelgangerMemory.observe({
+    await context.doppelgangerMemory.observe({
       operationId: 'long-evidence',
       recordId: record.id,
       turnId: 'long-turn',
@@ -309,11 +297,11 @@ describe('memory mutations', () => {
       relation: 'support',
       excerpt: 'x'.repeat(2_000),
     })
-    expect(context.doppelgangerMemory.evidence(record.id)
+    expect((await context.doppelgangerMemory.evidence(record.id))
       .find(evidence => evidence.sourceTurnId === 'long-turn')?.excerpt).toHaveLength(1_000)
-    const count = context.doppelgangerMemory.evidence(record.id).length
+    const count = (await context.doppelgangerMemory.evidence(record.id)).length
     try {
-      context.doppelgangerMemory.observe({
+      await context.doppelgangerMemory.observe({
         operationId: 'secret-evidence',
         recordId: record.id,
         turnId: 'secret-turn',
@@ -325,7 +313,7 @@ describe('memory mutations', () => {
     } catch (error) {
       expect((error as MemoryError).code).toBe('SECRET_REJECTED')
     }
-    expect(context.doppelgangerMemory.evidence(record.id)).toHaveLength(count)
+    expect(await context.doppelgangerMemory.evidence(record.id)).toHaveLength(count)
     await context.fiber.dispose()
   })
 
@@ -334,13 +322,13 @@ describe('memory mutations', () => {
     const context = await session(instanceHome)
     const secret = 'api_key = sk_live_1234567890abcdefgh'
     for (const operation of [
-      () => context.doppelgangerMemory.remember({
+      async () => context.doppelgangerMemory.remember({
         operationId: 'secret-active',
         subjectKey: 'secret.active',
         kind: 'fact',
         content: secret,
       }),
-      () => context.doppelgangerMemory.propose({
+      async () => context.doppelgangerMemory.propose({
         operationId: 'secret-candidate',
         subjectKey: 'secret.candidate',
         kind: 'preference',
@@ -348,14 +336,14 @@ describe('memory mutations', () => {
       }),
     ]) {
       try {
-        operation()
+        await operation()
         expect.unreachable('secret memory was stored')
       } catch (error) {
         expect(error).toBeInstanceOf(MemoryError)
         expect((error as MemoryError).code).toBe('SECRET_REJECTED')
       }
     }
-    expect(context.doppelgangerMemory.listCandidates()).toEqual([])
+    expect(await context.doppelgangerMemory.listCandidates()).toEqual([])
     await context.fiber.dispose()
   })
 })

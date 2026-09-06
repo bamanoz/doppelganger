@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { dirname, isAbsolute, normalize } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -126,9 +126,102 @@ export class SQLiteExactMemoryVectorIndex implements MemoryVectorIndex {
     this.dimensions = config.dimensions
     this.target = normalize(config.databasePath)
     const namespace = text(config.namespace ?? 'default', 'SQLite exact namespace')
-    const legacyConfigFingerprint = config.configFingerprint ?? fingerprint({ backend: 'sqlite_exact', databasePath: this.target, namespace, dimensions: this.dimensions })
-    if (!/^[a-f0-9]{64}$/.test(legacyConfigFingerprint)) throw new TypeError('SQLite exact configFingerprint must be a SHA-256 fingerprint')
-    const configFingerprint = fingerprint({ partitionSchemaVersion: 2, configuredFingerprint: legacyConfigFingerprint })
+    const configuredFingerprint = config.configFingerprint ?? fingerprint({ backend: 'sqlite_exact', databasePath: this.target, namespace, dimensions: this.dimensions })
+    if (!/^[a-f0-9]{64}$/.test(configuredFingerprint)) throw new TypeError('SQLite exact configFingerprint must be a SHA-256 fingerprint')
+    const partitionFingerprint = fingerprint({ partitionSchemaVersion: 2, configuredFingerprint })
+    this.database = new DatabaseSync(this.target, {
+      timeout: config.busyTimeoutMs ?? 5000,
+      enableForeignKeyConstraints: true,
+      enableDoubleQuotedStringLiterals: false,
+    })
+    const table = tableName(namespace)
+    let transactionOpen = false
+    let targetId: string
+    let configFingerprint: string
+    try {
+      this.database.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        CREATE TABLE IF NOT EXISTS doppelganger_vector_metadata (
+          namespace TEXT PRIMARY KEY,
+          dimensions INTEGER NOT NULL,
+          config_fingerprint TEXT NOT NULL,
+          schema_version INTEGER NOT NULL DEFAULT 3,
+          target_id TEXT
+        );
+      `)
+      this.database.exec('BEGIN IMMEDIATE')
+      transactionOpen = true
+      const metadataColumns = this.database.prepare('PRAGMA table_info(doppelganger_vector_metadata)').all() as { name: string }[]
+      if (!metadataColumns.some(column => column.name === 'schema_version')) {
+        this.database.exec('ALTER TABLE doppelganger_vector_metadata ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1')
+      }
+      if (!metadataColumns.some(column => column.name === 'target_id')) {
+        this.database.exec('ALTER TABLE doppelganger_vector_metadata ADD COLUMN target_id TEXT')
+      }
+      const metadata = this.database.prepare('SELECT dimensions, config_fingerprint, schema_version, target_id FROM doppelganger_vector_metadata WHERE namespace = ?').get(namespace) as {
+        dimensions: number
+        config_fingerprint: string
+        schema_version: number
+        target_id: string | null
+      } | undefined
+      if (metadata === undefined) {
+        targetId = randomBytes(32).toString('hex')
+        configFingerprint = fingerprint({ partitionSchemaVersion: 2, configuredFingerprint, targetId })
+        this.database.prepare('INSERT INTO doppelganger_vector_metadata(namespace, dimensions, config_fingerprint, schema_version, target_id) VALUES (?, ?, ?, 3, ?)')
+          .run(namespace, this.dimensions, configFingerprint, targetId)
+      } else {
+        const expectedStoredFingerprint = metadata.schema_version === 1 ? configuredFingerprint : partitionFingerprint
+        if (metadata.dimensions !== this.dimensions || (metadata.schema_version <= 2 && metadata.config_fingerprint !== expectedStoredFingerprint)) {
+          throw new Error('SQLite exact database already contains an incompatible vector index identity')
+        }
+        if (metadata.schema_version === 1) {
+          const columns = this.database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+          const names = new Set(columns.map(column => column.name))
+          if (!names.has('principal_id') || names.has('actor_id')) throw new Error('SQLite exact legacy actor migration cannot identify the partition column')
+          this.database.exec(`ALTER TABLE ${table} RENAME COLUMN principal_id TO actor_id`)
+        } else if (metadata.schema_version !== 2 && metadata.schema_version !== 3) {
+          throw new Error(`unsupported SQLite exact schema version: ${String(metadata.schema_version)}`)
+        }
+        targetId = metadata.target_id ?? randomBytes(32).toString('hex')
+        if (!/^[a-f0-9]{64}$/.test(targetId)) throw new Error('SQLite exact database contains an invalid target identity')
+        configFingerprint = fingerprint({ partitionSchemaVersion: 2, configuredFingerprint, targetId })
+        if (metadata.schema_version === 3) {
+          if (metadata.config_fingerprint !== configFingerprint) throw new Error('SQLite exact database already contains an incompatible vector index identity')
+        } else {
+          this.database.prepare('UPDATE doppelganger_vector_metadata SET config_fingerprint = ?, schema_version = 3, target_id = ? WHERE namespace = ?')
+            .run(configFingerprint, targetId, namespace)
+        }
+      }
+      this.database.exec(`
+        CREATE TABLE IF NOT EXISTS ${table} (
+          vector_id TEXT PRIMARY KEY,
+          generation_id TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          revision_id TEXT NOT NULL,
+          instance_id TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          scope_kind TEXT NOT NULL,
+          project_id TEXT,
+          kind TEXT NOT NULL,
+          subject_key TEXT NOT NULL,
+          status TEXT NOT NULL,
+          vector BLOB NOT NULL,
+          UNIQUE(generation_id, record_id, revision_id)
+        );
+      `)
+      this.database.exec('COMMIT')
+      transactionOpen = false
+    } catch (error) {
+      if (transactionOpen) {
+        try {
+          this.database.exec('ROLLBACK')
+        } catch {}
+      }
+      this.database.close()
+      throw error
+    }
+    this.table = table
     this.identity = Object.freeze({
       backend: 'sqlite_exact',
       namespace,
@@ -137,74 +230,6 @@ export class SQLiteExactMemoryVectorIndex implements MemoryVectorIndex {
       dimensions: this.dimensions,
       distanceMetric: 'cosine',
     })
-    this.database = new DatabaseSync(this.target, {
-      timeout: config.busyTimeoutMs ?? 5000,
-      enableForeignKeyConstraints: true,
-      enableDoubleQuotedStringLiterals: false,
-    })
-    const table = tableName(namespace)
-    this.database.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
-      CREATE TABLE IF NOT EXISTS doppelganger_vector_metadata (
-        namespace TEXT PRIMARY KEY,
-        dimensions INTEGER NOT NULL,
-        config_fingerprint TEXT NOT NULL,
-        schema_version INTEGER NOT NULL DEFAULT 2
-      );
-    `)
-    const metadataColumns = this.database.prepare('PRAGMA table_info(doppelganger_vector_metadata)').all() as { name: string }[]
-    if (!metadataColumns.some(column => column.name === 'schema_version')) {
-      this.database.exec('ALTER TABLE doppelganger_vector_metadata ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1')
-    }
-    const metadata = this.database.prepare('SELECT dimensions, config_fingerprint, schema_version FROM doppelganger_vector_metadata WHERE namespace = ?').get(namespace) as { dimensions: number; config_fingerprint: string; schema_version: number } | undefined
-    const expectedStoredFingerprint = metadata?.schema_version === 1 ? legacyConfigFingerprint : configFingerprint
-    if (metadata !== undefined && (metadata.dimensions !== this.dimensions || metadata.config_fingerprint !== expectedStoredFingerprint)) {
-      this.database.close()
-      throw new Error('SQLite exact database already contains an incompatible vector index identity')
-    }
-    if (metadata?.schema_version === 1) {
-      this.database.exec('BEGIN IMMEDIATE')
-      try {
-        const columns = this.database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
-        const names = new Set(columns.map(column => column.name))
-        if (!names.has('principal_id') || names.has('actor_id')) throw new Error('SQLite exact legacy actor migration cannot identify the partition column')
-        this.database.exec(`ALTER TABLE ${table} RENAME COLUMN principal_id TO actor_id`)
-        this.database.prepare('UPDATE doppelganger_vector_metadata SET config_fingerprint = ?, schema_version = 2 WHERE namespace = ?').run(configFingerprint, namespace)
-        this.database.exec('COMMIT')
-      } catch (error) {
-        this.database.exec('ROLLBACK')
-        this.database.close()
-        throw error
-      }
-    } else if (metadata !== undefined && metadata.schema_version !== 2) {
-      this.database.close()
-      throw new Error(`unsupported SQLite exact schema version: ${String(metadata.schema_version)}`)
-    }
-    this.database.prepare('INSERT OR IGNORE INTO doppelganger_vector_metadata(namespace, dimensions, config_fingerprint, schema_version) VALUES (?, ?, ?, 2)').run(namespace, this.dimensions, configFingerprint)
-    const storedMetadata = this.database.prepare('SELECT dimensions, config_fingerprint, schema_version FROM doppelganger_vector_metadata WHERE namespace = ?').get(namespace) as { dimensions: number; config_fingerprint: string; schema_version: number }
-    if (storedMetadata.dimensions !== this.dimensions || storedMetadata.config_fingerprint !== configFingerprint || storedMetadata.schema_version !== 2) {
-      this.database.close()
-      throw new Error('SQLite exact database already contains an incompatible vector index identity')
-    }
-    this.database.exec(`
-      CREATE TABLE IF NOT EXISTS ${table} (
-        vector_id TEXT PRIMARY KEY,
-        generation_id TEXT NOT NULL,
-        record_id TEXT NOT NULL,
-        revision_id TEXT NOT NULL,
-        instance_id TEXT NOT NULL,
-        actor_id TEXT NOT NULL,
-        scope_kind TEXT NOT NULL,
-        project_id TEXT,
-        kind TEXT NOT NULL,
-        subject_key TEXT NOT NULL,
-        status TEXT NOT NULL,
-        vector BLOB NOT NULL,
-        UNIQUE(generation_id, record_id, revision_id)
-      );
-    `)
-    this.table = table
   }
 
   private assertOpen(): void {

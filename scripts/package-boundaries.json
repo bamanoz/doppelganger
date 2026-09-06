@@ -71,16 +71,14 @@
       "directory": "extension-memory",
       "dependencies": [
         "@doppelganger/doppelganger-persona",
-        "@doppelganger/doppelganger-protocols",
-        "@doppelganger/doppelganger-sqlite"
+        "@doppelganger/doppelganger-protocols"
       ]
     },
     "@doppelganger/doppelganger-memory-vectors": {
       "directory": "extension-memory-vectors",
       "dependencies": [
         "@doppelganger/doppelganger-memory",
-        "@doppelganger/doppelganger-protocols",
-        "@doppelganger/doppelganger-sqlite"
+        "@doppelganger/doppelganger-protocols"
       ]
     },
     "@doppelganger/doppelganger-omp": {

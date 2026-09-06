@@ -11,6 +11,7 @@ import {
   digestToolInput,
   serializeLifecycleValue,
 } from '@doppelganger/doppelganger-protocols'
+import { Pool } from 'pg'
 import { OmpAdapterSession, type OmpChildConnection } from '../src/adapter.ts'
 import {
   createDoppelgangerOmpExtension,
@@ -29,6 +30,90 @@ const childPath = fileURLToPath(new URL('../src/child.ts', import.meta.url))
 const activeAdapters: OmpAdapterSession[] = []
 const temporaryRoots: string[] = []
 let mutationOrdinal = 0
+
+const POSTGRESQL_DSN_ENV = 'DOPPELGANGER_TEST_POSTGRESQL_DSN'
+const MEMORY_MUTATION_TOOLS: Readonly<Record<string, true>> = {
+  'memory.remember': true,
+  'memory.candidates.propose': true,
+  'memory.evidence.observe': true,
+  'memory.correct': true,
+  'memory.forget': true,
+  'memory.candidates.approve': true,
+  'memory.candidates.reject': true,
+  'memory.candidates.corroborate': true,
+  'memory.conflicts.resolve': true,
+  'memory.pin': true,
+  'memory.unpin': true,
+}
+
+const MEMORY_TOOL_NAMES = [
+  'memory.candidates.approve',
+  'memory.candidates.corroborate',
+  'memory.candidates.list',
+  'memory.candidates.propose',
+  'memory.candidates.reject',
+  'memory.conflicts.list',
+  'memory.conflicts.resolve',
+  'memory.correct',
+  'memory.evidence.list',
+  'memory.evidence.observe',
+  'memory.forget',
+  'memory.history',
+  'memory.inspect',
+  'memory.pin',
+  'memory.remember',
+  'memory.search',
+  'memory.unpin',
+] as const
+
+function requiredPostgresqlDsn(): string {
+  const dsn = process.env[POSTGRESQL_DSN_ENV]
+  if (dsn === undefined || dsn.trim().length === 0) {
+    throw new Error(`${POSTGRESQL_DSN_ENV} is required for the PostgreSQL OMP vertical test`)
+  }
+  return dsn
+}
+
+function postgresqlSchema(): string {
+  return `doppelganger_omp_vertical_${process.pid}_${Date.now()}_${++mutationOrdinal}`
+}
+
+function quotePostgresqlIdentifier(value: string): string {
+  if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(value)) throw new TypeError('invalid PostgreSQL test schema')
+  return `"${value}"`
+}
+
+function canonicalMemoryProviderRows(storage: string, schema: string | undefined): string[] {
+  if (schema !== undefined) {
+    return [
+      '- id: doppelganger-memory-postgresql',
+      '  name: "@doppelganger/doppelganger-memory/postgresql"',
+      '  inject: [doppelgangerActor]',
+      '  isolate:',
+      '    doppelgangerActor: session',
+      '    doppelgangerMemoryRepository: session',
+      '  config:',
+      `    connectionStringEnv: ${POSTGRESQL_DSN_ENV}`,
+      `    schema: ${schema}`,
+      '    poolSize: 2',
+      '    connectionTimeoutMs: 5000',
+      '    statementTimeoutMs: 5000',
+      '    lockTimeoutMs: 5000',
+    ]
+  }
+  return [
+    '- id: doppelganger-memory-sqlite',
+    '  name: "@doppelganger/doppelganger-memory/sqlite"',
+    '  inject: [doppelgangerActor]',
+    '  isolate:',
+    '    doppelgangerActor: session',
+    '    doppelgangerMemoryRepository: session',
+    '  config:',
+    `    home: ${JSON.stringify(storage)}`,
+    '    namespace: memory',
+  ]
+}
+
 function captureRow(): string[] {
   return [
     '- id: doppelganger-memory-capture',
@@ -43,7 +128,7 @@ function captureRow(): string[] {
   ]
 }
 
-function declarativeTestPreset(storage: string, capture = false, semantic = false): string {
+function declarativeTestPreset(storage: string, capture = false, semantic = false, postgresqlSchemaName?: string): string {
   return [
     '- id: doppelganger-context',
     '  name: "@doppelganger/doppelganger-protocols/context"',
@@ -75,21 +160,16 @@ function declarativeTestPreset(storage: string, capture = false, semantic = fals
     '    doppelgangerTools: session',
     '  config:',
     '    writableTargets: ["trait:evolving-profile"]',
-    '- id: doppelganger-sqlite',
-    '  name: "@doppelganger/doppelganger-sqlite"',
-    '  isolate:',
-    '    doppelgangerInstanceSqlite: session',
-    '  config:',
-    `    home: ${JSON.stringify(storage)}`,
+    ...canonicalMemoryProviderRows(storage, postgresqlSchemaName),
     '- id: doppelganger-memory',
     '  name: "@doppelganger/doppelganger-memory"',
-    '  inject: [doppelgangerActor, doppelgangerPersona, doppelgangerContext, doppelgangerTools, doppelgangerInstanceSqlite]',
+    '  inject: [doppelgangerActor, doppelgangerPersona, doppelgangerContext, doppelgangerTools, doppelgangerMemoryRepository]',
     '  isolate:',
     '    doppelgangerActor: session',
     '    doppelgangerPersona: session',
     '    doppelgangerContext: session',
     '    doppelgangerTools: session',
-    '    doppelgangerInstanceSqlite: session',
+    '    doppelgangerMemoryRepository: session',
     '    doppelgangerMemory: session',
     ...(semantic ? ['    doppelgangerMemorySemantic: session'] : []),
     ...(capture ? captureRow() : []),
@@ -185,6 +265,72 @@ afterEach(async () => {
   delete process.env.OMP_TEST_MCP_INITIALIZE_DELAY
 })
 
+function downgradeCanonicalMemoryToVersionThree(database: DatabaseSync): void {
+  database.exec(`
+    ALTER TABLE memory_records RENAME COLUMN actor_id TO principal_id;
+    ALTER TABLE memory_operations RENAME COLUMN actor_id TO principal_id;
+    DROP TABLE memory_semantic_active_generation;
+    DROP TABLE memory_semantic_indexed_revisions;
+    DROP TABLE memory_vector_projection_work;
+    DROP TABLE memory_vector_deletions;
+    DROP TABLE memory_semantic_generations;
+    DROP TABLE memory_store;
+    DROP TABLE memory_instance_locks;
+    DROP TABLE memory_partition_locks;
+    CREATE TABLE memory_semantic_generations (
+      id TEXT PRIMARY KEY, instance_id TEXT NOT NULL, embedder_identity_json TEXT NOT NULL,
+      vector_index_identity_json TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('building', 'active', 'retained', 'failed', 'deleting')),
+      created_at TEXT NOT NULL, activated_at TEXT, completed_at TEXT, failure_code TEXT
+    );
+    CREATE TABLE memory_semantic_active_generation (
+      instance_id TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL REFERENCES memory_semantic_generations(id) ON DELETE RESTRICT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE memory_semantic_indexed_revisions (
+      generation_id TEXT NOT NULL REFERENCES memory_semantic_generations(id) ON DELETE CASCADE,
+      record_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+      revision_id TEXT NOT NULL REFERENCES memory_revisions(id) ON DELETE CASCADE,
+      indexed_at TEXT NOT NULL,
+      PRIMARY KEY(generation_id, record_id)
+    );
+    CREATE TABLE memory_vector_projection_work (
+      id TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL REFERENCES memory_semantic_generations(id) ON DELETE CASCADE,
+      record_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+      revision_id TEXT NOT NULL REFERENCES memory_revisions(id) ON DELETE CASCADE,
+      operation TEXT NOT NULL CHECK(operation = 'upsert'),
+      state TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'failed')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+      available_at TEXT NOT NULL, lease_until TEXT, last_failure_code TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE memory_vector_deletions (
+      id TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL REFERENCES memory_semantic_generations(id) ON DELETE CASCADE,
+      record_id TEXT NOT NULL, revision_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'failed')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+      available_at TEXT NOT NULL, lease_until TEXT, last_failure_code TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX memory_semantic_generation_active
+      ON memory_semantic_generations(instance_id) WHERE state = 'active';
+    CREATE INDEX memory_semantic_generation_state
+      ON memory_semantic_generations(instance_id, state, created_at);
+    CREATE INDEX memory_semantic_indexed_revision
+      ON memory_semantic_indexed_revisions(record_id, revision_id, generation_id);
+    CREATE INDEX memory_vector_projection_ready
+      ON memory_vector_projection_work(generation_id, state, available_at, created_at, id);
+    CREATE INDEX memory_vector_deletion_ready
+      ON memory_vector_deletions(generation_id, state, available_at, created_at, id);
+    DROP TABLE memory_schema;
+    CREATE TABLE memory_schema(version INTEGER NOT NULL);
+    INSERT INTO memory_schema(version) VALUES (3);
+  `)
+}
+
 async function realSession(
   sessionId: string,
   cwd = workspacePath,
@@ -203,48 +349,41 @@ async function realSession(
   return { adapter, connection }
 }
 
-async function invoke(connection: OmpChildConnection, name: string, input: Record<string, unknown>): Promise<unknown> {
+function normalizedMemoryToolInput(name: string, input: Record<string, unknown>): { readonly input: Record<string, unknown>; readonly ordinal: number } {
   const ordinal = ++mutationOrdinal
   const normalized = { ...input }
   const relationship = normalized.global === true
   delete normalized.global
-  if (new Set([
-    'memory.remember',
-    'memory.candidates.propose',
-    'memory.evidence.observe',
-    'memory.correct',
-    'memory.forget',
-    'memory.candidates.approve',
-    'memory.candidates.reject',
-    'memory.candidates.corroborate',
-    'memory.conflicts.resolve',
-    'memory.pin',
-    'memory.unpin',
-  ]).has(name)) normalized.operationId ??= `vertical:${name}:${ordinal}`
+  if (Object.hasOwn(MEMORY_MUTATION_TOOLS, name)) normalized.operationId ??= `vertical:${name}:${ordinal}`
   if (name === 'memory.remember' || name === 'memory.candidates.propose') {
     normalized.subjectKey ??= `vertical.${String(normalized.kind ?? 'memory')}.${ordinal}`
     if (relationship) normalized.scope = 'relationship'
   }
   if (name === 'memory.candidates.corroborate') normalized.turnId ??= `turn:${ordinal}`
+  return { input: normalized, ordinal }
+}
+
+async function invoke(connection: OmpChildConnection, name: string, input: Record<string, unknown>): Promise<unknown> {
+  const normalized = normalizedMemoryToolInput(name, input)
   const catalog = await connection.request('tools.snapshot') as {
     revision: string
     tools: Array<{ name: string; revision: string; approval?: unknown }>
   }
   const descriptor = catalog.tools.find(tool => tool.name === name)
   if (descriptor === undefined) throw new Error(`${name} is not present in the current catalog`)
-  const callId = `vertical-call:${ordinal}`
+  const callId = `vertical-call:${normalized.ordinal}`
   const result = await connection.request('tools.invoke', {
     callId,
     name,
     toolRevision: descriptor.revision,
-    input: normalized,
+    input: normalized.input,
     ...(descriptor.approval === undefined ? {} : {
       approval: {
         kind: 'one-shot',
-        grantId: `vertical-grant:${ordinal}`,
+        grantId: `vertical-grant:${normalized.ordinal}`,
         callId,
         toolRevision: descriptor.revision,
-        inputDigest: digestToolInput(normalized as never),
+        inputDigest: digestToolInput(normalized.input as never),
       },
     }),
   })
@@ -322,11 +461,12 @@ interface ProjectedTool {
 function mountedOmpExtension(sessionId: string, install: (api: ExtensionAPI) => void) {
   const handlers = new Map<string, (event: unknown, context: ExtensionContext) => Promise<unknown>>()
   const tools = new Map<string, ProjectedTool>()
+  const reports: string[] = []
   let activeTools = ['read', 'bash']
   const schema = { min: () => schema }
   const api = {
     zod: { string: () => schema, object: () => ({}) },
-    logger: { error() {} },
+    logger: { error(message: unknown) { reports.push(String(message)) } },
     registerTool(tool: ProjectedTool & { readonly name: string }) { tools.set(tool.name, tool) },
     on(event: string, handler: (event: unknown, context: ExtensionContext) => Promise<unknown>) {
       handlers.set(event, handler)
@@ -337,11 +477,55 @@ function mountedOmpExtension(sessionId: string, install: (api: ExtensionAPI) => 
   const context = {
     cwd: workspacePath,
     hasUI: false,
-    ui: { notify() {} },
+    ui: { notify(message: unknown) { reports.push(String(message)) } },
     sessionManager: { getSessionId: () => sessionId },
   } as unknown as ExtensionContext
   install(api)
-  return { handlers, tools, context }
+  return { handlers, tools, context, reports }
+}
+
+interface MountedOmpExtension {
+  readonly handlers: Map<string, (event: unknown, context: ExtensionContext) => Promise<unknown>>
+  readonly tools: Map<string, ProjectedTool>
+  readonly context: ExtensionContext
+  readonly reports: string[]
+}
+
+async function invokeProjectedMemory(
+  fixture: MountedOmpExtension,
+  name: typeof MEMORY_TOOL_NAMES[number],
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const normalized = normalizedMemoryToolInput(name, input)
+  const proxyName = `doppelganger_${name.replaceAll('.', '_')}`
+  const tool = fixture.tools.get(proxyName)
+  if (tool === undefined) throw new Error(`${proxyName} is not projected by the OMP extension`)
+  const result = await tool.execute(
+    `project-local-memory:${normalized.ordinal}`,
+    normalized.input,
+    undefined,
+    undefined,
+    fixture.context,
+  )
+  if (result.isError === true) {
+    const details = result.details
+    const code = details !== null && typeof details === 'object' && 'code' in details && typeof details.code === 'string'
+      ? details.code
+      : 'TOOL_ERROR'
+    const message = details !== null && typeof details === 'object' && 'message' in details && typeof details.message === 'string'
+      ? details.message
+      : `${name} failed`
+    throw new Error(`${code}: ${message}`)
+  }
+  return result.details
+}
+
+function memoryProxyNames(fixture: MountedOmpExtension): string[] {
+  return [...fixture.tools.keys()].filter(name => name.startsWith('doppelganger_memory_')).sort()
+}
+
+async function shutdownMountedExtension(fixture: MountedOmpExtension): Promise<void> {
+  await fixture.handlers.get('session_shutdown')?.({ type: 'session_shutdown' }, fixture.context)
 }
 
 function realOmpExtension(sessionId: string) {
@@ -351,8 +535,134 @@ function realOmpExtension(sessionId: string) {
   )
 }
 
+
+async function loadProjectLocalOmpExtension(actorId: string | undefined) {
+  vi.stubEnv('DOPPELGANGER_HOME', homePath)
+  vi.stubEnv('DOPPELGANGER_ACTOR_ID', actorId ?? '')
+  // The project-local entrypoint snapshots actor environment at module evaluation, so each scenario needs a fresh module instance.
+  vi.resetModules()
+  const extensionUrl = new URL('../../../.omp/extensions/doppelganger.ts', import.meta.url)
+  extensionUrl.searchParams.set('project-local-postgresql-memory', `${Date.now()}-${++mutationOrdinal}`)
+  return (await import(extensionUrl.href)).default
+}
+
+type MemoryInvoker = (
+  name: typeof MEMORY_TOOL_NAMES[number],
+  input: Record<string, unknown>,
+) => Promise<unknown>
+
+interface CompleteMemoryLifecycleResult {
+  readonly recordId: string
+  readonly revisionId: string
+  readonly content: string
+}
+
+function firstConflict(value: unknown): { readonly id: string; readonly status: string } {
+  if (!Array.isArray(value) || value[0] === null || typeof value[0] !== 'object'
+    || !('id' in value[0]) || typeof value[0].id !== 'string'
+    || !('status' in value[0]) || typeof value[0].status !== 'string') {
+    throw new Error('memory.conflicts.list returned an invalid result')
+  }
+  return { id: value[0].id, status: value[0].status }
+}
+
+async function exerciseCompleteMemoryLifecycle(first: MemoryInvoker, second: MemoryInvoker): Promise<CompleteMemoryLifecycleResult> {
+  const originalContent = 'The shared canonical lifecycle marker is flibbertigibbet-axiom-947.'
+  const correctedContent = 'The corrected shared canonical marker is flibbertigibbet-axiom-948.'
+  const explicit = recordCoordinates(await first('memory.remember', {
+    subjectKey: 'project.vertical.complete',
+    kind: 'fact',
+    content: originalContent,
+  }))
+  expect(searchContents(await second('memory.search', { query: 'flibbertigibbet axiom 947' }))).toContain(originalContent)
+  expect(await second('memory.inspect', { id: explicit.id })).toEqual(expect.objectContaining({ id: explicit.id }))
+  expect(await first('memory.evidence.list', { id: explicit.id })).toHaveLength(1)
+  await first('memory.evidence.observe', {
+    id: explicit.id,
+    turnId: 'postgresql-evidence-turn',
+    role: 'tool',
+    relation: 'support',
+    excerpt: 'The canonical lifecycle was observed through OMP.',
+  })
+  expect(await second('memory.evidence.list', { id: explicit.id })).toHaveLength(2)
+
+  const corrected = recordCoordinates(await first('memory.correct', {
+    id: explicit.id,
+    expectedRevisionId: explicit.revisionId,
+    content: correctedContent,
+  }))
+  expect(await second('memory.history', { id: explicit.id })).toEqual([
+    expect.objectContaining({ content: originalContent }),
+    expect.objectContaining({ content: correctedContent, supersedesRevisionId: explicit.revisionId }),
+  ])
+  expect(await first('memory.pin', { id: explicit.id })).toEqual(expect.objectContaining({ pinned: true }))
+  expect(await first('memory.unpin', { id: explicit.id })).toEqual(expect.objectContaining({ pinned: false }))
+
+  const approved = recordCoordinates(await first('memory.candidates.propose', {
+    subjectKey: 'relationship.vertical.approved',
+    kind: 'preference',
+    content: 'Prefer reviewed shared canonical memory.',
+    global: true,
+  }))
+  const rejected = recordCoordinates(await first('memory.candidates.propose', {
+    subjectKey: 'project.vertical.rejected',
+    kind: 'fact',
+    content: 'Reject this shared canonical candidate.',
+  }))
+  expect(await second('memory.candidates.list', {})).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: approved.id, status: 'candidate' }),
+    expect.objectContaining({ id: rejected.id, status: 'candidate' }),
+  ]))
+  expect(await first('memory.candidates.approve', { id: approved.id })).toEqual(expect.objectContaining({ status: 'active' }))
+  expect(await first('memory.candidates.reject', { id: rejected.id })).toEqual(expect.objectContaining({ status: 'rejected' }))
+
+  const promotable = recordCoordinates(await first('memory.candidates.propose', {
+    subjectKey: 'relationship.vertical.corroborated',
+    kind: 'preference',
+    content: 'Prefer independently corroborated PostgreSQL memory.',
+    global: true,
+  }))
+  expect(await first('memory.candidates.corroborate', {
+    id: promotable.id,
+    content: 'Repeated in the original OMP session.',
+  })).toEqual(expect.objectContaining({ status: 'candidate' }))
+  expect(await second('memory.candidates.corroborate', {
+    id: promotable.id,
+    content: 'Repeated independently in the second OMP session.',
+  })).toEqual(expect.objectContaining({ status: 'active' }))
+
+  const conflictActive = recordCoordinates(await first('memory.remember', {
+    subjectKey: 'project.vertical.conflict',
+    kind: 'decision',
+    content: 'The project uses transport A.',
+  }))
+  const conflictCandidate = recordCoordinates(await first('memory.candidates.propose', {
+    subjectKey: 'project.vertical.conflict',
+    kind: 'decision',
+    content: 'The project uses transport B.',
+  }))
+  const conflict = firstConflict(await second('memory.conflicts.list', { id: conflictCandidate.id }))
+  expect(conflict.status).toBe('unresolved')
+  expect(await second('memory.conflicts.resolve', {
+    conflictId: conflict.id,
+    expectedRevisionId: conflictActive.revisionId,
+    resolution: 'promote-candidate',
+  })).toEqual(expect.objectContaining({
+    id: conflictActive.id,
+    revision: expect.objectContaining({ content: 'The project uses transport B.', sourceKind: 'conflict-resolution' }),
+  }))
+  expect(firstConflict(await first('memory.conflicts.list', { id: conflictActive.id })).status).toBe('resolved-candidate')
+
+  await expect(first('memory.remember', {
+    subjectKey: 'project.vertical.secret',
+    kind: 'fact',
+    content: 'api_key = sk_live_1234567890abcdefgh',
+  })).rejects.toThrow('SECRET_REJECTED')
+  expect(searchContents(await second('memory.search', { query: 'flibbertigibbet axiom 948' }))).toContain(correctedContent)
+  return { recordId: corrected.id, revisionId: corrected.revisionId, content: correctedContent }
+}
 async function commitOmpTurn(
-  fixture: ReturnType<typeof realOmpExtension>,
+  fixture: MountedOmpExtension,
   principalInput: string,
   assistantOutput: string,
 ): Promise<void> {
@@ -455,7 +765,7 @@ describe('full-stack test Runtime Preset vertical', () => {
 
     expect(await adapter.start()).toMatchObject({
       state: 'failed',
-      diagnostic: { message: expect.stringContaining('memory requires a bound host actor') },
+      diagnostic: { message: expect.stringContaining('memory repository requires a bound host actor') },
     })
     await expect(access(join(storagePath, 'storage', 'memory.sqlite'))).rejects.toThrow()
   })
@@ -472,9 +782,7 @@ describe('full-stack test Runtime Preset vertical', () => {
 
     const canonicalPath = join(storagePath, 'storage', 'memory.sqlite')
     const legacy = new DatabaseSync(canonicalPath)
-    legacy.exec('ALTER TABLE memory_records RENAME COLUMN actor_id TO principal_id')
-    legacy.exec('ALTER TABLE memory_operations RENAME COLUMN actor_id TO principal_id')
-    legacy.exec('UPDATE memory_schema SET version = 3')
+    downgradeCanonicalMemoryToVersionThree(legacy)
     legacy.close()
 
     const otherActor = await realSession('continuity-other-actor', workspacePath, 'another-actor')
@@ -522,64 +830,115 @@ describe('full-stack test Runtime Preset vertical', () => {
       .toContain('The Doppelganger project selected Cordis.')
   })
 
+  it('runs the complete memory lifecycle with shared PostgreSQL canonical storage', async () => {
+    const schema = postgresqlSchema()
+    const admin = new Pool({
+      connectionString: requiredPostgresqlDsn(),
+      max: 1,
+      connectionTimeoutMillis: 5000,
+      query_timeout: 5000,
+      statement_timeout: 5000,
+      lock_timeout: 5000,
+    })
+    const active = new Set<MountedOmpExtension>()
+    try {
+      await writeFile(presetPath, `${declarativeTestPreset(storagePath, true, false, schema).trimEnd()}\n`)
+      expect((await admin.query<{ oid: string | null }>('SELECT to_regnamespace($1) AS oid', [schema])).rows[0]?.oid ?? null).toBeNull()
+
+      const unbound = mountedOmpExtension('postgresql-project-unbound', await loadProjectLocalOmpExtension(undefined))
+      active.add(unbound)
+      await unbound.handlers.get('session_start')!({ type: 'session_start' }, unbound.context)
+      expect(unbound.reports.join('\n')).toContain('bound host actor')
+      expect(memoryProxyNames(unbound)).toEqual([])
+      expect((await admin.query<{ oid: string | null }>('SELECT to_regnamespace($1) AS oid', [schema])).rows[0]?.oid ?? null).toBeNull()
+      await shutdownMountedExtension(unbound)
+      active.delete(unbound)
+
+      const projectExtension = await loadProjectLocalOmpExtension('test-actor')
+      const first = mountedOmpExtension('postgresql-project-first', projectExtension)
+      const second = mountedOmpExtension('postgresql-project-second', projectExtension)
+      active.add(first).add(second)
+      await Promise.all([
+        first.handlers.get('session_start')!({ type: 'session_start' }, first.context),
+        second.handlers.get('session_start')!({ type: 'session_start' }, second.context),
+      ])
+      expect((await admin.query<{ oid: string | null }>('SELECT to_regnamespace($1) AS oid', [schema])).rows[0]?.oid ?? null).not.toBeNull()
+      const expectedProxies = MEMORY_TOOL_NAMES.map(name => `doppelganger_${name.replaceAll('.', '_')}`).sort()
+      expect(memoryProxyNames(first)).toEqual(expectedProxies)
+      expect(memoryProxyNames(second)).toEqual(expectedProxies)
+
+      const lifecycle = await exerciseCompleteMemoryLifecycle(
+        (name, input) => invokeProjectedMemory(first, name, input),
+        (name, input) => invokeProjectedMemory(second, name, input),
+      )
+
+      await commitOmpTurn(
+        first,
+        '[fact:project.vertical.capture] Project-local OMP capture is shared through PostgreSQL.',
+        'Captured through the real project-local OMP extension.',
+      )
+      let captured: { readonly id: string; readonly revisionId: string } | undefined
+      await waitUntil(async () => {
+        const value = await invokeProjectedMemory(second, 'memory.candidates.list', {})
+        if (!Array.isArray(value)) return false
+        const candidate = value.find(item => item !== null && typeof item === 'object'
+          && 'subjectKey' in item && item.subjectKey === 'project.vertical.capture')
+        if (candidate === undefined) return false
+        captured = recordCoordinates(candidate)
+        return true
+      }, 'PostgreSQL project-local capture visibility')
+      if (captured === undefined) throw new Error('captured PostgreSQL candidate was not visible')
+      expect(await invokeProjectedMemory(second, 'memory.evidence.list', { id: captured.id })).toEqual([
+        expect.objectContaining({ sourceTurnId: expect.any(String), role: 'principal' }),
+      ])
+
+      await second.handlers.get('before_agent_start')!({
+        type: 'before_agent_start', prompt: 'What is the flibbertigibbet axiom 948 marker?', systemPrompt: [],
+      }, second.context)
+      const projectedContext = await second.handlers.get('context')!({ messages: [] }, second.context)
+      expect(projectedContext).toEqual(expect.objectContaining({
+        messages: [expect.objectContaining({
+          role: 'user',
+          synthetic: true,
+          content: expect.stringContaining(lifecycle.content),
+        })],
+      }))
+
+      await shutdownMountedExtension(first)
+      active.delete(first)
+      const restarted = mountedOmpExtension('postgresql-project-first-restarted', projectExtension)
+      active.add(restarted)
+      await restarted.handlers.get('session_start')!({ type: 'session_start' }, restarted.context)
+      expect(await invokeProjectedMemory(restarted, 'memory.inspect', { id: lifecycle.recordId })).toEqual(
+        expect.objectContaining({ id: lifecycle.recordId, revision: expect.objectContaining({ id: lifecycle.revisionId }) }),
+      )
+      expect(searchContents(await invokeProjectedMemory(restarted, 'memory.search', {
+        query: 'flibbertigibbet axiom 948',
+      }))).toContain(lifecycle.content)
+      expect(await invokeProjectedMemory(restarted, 'memory.forget', { id: lifecycle.recordId })).toEqual({ deleted: true })
+      expect(searchContents(await invokeProjectedMemory(second, 'memory.search', {
+        query: 'flibbertigibbet axiom 948',
+      }))).toEqual([])
+    } finally {
+      await Promise.all([...active].map(fixture => shutdownMountedExtension(fixture).catch(() => undefined)))
+      try {
+        await admin.query(`DROP SCHEMA IF EXISTS ${quotePostgresqlIdentifier(schema)} CASCADE`)
+      } finally {
+        await admin.end()
+        vi.unstubAllEnvs()
+      }
+    }
+  }, 30_000)
+
   it('runs the complete actor-partitioned memory lifecycle through OMP tool RPC', async () => {
     const first = await realSession('memory-first')
-    const explicit = recordCoordinates(await invoke(first.connection, 'memory.remember', {
-      kind: 'fact',
-      content: 'The lexical recall marker is flibbertigibbet-axiom-947.',
-    }))
-    expect(searchContents(await invoke(first.connection, 'memory.search', {
-      query: 'flibbertigibbet axiom 947',
-    }))).toContain('The lexical recall marker is flibbertigibbet-axiom-947.')
-
-    const approved = recordCoordinates(await invoke(first.connection, 'memory.candidates.propose', {
-      kind: 'preference', content: 'Prefer reviewed candidate memory.', global: true,
-    }))
-    const rejected = recordCoordinates(await invoke(first.connection, 'memory.candidates.propose', {
-      kind: 'fact', content: 'This candidate should be rejected.',
-    }))
-    const candidates = await invoke(first.connection, 'memory.candidates.list', {})
-    expect(Array.isArray(candidates) && candidates).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: approved.id, status: 'candidate' }),
-      expect.objectContaining({ id: rejected.id, status: 'candidate' }),
-    ]))
-    await invoke(first.connection, 'memory.candidates.approve', { id: approved.id })
-    await invoke(first.connection, 'memory.candidates.reject', { id: rejected.id })
-    expect(await invoke(first.connection, 'memory.candidates.list', {})).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: rejected.id }),
-    ]))
-
-    const promotable = recordCoordinates(await invoke(first.connection, 'memory.candidates.propose', {
-      kind: 'preference', content: 'Prefer evidence-backed changes.', global: true,
-    }))
-    await expect(invoke(first.connection, 'memory.candidates.corroborate', {
-      id: promotable.id, content: 'Repeated in the original session.',
-    })).resolves.toEqual(expect.objectContaining({ id: promotable.id, status: 'candidate' }))
     const second = await realSession('memory-second')
-    const promoted = await invoke(second.connection, 'memory.candidates.corroborate', {
-      id: promotable.id, content: 'The preference was independently repeated.',
-    })
-    expect(promoted).toEqual(expect.objectContaining({ id: promotable.id, status: 'active' }))
-
-    const corrected = await invoke(first.connection, 'memory.correct', {
-      id: explicit.id,
-      expectedRevisionId: explicit.revisionId,
-      content: 'The corrected lexical marker is flibbertigibbet-axiom-948.',
-    })
-    expect(corrected).toEqual(expect.objectContaining({ id: explicit.id }))
-    const pinned = await invoke(first.connection, 'memory.pin', { id: explicit.id })
-    expect(pinned).toEqual(expect.objectContaining({ pinned: true }))
-    const unpinned = await invoke(first.connection, 'memory.unpin', { id: explicit.id })
-    expect(unpinned).toEqual(expect.objectContaining({ pinned: false }))
-
-    await expect(invoke(first.connection, 'memory.remember', {
-      kind: 'fact', content: 'api_key = sk_live_1234567890abcdefgh',
-    })).rejects.toThrow('SECRET_REJECTED')
-    expect(searchContents(await invoke(first.connection, 'memory.search', {
-      query: 'flibbertigibbet axiom 948',
-    }))).toContain('The corrected lexical marker is flibbertigibbet-axiom-948.')
-    expect(await invoke(first.connection, 'memory.forget', { id: explicit.id })).toEqual({ deleted: true })
-    expect(searchContents(await invoke(first.connection, 'memory.search', {
+    const lifecycle = await exerciseCompleteMemoryLifecycle(
+      (name, input) => invoke(first.connection, name, input),
+      (name, input) => invoke(second.connection, name, input),
+    )
+    expect(await invoke(first.connection, 'memory.forget', { id: lifecycle.recordId })).toEqual({ deleted: true })
+    expect(searchContents(await invoke(second.connection, 'memory.search', {
       query: 'flibbertigibbet axiom 948',
     }))).toEqual([])
   })

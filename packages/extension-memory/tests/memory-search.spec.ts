@@ -5,14 +5,68 @@ import { Context, type Plugin } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
 import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
-import { InstanceSqliteService, type InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
-import { MemoryService, type MemorySemanticRetriever, type MemoryServiceConfig } from '../src/index.ts'
+import {
+  MemoryService,
+  SqliteMemoryPlugin,
+  type MemoryEmbedderIdentity,
+  type MemorySemanticRetriever,
+  type MemoryServiceConfig,
+  type MemoryVectorIndexIdentity,
+} from '../src/index.ts'
+import { memoryProjectionOwner } from '../src/projection-store.ts'
 
 const temporaryRoots: string[] = []
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
+
+const embedderIdentity: MemoryEmbedderIdentity = {
+  provider: 'test',
+  modelId: 'test-embedder',
+  revision: '1',
+  artifactDigest: `sha256:${'a'.repeat(64)}`,
+  pooling: 'mean',
+  projection: 'none',
+  dimensions: 3,
+  normalized: true,
+  distanceMetric: 'cosine',
+}
+const vectorIndexIdentity: MemoryVectorIndexIdentity = {
+  backend: 'sqlite_exact',
+  namespace: 'memory-search',
+  sanitizedTarget: 'test memory search index',
+  configFingerprint: 'b'.repeat(64),
+  dimensions: 3,
+  distanceMetric: 'cosine',
+}
+
+async function activateSemanticGeneration(context: Context, generationId = 'generation-one'): Promise<void> {
+  const timestamp = '2026-09-05T00:00:00.000Z'
+  const transitionUntil = '2026-09-05T00:05:00.000Z'
+  const owner = memoryProjectionOwner('aiden', generationId, embedderIdentity, vectorIndexIdentity)
+  const active = await context.doppelgangerMemory.projectionStore.activeGeneration('aiden')
+  if (active?.generationId === generationId) return
+  let transition = await context.doppelgangerMemory.projectionStore.prepareGeneration(
+    owner,
+    JSON.stringify(embedderIdentity),
+    JSON.stringify(vectorIndexIdentity),
+    timestamp,
+    transitionUntil,
+  )
+  if (transition === undefined) throw new Error('semantic generation transition was not acquired')
+  const page = await context.doppelgangerMemory.projectionStore.rebuildPage(owner, transition, undefined, 10_000, timestamp)
+  transition = await context.doppelgangerMemory.projectionStore.markRebuildPage(
+    owner,
+    transition,
+    page,
+    timestamp,
+    transitionUntil,
+  )
+  if (transition === undefined || !(await context.doppelgangerMemory.projectionStore.activateGeneration(owner, transition, timestamp))) {
+    throw new Error('semantic generation was not activated')
+  }
+}
 
 function semanticRetriever(search: MemorySemanticRetriever['search']): MemorySemanticRetriever {
   return {
@@ -50,19 +104,9 @@ async function session(
     }
     await context.plugin(provider)
   }
-  await context.plugin(InstanceSqliteService, { home: instanceHome })
+  await context.plugin(SqliteMemoryPlugin, { home: instanceHome })
   await context.plugin(MemoryService, memoryConfig)
-  if (semantic !== undefined) {
-    const database = (context.doppelgangerMemory as unknown as { database: InstanceSqliteDatabase }).database
-    const now = new Date().toISOString()
-    database.prepare(`
-      INSERT OR IGNORE INTO memory_semantic_generations
-      VALUES ('generation-one', 'aiden', '{}', '{}', 'active', ?, ?, ?, NULL)
-    `).run(now, now, now)
-    database.prepare(`
-      INSERT OR REPLACE INTO memory_semantic_active_generation VALUES ('aiden', 'generation-one', ?)
-    `).run(now)
-  }
+  if (semantic !== undefined) await activateSemanticGeneration(context)
   return context
 }
 
@@ -76,27 +120,27 @@ describe('memory retrieval', () => {
   it('uses lexical retrieval with strict scope, pinned relationship precedence, diversity, and whole budgets', async () => {
     const instanceHome = await root()
     const first = await session(instanceHome, 'session-a', 'project-a')
-    const relationship = first.doppelgangerMemory.remember({
+    const relationship = await first.doppelgangerMemory.remember({
       operationId: 'relationship',
       subjectKey: 'preference.response.evidence',
       kind: 'preference',
       content: 'Always state evidence.',
       scope: 'relationship',
     })
-    first.doppelgangerMemory.pin({ operationId: 'pin-relationship', id: relationship.id, pinned: true })
-    first.doppelgangerMemory.remember({
+    await first.doppelgangerMemory.pin({ operationId: 'pin-relationship', id: relationship.id, pinned: true })
+    await first.doppelgangerMemory.remember({
       operationId: 'alpha-decision',
       subjectKey: 'project.loader.engine',
       kind: 'decision',
       content: 'Project alpha uses Cordis Loader.',
     })
-    first.doppelgangerMemory.remember({
+    await first.doppelgangerMemory.remember({
       operationId: 'alpha-overlap',
       subjectKey: 'preference.response.evidence',
       kind: 'preference',
       content: 'Project alpha evidence uses citations.',
     })
-    first.doppelgangerMemory.remember({
+    await first.doppelgangerMemory.remember({
       operationId: 'alpha-other',
       subjectKey: 'project.database.engine',
       kind: 'fact',
@@ -105,7 +149,7 @@ describe('memory retrieval', () => {
     await first.fiber.dispose()
 
     const other = await session(instanceHome, 'session-b', 'project-b')
-    other.doppelgangerMemory.remember({
+    await other.doppelgangerMemory.remember({
       operationId: 'beta-decision',
       subjectKey: 'project.loader.engine',
       kind: 'decision',
@@ -131,21 +175,21 @@ describe('memory retrieval', () => {
   it('uses deterministic reciprocal rank fusion and keeps lexical-only operation without a provider', async () => {
     const instanceHome = await root()
     const seed = await session(instanceHome, 'seed', 'project-a')
-    const lexical = seed.doppelgangerMemory.remember({
+    const lexical = await seed.doppelgangerMemory.remember({
       operationId: 'lexical',
       subjectKey: 'runtime.storage.engine',
       kind: 'fact',
       content: 'SQLite stores canonical memory.',
       salience: 0.2,
     })
-    const semantic = seed.doppelgangerMemory.remember({
+    const semantic = await seed.doppelgangerMemory.remember({
       operationId: 'semantic',
       subjectKey: 'runtime.transaction.policy',
       kind: 'procedure',
       content: 'Persist writes in short transactions.',
       salience: 0.8,
     })
-    const overlap = seed.doppelgangerMemory.remember({
+    const overlap = await seed.doppelgangerMemory.remember({
       operationId: 'overlap',
       subjectKey: 'runtime.sqlite.policy',
       kind: 'procedure',
@@ -183,19 +227,19 @@ describe('memory retrieval', () => {
   it('revalidates record and revision identity after asynchronous semantic ranking', async () => {
     const instanceHome = await root()
     const seed = await session(instanceHome, 'seed', 'project-a')
-    const corrected = seed.doppelgangerMemory.remember({
+    const corrected = await seed.doppelgangerMemory.remember({
       operationId: 'corrected-seed',
       subjectKey: 'stale.corrected',
       kind: 'fact',
       content: 'Stale corrected value.',
     })
-    const deleted = seed.doppelgangerMemory.remember({
+    const deleted = await seed.doppelgangerMemory.remember({
       operationId: 'deleted-seed',
       subjectKey: 'stale.deleted',
       kind: 'fact',
       content: 'Stale deleted value.',
     })
-    const stable = seed.doppelgangerMemory.remember({
+    const stable = await seed.doppelgangerMemory.remember({
       operationId: 'stable-seed',
       subjectKey: 'stale.stable',
       kind: 'fact',
@@ -222,13 +266,13 @@ describe('memory retrieval', () => {
     await started
 
     const writer = await session(instanceHome, 'writer', 'project-a')
-    writer.doppelgangerMemory.correct({
+    await writer.doppelgangerMemory.correct({
       operationId: 'correct-during-rank',
       id: corrected.id,
       expectedRevisionId: corrected.revision.id,
       content: 'Fresh corrected value.',
     })
-    writer.doppelgangerMemory.forget({ operationId: 'delete-during-rank', id: deleted.id })
+    await writer.doppelgangerMemory.forget({ operationId: 'delete-during-rank', id: deleted.id })
     await writer.fiber.dispose()
     releaseRanking()
 
@@ -239,13 +283,13 @@ describe('memory retrieval', () => {
   it('projects only the semantic branch while lexical search keeps complete technical identifiers', async () => {
     const instanceHome = await root()
     const seed = await session(instanceHome, 'projection-seed', 'project-a')
-    const lexical = seed.doppelgangerMemory.remember({
+    const lexical = await seed.doppelgangerMemory.remember({
       operationId: 'projection-lexical',
       subjectKey: 'runtime.symbol',
       kind: 'fact',
       content: 'The exact symbol is RPC_FRAME_V7.',
     })
-    const semantic = seed.doppelgangerMemory.remember({
+    const semantic = await seed.doppelgangerMemory.remember({
       operationId: 'projection-semantic',
       subjectKey: 'runtime.transport.intent',
       kind: 'fact',
@@ -274,7 +318,7 @@ describe('memory retrieval', () => {
   it('drops out-of-scope and malformed semantic hits without failing lexical recall', async () => {
     const instanceHome = await root()
     const alpha = await session(instanceHome, 'scope-alpha', 'project-a')
-    const lexical = alpha.doppelgangerMemory.remember({
+    const lexical = await alpha.doppelgangerMemory.remember({
       operationId: 'scope-lexical',
       subjectKey: 'project.alpha.transport',
       kind: 'fact',
@@ -282,7 +326,7 @@ describe('memory retrieval', () => {
     })
     await alpha.fiber.dispose()
     const beta = await session(instanceHome, 'scope-beta', 'project-b')
-    const foreign = beta.doppelgangerMemory.remember({
+    const foreign = await beta.doppelgangerMemory.remember({
       operationId: 'scope-foreign',
       subjectKey: 'project.beta.transport',
       kind: 'fact',
@@ -318,7 +362,7 @@ describe('memory retrieval', () => {
   it('contains semantic timeout and provider exceptions', async () => {
     const instanceHome = await root()
     const seed = await session(instanceHome, 'failure-seed', 'project-a')
-    const lexical = seed.doppelgangerMemory.remember({
+    const lexical = await seed.doppelgangerMemory.remember({
       operationId: 'failure-lexical',
       subjectKey: 'runtime.failure.fallback',
       kind: 'fact',

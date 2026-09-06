@@ -1,15 +1,9 @@
 export { default } from './plugin.ts'
 export { MemoryPlugin, MemoryPluginConfigSchema, type MemoryPluginConfig } from './plugin.ts'
 export { MemoryProtocolPlugin } from './protocol.ts'
+export { MEMORY_SCHEMA_VERSION } from './persistence/migrations.ts'
+export { MemoryError, MemoryService, type MemoryServiceConfig } from './service.ts'
 export {
-  MEMORY_SCHEMA_VERSION,
-  hardDeleteMemoryRecord,
-  migrateMemorySchema,
-  type MemoryMigrationOptions,
-} from './schema.ts'
-export {
-  MemoryError,
-  MemoryService,
   type CandidateDecisionRequest,
   type CandidateEvidenceRequest,
   type CorrectMemoryRequest,
@@ -25,14 +19,14 @@ export {
   type MemoryScope,
   type MemorySearchRequest,
   type MemorySearchResult,
-  type MemoryServiceConfig,
   type MemoryStatus,
   type MemoryTemporalInput,
   type ObserveMemoryRequest,
   type PinMemoryRequest,
   type RememberMemoryRequest,
   type ResolveMemoryConflictRequest,
-} from './service.ts'
+  type MemoryApi,
+} from './repository.ts'
 
 export {
   MEMORY_EMBEDDER_SERVICE,
@@ -82,6 +76,13 @@ export {
 } from './semantic.ts'
 export {
   MemoryProjectionStore,
+  memoryProjectionOwner,
+  type MemoryProjectionOwner,
+  type MemoryProjectionRoute,
+  type MemoryProjectionGenerationTransition,
+  type MemoryProjectionGenerationRecord,
+  type MemoryProjectionActiveGeneration,
+  type MemoryProjectionRetainedGeneration,
   type MemoryProjectionLease,
   type MemoryProjectionRebuildSource,
   type MemoryProjectionSource,
@@ -104,3 +105,6 @@ export {
   type MemoryCapturePluginConfig,
   type MemoryCapturePolicy,
 } from './capture.ts'
+export { SqliteMemoryPlugin, SqliteMemoryPluginConfigSchema, type SqliteMemoryPluginConfig } from './sqlite.ts'
+export { PostgresqlMemoryPlugin, PostgresqlMemoryPluginConfigSchema, type PostgresqlMemoryPluginConfig } from './postgresql.ts'
+export type { MemoryRepository, MemoryUnitOfWork } from './repository.ts'

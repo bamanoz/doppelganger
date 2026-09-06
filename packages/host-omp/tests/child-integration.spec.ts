@@ -13,6 +13,7 @@ import {
   serializeLifecycleValue,
 } from '@doppelganger/doppelganger-protocols'
 import { RuntimePresetRoster } from '@doppelganger/doppelganger-runtime-presets'
+import { Pool } from 'pg'
 import { OMP_RPC_PROTOCOL_VERSION, OMP_RUNTIME_HOST_CAPABILITIES } from '../src/contracts.ts'
 import {
   OmpAdapterSession,
@@ -408,6 +409,147 @@ async function writeProtocolPreset(root: string): Promise<void> {
   ])
 }
 
+const POSTGRESQL_DSN_ENV = 'DOPPELGANGER_TEST_POSTGRESQL_DSN'
+
+function requiredPostgresqlDsn(): string {
+  const dsn = process.env[POSTGRESQL_DSN_ENV]
+  if (typeof dsn !== 'string' || dsn.trim().length === 0) {
+    throw new Error(`${POSTGRESQL_DSN_ENV} is required for the PostgreSQL OMP vertical`)
+  }
+  return dsn
+}
+
+function postgresqlSchema(label: string): string {
+  return `doppelganger_omp_${label}_${process.pid}_${Date.now()}_${++rpcOrdinal}`
+}
+
+function quotePostgresqlIdentifier(value: string): string {
+  if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(value)) throw new TypeError('invalid PostgreSQL test schema')
+  return `"${value}"`
+}
+
+async function writePostgresqlMemoryPreset(root: string, schema: string): Promise<void> {
+  await writeFile(join(root, 'runtime.cordis.yml'), [
+    '- id: context',
+    '  name: "@doppelganger/doppelganger-protocols/context"',
+    '  isolate:',
+    '    doppelgangerContext: session',
+    '- id: tools',
+    '  name: "@doppelganger/doppelganger-protocols/tools"',
+    '  isolate:',
+    '    doppelgangerTools: session',
+    '- id: persona',
+    '  name: "@doppelganger/doppelganger-persona"',
+    '  inject: [doppelgangerRuntimeSession, doppelgangerContext]',
+    '  isolate:',
+    '    doppelgangerRuntimeSession: session',
+    '    doppelgangerContext: session',
+    '    doppelgangerPersona: session',
+    '  config:',
+    '    instanceId: postgresql-memory-vertical',
+    '- id: memory-postgresql',
+    '  name: "@doppelganger/doppelganger-memory/postgresql"',
+    '  inject: [doppelgangerActor]',
+    '  isolate:',
+    '    doppelgangerActor: session',
+    '    doppelgangerMemoryRepository: session',
+    '  config:',
+    `    connectionStringEnv: ${POSTGRESQL_DSN_ENV}`,
+    `    schema: ${schema}`,
+    '    poolSize: 2',
+    '    connectionTimeoutMs: 5000',
+    '    statementTimeoutMs: 5000',
+    '    lockTimeoutMs: 5000',
+    '- id: memory',
+    '  name: "@doppelganger/doppelganger-memory"',
+    '  inject: [doppelgangerActor, doppelgangerPersona, doppelgangerContext, doppelgangerTools, doppelgangerMemoryRepository]',
+    '  isolate:',
+    '    doppelgangerActor: session',
+    '    doppelgangerPersona: session',
+    '    doppelgangerContext: session',
+    '    doppelgangerTools: session',
+    '    doppelgangerMemoryRepository: session',
+    '    doppelgangerMemory: session',
+    '- id: memory-capture',
+    '  name: "@doppelganger/doppelganger-memory/capture"',
+    '  inject: [doppelgangerActor, doppelgangerPersona, doppelgangerMemory]',
+    '  isolate:',
+    '    doppelgangerActor: session',
+    '    doppelgangerPersona: session',
+    '    doppelgangerMemory: session',
+    '  config:',
+    '    enabled: true',
+    '',
+  ].join('\n'))
+}
+
+async function memoryToolValue(
+  peer: RpcRequester,
+  name: string,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const result = await invokeTool(peer, name, input)
+  if (result === null || typeof result !== 'object' || !('ok' in result) || result.ok !== true || !('value' in result)) {
+    throw new Error(`${name} failed: ${JSON.stringify(result)}`)
+  }
+  return result.value
+}
+
+function memorySearchContents(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new TypeError('memory search returned an invalid result')
+  return value.flatMap(item => {
+    if (item === null || typeof item !== 'object' || !('record' in item)
+      || item.record === null || typeof item.record !== 'object' || !('revision' in item.record)
+      || item.record.revision === null || typeof item.record.revision !== 'object'
+      || !('content' in item.record.revision) || typeof item.record.revision.content !== 'string') return []
+    return [item.record.revision.content]
+  })
+}
+
+function memoryRecordCoordinates(value: unknown): { id: string; revisionId: string } {
+  if (value === null || typeof value !== 'object' || !('id' in value) || typeof value.id !== 'string'
+    || !('revision' in value) || value.revision === null || typeof value.revision !== 'object'
+    || !('id' in value.revision) || typeof value.revision.id !== 'string') {
+    throw new TypeError('memory mutation returned an invalid record')
+  }
+  return { id: value.id, revisionId: value.revision.id }
+}
+
+function namedTool(value: unknown): value is { readonly name: string } {
+  return value !== null && typeof value === 'object' && 'name' in value && typeof value.name === 'string'
+}
+
+function activationToolNames(value: unknown): string[] {
+  if (value === null || typeof value !== 'object' || !('catalog' in value)
+    || value.catalog === null || typeof value.catalog !== 'object' || !('tools' in value.catalog)
+    || !Array.isArray(value.catalog.tools) || !value.catalog.tools.every(namedTool)) {
+    throw new TypeError('memory activation returned an invalid tool catalog')
+  }
+  return value.catalog.tools.map(tool => tool.name)
+}
+
+function resolvedContextData(value: unknown): string {
+  if (value === null || typeof value !== 'object' || !('data' in value) || typeof value.data !== 'string') {
+    throw new TypeError('memory context resolution returned an invalid result')
+  }
+  return value.data
+}
+
+async function waitForMemoryValue(
+  peer: RpcRequester,
+  name: string,
+  input: Record<string, unknown>,
+  predicate: (value: unknown) => boolean,
+): Promise<unknown> {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    const value = await memoryToolValue(peer, name, input)
+    if (predicate(value)) return value
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  throw new Error(`${name} visibility timed out`)
+}
+
 async function writeOmpEventPreset(root: string): Promise<void> {
   const protocolPackage = JSON.stringify(new URL('../../extension-protocols/src/index.ts', import.meta.url).href)
   await Promise.all([
@@ -735,6 +877,129 @@ describe('Node OMP runtime child', () => {
       await dispose(harness)
     }
   })
+
+  it('shares committed PostgreSQL memory across direct FramedJsonRpc child sessions', async () => {
+    const dsn = requiredPostgresqlDsn()
+    const sharedRoot = await mkdtemp(join(tmpdir(), 'doppelganger-postgresql-memory-child-'))
+    const missingRoot = await mkdtemp(join(tmpdir(), 'doppelganger-postgresql-memory-unbound-'))
+    temporaryRoots.push(sharedRoot, missingRoot)
+    const sharedSchema = postgresqlSchema('shared')
+    const missingActorSchema = postgresqlSchema('missing_actor')
+    const admin = new Pool({
+      connectionString: dsn,
+      max: 1,
+      connectionTimeoutMillis: 5000,
+      query_timeout: 5000,
+      statement_timeout: 5000,
+      lock_timeout: 5000,
+    })
+    const harnesses: ChildHarness[] = []
+    try {
+      await Promise.all([
+        writePostgresqlMemoryPreset(sharedRoot, sharedSchema),
+        writePostgresqlMemoryPreset(missingRoot, missingActorSchema),
+      ])
+
+      expect((await admin.query<{ oid: string | null }>('SELECT to_regnamespace($1) AS oid', [missingActorSchema])).rows[0]?.oid ?? null).toBeNull()
+      expect((await admin.query<{ oid: string | null }>('SELECT to_regnamespace($1) AS oid', [sharedSchema])).rows[0]?.oid ?? null).toBeNull()
+      const unbound = await childHarness()
+      harnesses.push(unbound)
+      await expect(unbound.peer.request('session.activate', activation(missingRoot, [], undefined, 'postgresql-unbound')))
+        .rejects.toThrow('bound host actor')
+      expect((await admin.query<{ oid: string | null }>('SELECT to_regnamespace($1) AS oid', [missingActorSchema])).rows[0]?.oid ?? null).toBeNull()
+      await dispose(unbound)
+
+      const first = await childHarness()
+      const second = await childHarness()
+      harnesses.push(first, second)
+      const activations = await Promise.all([
+        first.peer.request('session.activate', activation(sharedRoot, [], 'postgresql-actor', 'postgresql-first')),
+        second.peer.request('session.activate', activation(sharedRoot, [], 'postgresql-actor', 'postgresql-second')),
+      ])
+      expect((await admin.query<{ oid: string | null }>('SELECT to_regnamespace($1) AS oid', [sharedSchema])).rows[0]?.oid ?? null).not.toBeNull()
+      for (const activated of activations) {
+        expect(activationToolNames(activated)).toEqual(expect.arrayContaining([
+          'memory.remember',
+          'memory.search',
+          'memory.inspect',
+          'memory.candidates.list',
+          'memory.forget',
+        ]))
+      }
+
+      const remembered = memoryRecordCoordinates(await memoryToolValue(first.peer, 'memory.remember', {
+        operationId: 'postgresql-vertical-remember',
+        subjectKey: 'project.storage.canonical',
+        kind: 'fact',
+        content: 'Shared PostgreSQL canonical storage is visible after commit.',
+      }))
+      expect(memorySearchContents(await memoryToolValue(second.peer, 'memory.search', {
+        query: 'shared PostgreSQL canonical storage',
+      }))).toContain('Shared PostgreSQL canonical storage is visible after commit.')
+
+      const contextData = resolvedContextData(await resolveContext(second.peer, 'Which canonical storage is visible after commit?'))
+      expect(contextData).toContain('Shared PostgreSQL canonical storage is visible after commit.')
+
+      await second.peer.request('event.publish', {
+        protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
+        type: 'turn-committed',
+        deliveryId: 'postgresql-capture-delivery',
+        sessionId: 'postgresql-second',
+        turnId: 'postgresql-capture-turn',
+        timestamp: 1,
+        principalInput: serializeLifecycleValue('[fact:project.storage.capture] PostgreSQL capture is shared after commit.'),
+        assistantOutput: serializeLifecycleValue('Captured through the real OMP child transport.'),
+        outcome: 'completed',
+      })
+      const candidates = await waitForMemoryValue(
+        first.peer,
+        'memory.candidates.list',
+        {},
+        value => Array.isArray(value) && value.some(item => item !== null && typeof item === 'object'
+          && 'subjectKey' in item && item.subjectKey === 'project.storage.capture'),
+      )
+      expect(candidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ subjectKey: 'project.storage.capture', status: 'candidate' }),
+      ]))
+
+      await dispose(first)
+      const restarted = await childHarness()
+      harnesses.push(restarted)
+      await restarted.peer.request('session.activate', activation(sharedRoot, [], 'postgresql-actor', 'postgresql-first'))
+      expect(memorySearchContents(await memoryToolValue(restarted.peer, 'memory.search', {
+        query: 'shared PostgreSQL canonical storage',
+      }))).toContain('Shared PostgreSQL canonical storage is visible after commit.')
+      expect(await memoryToolValue(restarted.peer, 'memory.candidates.list', {})).toEqual(expect.arrayContaining([
+        expect.objectContaining({ subjectKey: 'project.storage.capture', status: 'candidate' }),
+      ]))
+      expect(await memoryToolValue(restarted.peer, 'memory.inspect', { id: remembered.id })).toEqual(
+        expect.objectContaining({ id: remembered.id, revision: expect.objectContaining({ id: remembered.revisionId }) }),
+      )
+      expect(await memoryToolValue(restarted.peer, 'memory.forget', {
+        operationId: 'postgresql-vertical-forget',
+        id: remembered.id,
+      })).toEqual({ deleted: true })
+      expect(memorySearchContents(await memoryToolValue(second.peer, 'memory.search', {
+        query: 'shared PostgreSQL canonical storage',
+      }))).toEqual([])
+
+      await Promise.all([dispose(second), dispose(restarted)])
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.stack ?? cause.message : String(cause)
+      const stderr = harnesses.map(harness => Buffer.concat(harness.stderr).toString('utf8')).filter(Boolean).join('\n')
+      throw new Error(`${message}${stderr.length === 0 ? '' : `\n${stderr}`}`)
+    } finally {
+      await Promise.all(harnesses.map(harness => dispose(harness).catch(() => undefined)))
+      try {
+        await Promise.all([
+          admin.query(`DROP SCHEMA IF EXISTS ${quotePostgresqlIdentifier(sharedSchema)} CASCADE`),
+          admin.query(`DROP SCHEMA IF EXISTS ${quotePostgresqlIdentifier(missingActorSchema)} CASCADE`),
+        ])
+      } finally {
+        await admin.end()
+      }
+    }
+  }, 30_000)
 
   it('routes validated OMP todo reminders through the child runtime plugin', async () => {
     const root = await mkdtemp(join(tmpdir(), 'doppelganger-omp-events-child-'))

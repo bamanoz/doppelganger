@@ -1,7 +1,7 @@
 import type { Context, Logger, Plugin } from '@deepseek-ai/cordis'
 import { containsCredentialMaterial, type TurnCommittedEvent } from '@doppelganger/doppelganger-protocols'
 import { stripRecursiveMemoryContent } from './content-policy.ts'
-import type { MemoryKind, MemoryRole, RememberMemoryRequest } from './service.ts'
+import type { MemoryKind, MemoryRole, RememberMemoryRequest } from './repository.ts'
 import type { MemorySemanticNeighborRequest, MemorySemanticNeighborSuggestion, MemorySemanticNeighborRelation } from './semantic.ts'
 
 export interface MemoryCaptureMaterial {
@@ -153,11 +153,11 @@ function validatedCandidate(candidate: unknown): ExtractedMemoryCandidate | unde
   })
 }
 
-function canonicalNeighbor(
+async function canonicalNeighbor(
   ctx: Context,
   candidate: ExtractedMemoryCandidate,
   suggestion: unknown,
-): MemoryCaptureNeighborSuggestion | undefined {
+): Promise<MemoryCaptureNeighborSuggestion | undefined> {
   if (suggestion === null || typeof suggestion !== 'object') return
   const value = suggestion as Record<string, unknown>
   const recordId = text(value.recordId)
@@ -169,7 +169,7 @@ function canonicalNeighbor(
     || !['equivalent', 'paraphrase', 'possible-contradiction'].includes(relation ?? '')
     || typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1) return
   try {
-    const record = ctx.doppelgangerMemory.inspect(recordId)
+    const record = await ctx.doppelgangerMemory.inspect(recordId)
     const expectedScope = candidate.scope ?? 'relationship'
     if (record.revision.id !== revisionId || record.kind !== candidate.kind || record.subjectKey !== subjectKey
       || record.status === 'rejected' || record.temporalState !== 'eligible'
@@ -204,7 +204,7 @@ async function applyNeighbors(
     })
     const suggestions = await semantic.neighbors(request)
     for (const suggestion of suggestions.slice(0, 4)) {
-      const validated = canonicalNeighbor(ctx, candidate, suggestion)
+      const validated = await canonicalNeighbor(ctx, candidate, suggestion)
       if (validated === undefined) continue
       try { policy.onSuggestion?.(validated) } catch { /* observer failures are contained */ }
     }
@@ -252,7 +252,7 @@ function applyMemoryCapture(ctx: Context, config: MemoryCapturePluginConfig): vo
             ...(candidate.salience === undefined ? {} : { salience: candidate.salience }),
             evidence: { turnId: event.turnId, role: candidate.evidenceRole ?? 'principal', relation: 'support', excerpt: candidate.content },
           }
-          ctx.doppelgangerMemory.propose(request)
+          await ctx.doppelgangerMemory.propose(request)
           proposed += 1
         } catch {
           diagnostic(policy, logger, 'write')

@@ -21,6 +21,7 @@ Doppelganger does not implement an agent loop or expose a general model API. Per
 - **Runtime Preset roster** — the control-plane service that owns roots, deterministic discovery, health, display metadata, selection, copy-only authoring, and deployment default policy outside activated Runtime Sessions.
 - **Runtime Host API** — the actor-neutral protected per-session bridge, immutable semantic capability profile, and correlated context/tool/lifecycle operations shared by every supported host adapter.
 - **Structured Inference** — an optional session-scoped service for one bounded system instruction, untrusted input string, portable JSON output schema, optional token cap and cancellation signal, returning only validated JSON plus bounded usage.
+- **Canonical memory repository** — a session-isolated actor-bound provider for authoritative records, revisions, eligibility, lexical retrieval, receipts, projection work, and schema lifecycle. SQLite and PostgreSQL implement the same memory-owned contract; semantic vector indexes remain derived.
 
 Identity content alone does not establish technical continuity. Stable Persona identity and state lineage belong to the extension that implements them; persistent actor-aware state additionally requires a bound host actor.
 
@@ -33,6 +34,8 @@ The workspace is layered around a small generic kernel:
 - `extension-protocols` owns context, revisioned tools, approval/cancellation, lifecycle, independent Actor Identity, provider-neutral structured inference, the closed Runtime Host API, and its transport-independent adapter conformance suite;
 - `composition-runtime` owns generic Loader activation, protected runtime-owned plugin layering, public host-neutral definition canonicalization, patches, sessions, the default-silent session logging router, reload, and disposal; serialized OMP activation decoding belongs to `host-omp/src/contracts.ts`, not the generic kernel;
 - `extension-inference-pi` is an optional leaf adapter from the structured-inference protocol to an explicitly configured Pi SDK provider/model snapshot; it depends only on `extension-protocols` and does not expose the host agent loop;
+- `extension-memory` owns the backend-neutral canonical repository contract, actor/scope policy, asynchronous memory service, canonical schema lifecycle, lexical retrieval, and shared semantic-projection state; its SQLite and PostgreSQL Loader subpaths provide `doppelgangerMemoryRepository` without exposing SQL outward;
+- `extension-memory-vectors` implements derived SQLite exact, Chroma, Qdrant, and pgvector indexes plus the coordinator. Canonical PostgreSQL and optional pgvector are independent roles even when deployed on the same server;
 - Persona, scoped Persona Authoring, memory, local embedding, vector backends, Dynamic Runtime Plugins, Evolution, structured-inference providers, CodeGraph, MCP import, and the independent file/Sentry logging exporters are optional extension layers;
 - Dynamic Runtime Plugins add an opt-in session-owned generated Cordis plugin workflow; generated code is trusted process code and never a kernel or host responsibility;
 - Evolution adds an opt-in actor-partitioned proposal ledger, lifecycle-driven bounded signal discovery, policy context, portable controls, and relevant cooled-down reminders without executor authority;
@@ -43,7 +46,7 @@ The workspace is layered around a small generic kernel:
 
 The authoritative allowed internal dependency edges live in `scripts/package-boundaries.json`. `scripts/check-package-boundaries.mjs` validates the manifest schema, requires every workspace package to be registered, and uses the repository's TypeScript AST traversal to inspect imports, side-effect and type-only imports, re-exports, and literal dynamic imports. Named package subpaths resolve to their owning workspace package; cross-package relative imports are rejected while legal intra-package relative imports remain valid. Comments and ordinary strings do not create edges, and computed dynamic imports remain outside this static policy. Architecture prose explains the intended layering without maintaining a second executable edge table.
 
-Embedding and vector implementations depend inward on memory-owned semantic contracts. Canonical memory and the generic runtime never import concrete embedder or vector implementations.
+Canonical providers and embedding/vector implementations depend inward on memory-owned contracts. The memory service, semantic coordinator, generic runtime, tools, and hosts receive no SQL handle or provider client. Canonical correctness and concurrency live in database transactions and durable instance-generation then actor-partition locking, not a retained process identity map.
 
 ## Kernel responsibilities
 

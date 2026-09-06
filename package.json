@@ -18,7 +18,11 @@
     "check:focused-specs:change": "node scripts/check-focused-specs.mjs --change",
     "test:focused-specs": "node scripts/run-focused-specs.mjs",
     "check:security": "node scripts/check-security.mjs",
-    "check": "npm run typecheck && npm run test && npm run check:cordis && npm run check:boundaries && npm run check:integrity"
+    "memory:transfer": "node packages/extension-memory/src/operator-transfer.ts",
+    "test:memory-backends:required": "vitest run --root packages/extension-memory tests/memory-backends.spec.ts tests/memory-provider-composition.spec.ts tests/memory-backend-conformance.spec.ts tests/memory-sqlite-contract.spec.ts tests/memory-postgresql-contract.spec.ts tests/memory-orm-transactions.spec.ts",
+    "test:memory-backends": "node scripts/with-memory-postgresql.mjs -- npm run test:memory-backends:required",
+    "check:required": "npm run typecheck && npm run test && npm run check:cordis && npm run check:boundaries && npm run check:integrity",
+    "check": "node scripts/with-memory-postgresql.mjs -- npm run check:required"
   },
   "engines": {
     "node": ">=26.0.0"
@@ -37,6 +41,7 @@
     "@deepseek-ai/dsh-skill-filesystem": "0.1.0-rc.8",
     "@types/node": "26.4.0",
     "node-addon-require-builtin": "^0.1.4",
+    "pg": "8.23.0",
     "typescript": "6.0.3",
     "vitest": "4.1.11"
   }

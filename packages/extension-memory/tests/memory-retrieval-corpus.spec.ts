@@ -5,14 +5,17 @@ import { join } from 'node:path'
 import { Context, type Plugin } from '@deepseek-ai/cordis'
 import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
 import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
-import { InstanceSqliteService, type InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   MemoryService,
+  SqliteMemoryPlugin,
+  type MemoryEmbedderIdentity,
   type MemoryKind,
   type MemorySemanticRetriever,
   type MemoryServiceConfig,
+  type MemoryVectorIndexIdentity,
 } from '../src/index.ts'
+import { memoryProjectionOwner } from '../src/projection-store.ts'
 
 type CorpusStatus = 'active' | 'candidate'
 type CorpusScope = 'relationship' | 'project'
@@ -132,7 +135,7 @@ async function session(
     }
     await context.plugin(provider)
   }
-  await context.plugin(InstanceSqliteService, { home: instanceHome })
+  await context.plugin(SqliteMemoryPlugin, { home: instanceHome })
   await context.plugin(MemoryService, config)
   return context
 }
@@ -161,8 +164,8 @@ async function seedCorpus(instanceHome: string, corpus: RetrievalCorpus): Promis
         ...(item.expiresAt === undefined ? {} : { expiresAt: item.expiresAt }),
       }
       const initial = item.status === 'active'
-        ? context.doppelgangerMemory.remember(request)
-        : context.doppelgangerMemory.propose(request)
+        ? await context.doppelgangerMemory.remember(request)
+        : await context.doppelgangerMemory.propose(request)
       ids.set(item.key, initial.id)
       indexed.push({
         key: item.key,
@@ -171,7 +174,7 @@ async function seedCorpus(instanceHome: string, corpus: RetrievalCorpus): Promis
         vector: vector(item.vector, corpus.dimensions),
       })
       if (item.correction !== undefined) {
-        const corrected = context.doppelgangerMemory.correct({
+        const corrected = await context.doppelgangerMemory.correct({
           operationId: item.correction.operationId,
           id: initial.id,
           expectedRevisionId: initial.revision.id,
@@ -219,15 +222,43 @@ function semanticRetriever(corpus: RetrievalCorpus, indexed: readonly IndexedRev
   }
 }
 
-function activateGeneration(context: Context, corpus: RetrievalCorpus): void {
-  const database = (context.doppelgangerMemory as unknown as { database: InstanceSqliteDatabase }).database
-  database.prepare(`
-    INSERT OR IGNORE INTO memory_semantic_generations
-    VALUES (?, 'aiden', '{}', '{}', 'active', ?, ?, ?, NULL)
-  `).run(corpus.generationId, corpus.clock, corpus.clock, corpus.clock)
-  database.prepare(`
-    INSERT OR REPLACE INTO memory_semantic_active_generation VALUES ('aiden', ?, ?)
-  `).run(corpus.generationId, corpus.clock)
+async function activateGeneration(context: Context, corpus: RetrievalCorpus): Promise<void> {
+  const embedderIdentity: MemoryEmbedderIdentity = {
+    provider: 'test', modelId: 'corpus-embedder', revision: '1',
+    artifactDigest: `sha256:${'a'.repeat(64)}`,
+    pooling: 'mean', projection: 'none', dimensions: corpus.dimensions, normalized: true, distanceMetric: 'cosine',
+  }
+  const vectorIndexIdentity: MemoryVectorIndexIdentity = {
+    backend: 'sqlite_exact', namespace: corpus.corpusId, sanitizedTarget: 'retrieval corpus test index',
+    configFingerprint: 'b'.repeat(64), dimensions: corpus.dimensions, distanceMetric: 'cosine',
+  }
+  const owner = memoryProjectionOwner('aiden', corpus.generationId, embedderIdentity, vectorIndexIdentity)
+  const transitionUntil = new Date(new Date(corpus.clock).getTime() + 300_000).toISOString()
+  let transition = await context.doppelgangerMemory.projectionStore.prepareGeneration(
+    owner,
+    JSON.stringify(embedderIdentity),
+    JSON.stringify(vectorIndexIdentity),
+    corpus.clock,
+    transitionUntil,
+  )
+  if (transition === undefined) throw new Error('semantic generation transition was not acquired')
+  let lastId: string | undefined
+  while (true) {
+    const page = await context.doppelgangerMemory.projectionStore.rebuildPage(owner, transition, lastId, 100, corpus.clock)
+    if (page.length === 0) break
+    transition = await context.doppelgangerMemory.projectionStore.markRebuildPage(
+      owner,
+      transition,
+      page,
+      corpus.clock,
+      transitionUntil,
+    )
+    if (transition === undefined) throw new Error('semantic generation transition expired during rebuild')
+    lastId = page.at(-1)!.id
+  }
+  if (!(await context.doppelgangerMemory.projectionStore.activateGeneration(owner, transition, corpus.clock))) {
+    throw new Error('semantic generation was not activated')
+  }
 }
 
 describe('deterministic bilingual retrieval corpus', () => {
@@ -280,7 +311,7 @@ describe('deterministic bilingual retrieval corpus', () => {
       config,
       semanticRetriever(corpus, seeded.indexed),
     )
-    activateGeneration(hybrid, corpus)
+    await activateGeneration(hybrid, corpus)
     for (const query of corpus.queries) {
       const result = await hybrid.doppelgangerMemory.search({ query: query.query, tokenBudget: 2_000 })
       expect(result[0]?.record.id, query.key).toBe(seeded.ids.get(query.hybridExpectedKey))

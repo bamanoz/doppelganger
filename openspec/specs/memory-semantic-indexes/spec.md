@@ -82,13 +82,14 @@ The semantic subsystem SHALL provide conforming adapters named `sqlite_exact`, `
 - **THEN** the adapter uses an isolated PostgreSQL vector table and exact cosine search unless an explicit supported ANN index has been built
 
 ### Requirement: Vector projections are non-authoritative and data-minimized
-A vector backend SHALL store only rebuildable projection data and SHALL NOT become authoritative for content, revision state, evidence, conflicts, receipts, temporal state, or deletion state. Projection names and diagnostics SHALL exclude credentials and SHALL use opaque isolated generation identities.
+A vector backend SHALL store only rebuildable projection data and SHALL NOT become authoritative for content, revision state, evidence, conflicts, receipts, temporal state, or deletion state. The selected canonical memory repository provider SHALL determine every observable result after current-state revalidation. Projection names and diagnostics SHALL exclude credentials and SHALL use opaque isolated generation identities.
 
 #### Scenario: External index contains a stale document
 - **ID**: `memory.semantic.projection.stale-content-revalidation`
 - **EVIDENCE**: `packages/extension-memory/tests/memory-search.spec.ts::revalidates record and revision identity after asynchronous semantic ranking`
+- **EVIDENCE**: `packages/extension-memory/tests/memory-backend-conformance.spec.ts::revalidates stale semantic content against both canonical providers`
 - **WHEN** an external backend returns projected content for a non-current or missing revision
-- **THEN** the content is ignored and canonical SQLite determines the observable result
+- **THEN** the content is ignored and the selected canonical memory repository determines the observable result
 
 #### Scenario: Backend target contains credentials
 - **ID**: `memory.semantic.credentials.indirect-and-redacted`
@@ -117,15 +118,16 @@ Every backend SHALL implement the required equality and conjunction filters for 
 - **THEN** canonical validation discards the hit before ranking or context projection
 
 ### Requirement: Projection synchronization is durable and idempotent
-Canonical mutations SHALL enqueue identifier-only vector projection work transactionally with the canonical state change. Retrying work SHALL NOT create duplicate vector entries, and a worker SHALL load and verify the current canonical revision immediately before embedding or deletion.
-Canonical projection queue, receipt, generation and status-count persistence SHALL remain owned by the memory module. A semantic coordinator SHALL use bounded memory-owned operations for leasing, retry, delivery acknowledgment and generation transitions rather than obtaining unrestricted canonical database access. Those operations SHALL enforce canonical identity and generation state, retain synchronous transaction boundaries, and revalidate source state when asynchronous backend work is acknowledged.
+Canonical mutations SHALL enqueue identifier-only vector projection work atomically in the same awaited canonical repository transaction as the canonical state change. Retrying work SHALL NOT create duplicate vector entries, and a worker SHALL load and verify the current canonical revision immediately before embedding or deletion.
+Canonical projection queue, receipt, generation, lease, routing, and status-count persistence SHALL remain owned by the memory module. A semantic coordinator SHALL use bounded asynchronous memory-owned operations for leasing, retry, delivery acknowledgment, and generation transitions rather than obtaining unrestricted ORM, SQL, or canonical database access. Those operations SHALL enforce canonical store, Persona Instance, generation, backend-target, source-revision, and lease-token identity; SHALL route deletion work after source rows disappear; SHALL use awaitable atomic repository transactions; and SHALL revalidate source state when asynchronous backend work is acknowledged.
 
 #### Scenario: Active revision is committed
 - **ID**: `memory.semantic.projection.transactional-enqueue`
 - **EVIDENCE**: `packages/extension-memory/tests/memory-projections.spec.ts::enqueues active revisions transactionally and deduplicates command replay`
 - **EVIDENCE**: `packages/extension-memory/tests/memory-projections.spec.ts::rolls back a canonical mutation when its transactional outbox write fails`
+- **EVIDENCE**: `packages/extension-memory/tests/memory-backend-conformance.spec.ts::atomically commits canonical mutations and projection work on both providers`
 - **WHEN** an explicit record, promoted candidate, or correction becomes the current active revision
-- **THEN** deterministic projection work for that record and revision is committed in the same canonical transaction
+- **THEN** deterministic projection work for that record and revision is committed in the same awaited canonical transaction
 
 #### Scenario: Projection delivery repeats
 - **ID**: `memory.semantic.projection.idempotent-delivery`
@@ -144,8 +146,9 @@ Canonical projection queue, receipt, generation and status-count persistence SHA
 #### Scenario: Semantic plugins are absent
 - **ID**: `memory.semantic.projection.absent-stack-no-work`
 - **EVIDENCE**: `packages/extension-memory/tests/memory-projections.spec.ts::commits canonical and lexical memory without semantic projection work`
+- **EVIDENCE**: `packages/extension-memory/tests/memory-backend-conformance.spec.ts::commits canonical and lexical state without projection work on both providers`
 - **WHEN** canonical memory changes while no semantic stack is active
-- **THEN** canonical mutation and FTS5 succeed without accumulating work for an unconfigured generation
+- **THEN** the canonical mutation and the selected provider's lexical index update succeed without accumulating work for an unconfigured generation
 
 #### Scenario: Canonical revision changes before projection acknowledgment
 - **ID**: `memory.semantic.projection.acknowledgment-current-source`
@@ -159,14 +162,27 @@ Canonical projection queue, receipt, generation and status-count persistence SHA
 - **WHEN** coordinator work requests activation or acknowledgment for an obsolete or mismatched canonical generation
 - **THEN** the memory-owned operation rejects that transition without changing the valid active pointer or losing pending canonical work
 
+#### Scenario: Concurrent workers target different projection routes
+- **ID**: `memory.semantic.projection.store-generation-target-routing`
+- **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator-concurrency.spec.ts::routes shared-store work by instance generation and target`
+- **WHEN** coordinators for different Persona Instances, generations, or vector targets claim work concurrently from one canonical store
+- **THEN** each worker receives only work matching its canonical store, instance, generation, and target identity, including deletion work whose source record no longer exists
+
+#### Scenario: An expired worker acknowledges a reclaimed lease
+- **ID**: `memory.semantic.projection.lease-token-fencing`
+- **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator-concurrency.spec.ts::fences retry and acknowledgment with the current lease token`
+- **WHEN** a lease is recovered by another worker and the previous worker retries or acknowledges with its stale lease token
+- **THEN** the memory-owned operation rejects the stale worker without completing, delaying, or replacing the current owner's work
+
 ### Requirement: Semantic generations rebuild without mixed vector spaces
-A rebuild or backend/model change SHALL populate a new isolated generation from deterministic pages of canonical current eligible revisions, verify it, and switch the local active-generation pointer only after successful completion. Changing EmbeddingGemma from q4/256 to q8/384 SHALL always produce a distinct generation identity. The coordinator SHALL rebuild from canonical memory and SHALL NOT copy, reinterpret, resize, or query vectors from the incompatible q4/256 generation. Failure SHALL leave the previous generation active.
+A rebuild or backend/model change SHALL populate a new isolated generation from deterministic pages of canonical current eligible revisions, verify it, and switch the durable active-generation pointer in the canonical repository only after successful completion. The pointer and transition state SHALL be shared across processes and changed through serialized compare-and-swap operations rather than process-local authority. Changing EmbeddingGemma from q4/256 to q8/384 SHALL always produce a distinct generation identity. The coordinator SHALL rebuild from canonical memory and SHALL NOT copy, reinterpret, resize, or query vectors from the incompatible q4/256 generation. Failure SHALL leave the previous generation active.
 
 #### Scenario: q8/384 rebuild succeeds
 - **ID**: `memory.semantic.generation.q8-rebuild-atomic-activation`
 - **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator.spec.ts::rebuilds q8/384 from canonical content and atomically retains the q4/256 generation`
+- **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator-concurrency.spec.ts::persists generation activation across concurrent canonical clients`
 - **WHEN** the configured EmbeddingGemma identity changes from q4/256 to q8/384 and every canonical active revision is projected and generation verification passes
-- **THEN** the q8/384 generation becomes active atomically, the q4/256 generation remains isolated as retained or failed historical state, and semantic queries use only q8/384 vectors
+- **THEN** the q8/384 generation becomes durably active atomically, the q4/256 generation remains isolated as retained or failed historical state, and semantic queries use only q8/384 vectors
 
 #### Scenario: q8/384 rebuild is interrupted
 - **ID**: `memory.semantic.generation.interrupted-rebuild-isolation`
@@ -174,6 +190,18 @@ A rebuild or backend/model change SHALL populate a new isolated generation from 
 - **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator.spec.ts::keeps the active generation on a failed rebuild and closes after in-flight work`
 - **WHEN** q8/384 embedding or backend writing fails before generation verification
 - **THEN** searches continue using the previous q4/256 generation and do not query the incomplete q8/384 generation
+
+#### Scenario: Concurrent clients attempt generation transitions
+- **ID**: `memory.semantic.generation.cross-client-serialization`
+- **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator-concurrency.spec.ts::serializes generation activation across concurrent coordinators`
+- **WHEN** two clients sharing one canonical store attempt incompatible active-generation transitions from the same durable generation revision
+- **THEN** one compare-and-swap transition succeeds and the other is rejected against the durable current pointer without exposing mixed vector spaces
+
+#### Scenario: A coordinator starts with an incompatible committed generation
+- **ID**: `memory.semantic.generation.explicit-replacement`
+- **EVIDENCE**: `packages/extension-memory-vectors/tests/coordinator-concurrency.spec.ts::requires an explicit rebuild to replace an incompatible committed generation`
+- **WHEN** a coordinator starts with a model, backend, or target that differs from the committed active generation
+- **THEN** startup preserves the committed pointer and canonical lexical recall until an explicit serialized rebuild activates the replacement
 
 ### Requirement: Semantic failure is contained and observable
 Embedder and vector-index operations SHALL use bounded deadlines. Timeout, health failure, malformed results, dimension mismatch, and backend exceptions SHALL be contained so lexical memory remains usable, while sanitized health state records the failure category and time.

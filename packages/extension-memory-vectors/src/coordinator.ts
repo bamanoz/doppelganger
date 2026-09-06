@@ -1,22 +1,27 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Context, Logger } from '@deepseek-ai/cordis'
 import {
+  memoryProjectionOwner,
   memorySemanticGenerationId,
   validateMemoryVector,
   type MemoryEmbedder,
+  type MemoryProjectionGenerationTransition,
+  type MemoryProjectionLease,
+  type MemoryProjectionOwner,
   type MemoryProjectionSource,
   type MemorySemanticHit,
   type MemorySemanticRetriever,
   type MemorySemanticSearchRequest,
   type MemorySemanticStatus,
+  type MemoryApi,
   type MemoryVectorEntry,
   type MemoryVectorFailure,
   type MemoryVectorHealth,
+  type MemoryVectorIdentity,
   type MemoryVectorIndex,
   type MemoryVectorMaintenanceKind,
   type MemoryVectorMaintenanceResult,
 } from '@doppelganger/doppelganger-memory'
-import type { MemoryService } from '@doppelganger/doppelganger-memory'
 
 export interface MemoryVectorCoordinatorConfig {
   readonly instanceId?: string
@@ -29,14 +34,6 @@ export interface MemoryVectorCoordinatorConfig {
 
 export interface MemoryVectorCoordinatorStatus extends MemorySemanticStatus {
   readonly workerRunning: boolean
-}
-
-interface WorkRow {
-  readonly id: string
-  readonly generationId: string
-  readonly recordId: string
-  readonly revisionId: string
-  readonly attempts: number
 }
 
 function boundedInteger(name: string, value: number, maximum: number): number {
@@ -59,16 +56,12 @@ function safeFailure(code: MemoryVectorFailure['code'], occurredAt = now()): Mem
 }
 
 async function bounded<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = Promise.withResolvers<T>()
+  const timer = setTimeout(() => timeout.reject(Object.assign(new Error('semantic operation timed out'), { code: 'timeout' })), timeoutMs)
   try {
-    return await Promise.race([
-      operation,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(Object.assign(new Error('semantic operation timed out'), { code: 'timeout' })), timeoutMs)
-      }),
-    ])
+    return await Promise.race([operation, timeout.promise])
   } finally {
-    if (timer !== undefined) clearTimeout(timer)
+    clearTimeout(timer)
   }
 }
 
@@ -88,17 +81,28 @@ function entryFrom(source: MemoryProjectionSource, vector: Float32Array): Memory
   })
 }
 
+function validHitIdentity(value: unknown): value is MemoryVectorIdentity & { readonly score: number } {
+  if (typeof value !== 'object' || value === null) return false
+  const hit = value as Partial<MemoryVectorIdentity> & { readonly score?: unknown }
+  return typeof hit.generationId === 'string' && hit.generationId.length > 0
+    && typeof hit.recordId === 'string' && hit.recordId.length > 0
+    && typeof hit.revisionId === 'string' && hit.revisionId.length > 0
+    && typeof hit.score === 'number' && Number.isFinite(hit.score)
+}
+
 export class MemoryVectorCoordinator implements MemorySemanticRetriever {
   private readonly logger: Logger
-  private readonly memory: MemoryService
+  private readonly memory: MemoryApi
   private readonly embedder: MemoryEmbedder
   private readonly index: MemoryVectorIndex
   private readonly instanceId: string
+  private readonly owner: MemoryProjectionOwner
   private readonly pollIntervalMs: number
   private readonly batchSize: number
   private readonly maximumAttempts: number
   private readonly retryBaseMs: number
   private readonly operationTimeoutMs: number
+  private readonly pendingOperations = new Set<Promise<unknown>>()
   private timer: ReturnType<typeof setInterval> | undefined
   private stopped = false
   private workerBusy = false
@@ -118,8 +122,9 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     this.operationTimeoutMs = boundedInteger('operationTimeoutMs', config.operationTimeoutMs ?? 30_000, 120_000)
     if (this.embedder.identity.dimensions !== this.index.identity.dimensions) throw Object.assign(new Error('embedder and vector index dimensions differ'), { code: 'identity' })
     if (this.embedder.identity.distanceMetric !== this.index.identity.distanceMetric) throw Object.assign(new Error('embedder and vector index metrics differ'), { code: 'identity' })
+    const generationId = memorySemanticGenerationId(this.instanceId, this.embedder.identity, this.index.identity)
+    this.owner = memoryProjectionOwner(this.instanceId, generationId, this.embedder.identity, this.index.identity)
   }
-  private readonly pendingOperations = new Set<Promise<unknown>>()
 
   private track<T>(operation: Promise<T>): Promise<T> {
     const tracked = operation.finally(() => { this.pendingOperations.delete(tracked) })
@@ -127,12 +132,8 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     return tracked
   }
 
-  private get projectionStore(): MemoryService['projectionStore'] {
+  private get projectionStore(): MemoryApi['projectionStore'] {
     return this.memory.projectionStore
-  }
-
-  private configuredGeneration(): string {
-    return memorySemanticGenerationId(this.instanceId, this.embedder.identity, this.index.identity)
   }
 
   private rememberFailure(error: unknown): void {
@@ -141,11 +142,19 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     this.logger.warn('semantic.operation.failed code=%s', code)
   }
 
+  private leaseExpiry(): string {
+    return new Date(Date.now() + Math.max(this.retryBaseMs * 4, this.operationTimeoutMs * 2)).toISOString()
+  }
+
+  private transitionExpiry(): string {
+    return new Date(Date.now() + Math.max(this.operationTimeoutMs * 2, 30_000)).toISOString()
+  }
+
   private async ensureGeneration(): Promise<void> {
-    const generationId = this.configuredGeneration()
-    const active = this.projectionStore.activeGeneration(this.instanceId)
-    const existing = this.projectionStore.generation(generationId, this.instanceId)
-    if (active === generationId && existing?.state === 'active') return
+    const active = await this.projectionStore.activeGeneration(this.instanceId)
+    if (active !== undefined && active.generationId !== this.owner.generationId) return
+    const existing = await this.projectionStore.generation(this.owner)
+    if (active?.generationId === this.owner.generationId && existing?.state === 'active') return
     try {
       await this.rebuild()
     } catch (error) {
@@ -160,7 +169,9 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     this.stopped = false
     await this.ensureGeneration()
     if (this.stopped) return
-    this.timer = setInterval(() => { void this.drain() }, this.pollIntervalMs)
+    this.timer = setInterval(() => {
+      void this.drain().catch(error => this.rememberFailure(error))
+    }, this.pollIntervalMs)
     await this.drain()
     this.logger.info('component.active backend=%s', this.index.identity.backend)
   }
@@ -180,54 +191,74 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     this.logger.info('component.disposal.completed')
   }
 
-  private recoverLeases(timestamp: string): void { this.projectionStore.recoverLeases(timestamp) }
+  private async recoverLeases(timestamp: string): Promise<void> {
+    await this.projectionStore.recoverLeases(this.owner, timestamp)
+  }
 
-  private claim(table: 'memory_vector_projection_work' | 'memory_vector_deletions'): WorkRow | undefined {
+  private async claim(operation: 'upsert' | 'delete'): Promise<MemoryProjectionLease | undefined> {
     const timestamp = now()
-    const operation = table === 'memory_vector_deletions' ? 'delete' : 'upsert'
-    const leaseUntil = new Date(Date.now() + Math.max(this.retryBaseMs * 4, this.operationTimeoutMs * 2)).toISOString()
-    return this.projectionStore.claim(operation, this.maximumAttempts, leaseUntil, timestamp) as WorkRow | undefined
+    return this.projectionStore.claim(operation, this.owner, this.maximumAttempts, this.leaseExpiry(), timestamp)
   }
 
-  private retry(table: 'memory_vector_projection_work' | 'memory_vector_deletions', row: WorkRow, error: unknown): void {
-    const attempts = row.attempts + 1
+  private async retry(operation: 'upsert' | 'delete', lease: MemoryProjectionLease, error: unknown): Promise<void> {
     const code = failureCode(error)
-    const backoff = Math.min(this.retryBaseMs * (2 ** Math.min(Math.max(attempts - 1, 0), 10)), 300_000)
-    this.projectionStore.retry(table === 'memory_vector_deletions' ? 'delete' : 'upsert', row, new Date(Date.now() + backoff).toISOString(), code, now())
+    const backoff = Math.min(this.retryBaseMs * (2 ** Math.min(Math.max(lease.attempts - 1, 0), 10)), 300_000)
+    await this.projectionStore.retry(
+      operation,
+      this.owner,
+      lease,
+      new Date(Date.now() + backoff).toISOString(),
+      code,
+      now(),
+    )
     this.lastFailure = safeFailure(code)
-    this.logger.warn('semantic.projection.retry kind=%s attempt=%d code=%s', table === 'memory_vector_deletions' ? 'delete' : 'upsert', attempts, code)
+    this.logger.warn('semantic.projection.retry kind=%s attempt=%d code=%s', operation, lease.attempts, code)
   }
 
-  private async deliverUpsert(row: WorkRow): Promise<void> {
-    const source = this.projectionStore.source(row.id, now())
-    if (source === undefined) { this.projectionStore.discardUpsert(row.id); return }
+  private async renewLease(operation: 'upsert' | 'delete', lease: MemoryProjectionLease): Promise<boolean> {
+    return this.projectionStore.renewLease(operation, this.owner, lease, this.leaseExpiry(), now())
+  }
+
+  private async deliverUpsert(lease: MemoryProjectionLease): Promise<void> {
+    const source = await this.projectionStore.source(this.owner, lease, now())
+    if (source === undefined) return
     const vectors = await bounded(this.track(this.embedder.embedDocuments([source.content])), this.operationTimeoutMs)
     const vector = vectors[0]
     if (vector === undefined) throw Object.assign(new Error('embedder returned no vector'), { code: 'dimension' })
     validateMemoryVector(vector, this.embedder.identity.dimensions)
+    if (!(await this.renewLease('upsert', lease))) return
     await bounded(this.track(this.index.upsert([entryFrom(source, vector)])), this.operationTimeoutMs)
-    this.projectionStore.acknowledgeUpsert(row.id, now())
+    await this.projectionStore.acknowledgeUpsert(this.owner, lease, now())
   }
 
-  private async deliverDelete(row: WorkRow): Promise<void> {
-    await bounded(this.track(this.index.delete([{ generationId: row.generationId, recordId: row.recordId, revisionId: row.revisionId }])), this.operationTimeoutMs)
-    this.projectionStore.acknowledgeDeletion(row.id)
+  private async deliverDelete(lease: MemoryProjectionLease): Promise<void> {
+    if (!(await this.renewLease('delete', lease))) return
+    await bounded(this.track(this.index.delete([lease])), this.operationTimeoutMs)
+    await this.projectionStore.acknowledgeDeletion(this.owner, lease, now())
   }
 
   private async drain(): Promise<void> {
     if (this.stopped || this.workerBusy) return
     this.workerBusy = true
     try {
-      this.recoverLeases(now())
+      await this.recoverLeases(now())
       for (let count = 0; count < this.batchSize && !this.stopped; count += 1) {
-        const deletion = this.claim('memory_vector_deletions')
+        const deletion = await this.claim('delete')
         if (deletion !== undefined) {
-          try { await this.deliverDelete(deletion) } catch (error) { this.retry('memory_vector_deletions', deletion, error) }
+          try {
+            await this.deliverDelete(deletion)
+          } catch (error) {
+            await this.retry('delete', deletion, error)
+          }
           continue
         }
-        const upsert = this.claim('memory_vector_projection_work')
+        const upsert = await this.claim('upsert')
         if (upsert === undefined) break
-        try { await this.deliverUpsert(upsert) } catch (error) { this.retry('memory_vector_projection_work', upsert, error) }
+        try {
+          await this.deliverUpsert(upsert)
+        } catch (error) {
+          await this.retry('upsert', upsert, error)
+        }
       }
     } finally {
       this.workerBusy = false
@@ -250,66 +281,104 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
     }
   }
 
-  private async performRebuild(): Promise<void> {
-    const generationId = this.configuredGeneration()
-    const activeGeneration = this.projectionStore.activeGeneration(this.instanceId)
-    const activeRow = this.projectionStore.generation(generationId, this.instanceId)
-    if (activeGeneration === generationId && activeRow?.state === 'active') return
-    const oldIndexed = this.projectionStore.indexed(generationId)
-    if (oldIndexed.length > 0) await bounded(this.track(this.index.delete(oldIndexed)), this.operationTimeoutMs)
-    const timestamp = now()
-    if (!this.projectionStore.prepareGeneration(generationId, this.instanceId, JSON.stringify(this.embedder.identity), JSON.stringify(this.index.identity), timestamp)) {
-      throw Object.assign(new Error('semantic generation is not eligible for rebuild'), { code: 'identity' })
+  private async claimGenerationTransition(): Promise<MemoryProjectionGenerationTransition | undefined> {
+    const embedderIdentityJson = JSON.stringify(this.embedder.identity)
+    const vectorIndexIdentityJson = JSON.stringify(this.index.identity)
+    for (;;) {
+      if (this.stopped) throw Object.assign(new Error('semantic rebuild interrupted'), { code: 'timeout' })
+      const transition = await this.projectionStore.prepareGeneration(
+        this.owner,
+        embedderIdentityJson,
+        vectorIndexIdentityJson,
+        now(),
+        this.transitionExpiry(),
+      )
+      if (transition !== undefined) return transition
+      const active = await this.projectionStore.activeGeneration(this.instanceId)
+      const generation = await this.projectionStore.generation(this.owner)
+      if (active?.generationId === this.owner.generationId && generation?.state === 'active') return undefined
+      await delay(this.pollIntervalMs)
     }
+  }
+
+  private async performRebuild(): Promise<void> {
+    const activeGeneration = await this.projectionStore.activeGeneration(this.instanceId)
+    const configuredGeneration = await this.projectionStore.generation(this.owner)
+    if (activeGeneration?.generationId === this.owner.generationId && configuredGeneration?.state === 'active') return
+    let transition = await this.claimGenerationTransition()
+    if (transition === undefined) return
     try {
+      const oldIndexed = await this.projectionStore.cleanupIdentities(this.owner)
+      if (oldIndexed.length > 0) {
+        await bounded(this.track(this.index.delete(oldIndexed)), this.operationTimeoutMs)
+        const renewed = await this.projectionStore.renewGenerationTransition(this.owner, transition, this.transitionExpiry(), now())
+        if (renewed === undefined) throw Object.assign(new Error('semantic generation rebuild lease expired'), { code: 'identity' })
+        transition = renewed
+      }
+      const reset = await this.projectionStore.resetGeneration(this.owner, transition, this.transitionExpiry(), now())
+      if (reset === undefined) throw Object.assign(new Error('semantic generation rebuild became obsolete'), { code: 'identity' })
+      transition = reset
       let lastId: string | undefined
       for (;;) {
         if (this.stopped) throw Object.assign(new Error('semantic rebuild interrupted'), { code: 'timeout' })
-        const page = this.projectionStore.rebuildPage(generationId, this.instanceId, lastId, this.batchSize)
+        const page = await this.projectionStore.rebuildPage(this.owner, transition, lastId, this.batchSize, now())
         if (page.length === 0) break
-        const vectors = await bounded(this.track(this.embedder.embedDocuments(page.map(row => row.content))), this.operationTimeoutMs)
+        const vectors = await bounded(this.track(this.embedder.embedDocuments(page.map(source => source.content))), this.operationTimeoutMs)
         if (vectors.length !== page.length) throw Object.assign(new Error('rebuild vector count mismatch'), { code: 'dimension' })
         for (const vector of vectors) validateMemoryVector(vector!, this.embedder.identity.dimensions)
+        const renewed = await this.projectionStore.renewGenerationTransition(this.owner, transition, this.transitionExpiry(), now())
+        if (renewed === undefined) throw Object.assign(new Error('semantic generation rebuild lease expired'), { code: 'identity' })
+        transition = renewed
         await bounded(this.track(this.index.upsert(page.map((source, index) => entryFrom(source, vectors[index]!)))), this.operationTimeoutMs)
-        this.projectionStore.markRebuildPage(generationId, page, now())
+        if (this.stopped) throw Object.assign(new Error('semantic rebuild interrupted'), { code: 'timeout' })
+        const marked = await this.projectionStore.markRebuildPage(this.owner, transition, page, now(), this.transitionExpiry())
+        if (marked === undefined) throw Object.assign(new Error('semantic generation rebuild became obsolete'), { code: 'identity' })
+        transition = marked
         lastId = page[page.length - 1]!.id
         if (page.length < this.batchSize) break
       }
-      if (!this.projectionStore.verifyGeneration(generationId, this.instanceId)) throw Object.assign(new Error('rebuild identity verification failed'), { code: 'identity' })
-      if (!this.projectionStore.activateGeneration(generationId, this.instanceId, now())) throw Object.assign(new Error('semantic generation became obsolete before activation'), { code: 'identity' })
+      if (this.stopped) throw Object.assign(new Error('semantic rebuild interrupted'), { code: 'timeout' })
+      if (!(await this.projectionStore.verifyGeneration(this.owner, now()))) throw Object.assign(new Error('rebuild identity verification failed'), { code: 'identity' })
+      if (!(await this.projectionStore.activateGeneration(this.owner, transition, now()))) throw Object.assign(new Error('semantic generation became obsolete before activation'), { code: 'identity' })
     } catch (error) {
-      this.projectionStore.failGeneration(generationId, failureCode(error))
+      await this.projectionStore.failGeneration(this.owner, transition, failureCode(error), now())
       throw error
     }
   }
+
   async rollback(generationId: string): Promise<void> {
     this.logger.info('semantic.rollback.started')
     if (typeof generationId !== 'string' || generationId.length === 0) throw new TypeError('generationId is required')
-    const row = this.projectionStore.generation(generationId, this.instanceId)
-    if (row === undefined || row.state !== 'retained') throw new Error('generation is not retained for rollback')
+    if (generationId !== this.owner.generationId) throw Object.assign(new Error('generation identity is incompatible with configured semantic stack'), { code: 'identity' })
+    const generation = await this.projectionStore.generation(this.owner)
+    if (generation === undefined || generation.state !== 'retained') throw new Error('generation is not retained for rollback')
     let embedderIdentity: unknown
     let indexIdentity: unknown
     try {
-      embedderIdentity = JSON.parse(row.embedderIdentityJson)
-      indexIdentity = JSON.parse(row.vectorIndexIdentityJson)
+      embedderIdentity = JSON.parse(generation.embedderIdentityJson)
+      indexIdentity = JSON.parse(generation.vectorIndexIdentityJson)
     } catch {
       throw Object.assign(new Error('generation identity is malformed'), { code: 'identity' })
     }
-    const expectedGeneration = memorySemanticGenerationId(this.instanceId, embedderIdentity as MemoryEmbedder['identity'], indexIdentity as MemoryVectorIndex['identity'])
-    if (expectedGeneration !== generationId || generationId !== this.configuredGeneration()) throw Object.assign(new Error('generation identity is incompatible with configured semantic stack'), { code: 'identity' })
-    if (!this.projectionStore.rollbackGeneration(generationId, this.instanceId, now())) throw new Error('generation became obsolete before rollback')
+    const expectedGeneration = memorySemanticGenerationId(
+      this.instanceId,
+      embedderIdentity as MemoryEmbedder['identity'],
+      indexIdentity as MemoryVectorIndex['identity'],
+    )
+    if (expectedGeneration !== generationId) throw Object.assign(new Error('generation identity is incompatible with configured semantic stack'), { code: 'identity' })
+    const active = await this.projectionStore.activeGeneration(this.instanceId)
+    if (active === undefined || !(await this.projectionStore.rollbackGeneration(this.owner, active.generationRevision, now()))) {
+      throw new Error('generation became obsolete before rollback')
+    }
     this.logger.info('semantic.rollback.completed')
-  }
-
-  private eligibleHit(hit: { readonly generationId: string; readonly recordId: string; readonly revisionId: string }, request: MemorySemanticSearchRequest): boolean {
-    return this.projectionStore.eligibleHit(hit, request.instanceId, request.actorId, request.projectId, now())
   }
 
   async search(request: MemorySemanticSearchRequest): Promise<readonly MemorySemanticHit[]> {
     this.logger.debug('semantic.search.started limit=%d', request.limit)
     if (request.instanceId !== this.instanceId || request.limit <= 0) return Object.freeze([])
-    const generationId = this.projectionStore.activeGeneration(this.instanceId)
-    if (generationId === undefined) return Object.freeze([])
+    const active = await this.projectionStore.activeGeneration(this.instanceId)
+    const generation = await this.projectionStore.generation(this.owner)
+    if (active?.generationId !== this.owner.generationId || generation?.state !== 'active') return Object.freeze([])
     try {
       const query = await bounded(this.track(this.embedder.embedQuery(request.query)), this.operationTimeoutMs)
       validateMemoryVector(query, this.embedder.identity.dimensions, 'semantic query vector')
@@ -317,18 +386,41 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
         { instanceId: request.instanceId, actorId: request.actorId, scopeKind: 'relationship' as const },
         ...(request.projectId === undefined ? [] : [{ instanceId: request.instanceId, actorId: request.actorId, scopeKind: 'project' as const, projectId: request.projectId }]),
       ]
-      const responses = await Promise.all(filters.map(filter => bounded(this.track(this.index.search({ generationId, vector: query, filter, limit: request.limit })), this.operationTimeoutMs)))
-      const hits: Array<MemorySemanticHit & { score: number }> = []
-      const seen = new Set<string>()
+      const responses = await Promise.all(filters.map(filter => bounded(this.track(this.index.search({
+        generationId: this.owner.generationId,
+        vector: query,
+        filter,
+        limit: request.limit,
+      })), this.operationTimeoutMs)))
+      const candidates: Array<MemoryVectorIdentity & { readonly score: number }> = []
       for (const hit of responses.flat()) {
-        if (typeof hit !== 'object' || hit === null || !Number.isFinite(hit.score) || !this.eligibleHit(hit, request)) { this.lastFailure = safeFailure('malformed-hit'); continue }
+        if (!validHitIdentity(hit) || hit.generationId !== this.owner.generationId) {
+          this.lastFailure = safeFailure('malformed-hit')
+          continue
+        }
+        candidates.push(hit)
+      }
+      const eligible = await this.projectionStore.eligibleHits(this.owner, candidates, request.actorId, request.projectId, now())
+      const eligibleKeys = new Set(eligible.map(hit => `${hit.recordId}\u0000${hit.revisionId}`))
+      const hits: Array<MemorySemanticHit & { readonly score: number }> = []
+      const seen = new Set<string>()
+      for (const hit of candidates) {
         const key = `${hit.recordId}\u0000${hit.revisionId}`
+        if (!eligibleKeys.has(key)) {
+          this.lastFailure = safeFailure('malformed-hit')
+          continue
+        }
         if (seen.has(key)) continue
         seen.add(key)
-        hits.push({ generationId, recordId: hit.recordId, revisionId: hit.revisionId, rank: 0, score: hit.score })
+        hits.push({ generationId: this.owner.generationId, recordId: hit.recordId, revisionId: hit.revisionId, rank: 0, score: hit.score })
       }
       hits.sort((left, right) => right.score - left.score || left.recordId.localeCompare(right.recordId) || left.revisionId.localeCompare(right.revisionId))
-      const result = Object.freeze(hits.slice(0, request.limit).map((hit, index) => Object.freeze({ generationId, recordId: hit.recordId, revisionId: hit.revisionId, rank: index + 1 })))
+      const result = Object.freeze(hits.slice(0, request.limit).map((hit, index) => Object.freeze({
+        generationId: this.owner.generationId,
+        recordId: hit.recordId,
+        revisionId: hit.revisionId,
+        rank: index + 1,
+      })))
       this.logger.debug('semantic.search.completed results=%d', result.length)
       return result
     } catch (error) {
@@ -339,37 +431,71 @@ export class MemoryVectorCoordinator implements MemorySemanticRetriever {
   }
 
   async status(): Promise<MemoryVectorCoordinatorStatus> {
-    const generationId = this.projectionStore.activeGeneration(this.instanceId)
+    const active = await this.projectionStore.activeGeneration(this.instanceId)
+    const generation = await this.projectionStore.generation(this.owner)
+    const compatibleActive = active?.generationId === this.owner.generationId && generation?.state === 'active'
     let health: MemoryVectorHealth | undefined
-    try { health = await bounded(this.track(this.index.health()), this.operationTimeoutMs) } catch (error) { this.rememberFailure(error) }
-    const counts = generationId === undefined ? undefined : (() => {
-      const current = this.projectionStore.statusCounts(generationId, this.instanceId, now())
-      return Object.freeze({ indexed: current.indexed, current: current.current, stale: Math.max(0, current.indexed - current.current), missing: Math.max(0, current.eligible - current.current), pendingUpserts: current.pendingUpserts, pendingDeletes: current.pendingDeletes })
-    })()
+    try {
+      health = await bounded(this.track(this.index.health()), this.operationTimeoutMs)
+    } catch (error) {
+      this.rememberFailure(error)
+    }
+    const resolvedCounts = compatibleActive ? await this.projectionStore.statusCounts(this.owner, now()) : undefined
+    const statusCounts = resolvedCounts === undefined ? undefined : Object.freeze({
+      indexed: resolvedCounts.indexed,
+      current: resolvedCounts.current,
+      stale: Math.max(0, resolvedCounts.indexed - resolvedCounts.current),
+      missing: Math.max(0, resolvedCounts.eligible - resolvedCounts.current),
+      pendingUpserts: resolvedCounts.pendingUpserts,
+      pendingDeletes: resolvedCounts.pendingDeletes,
+    })
     return Object.freeze({
-      active: generationId !== undefined,
+      active: compatibleActive,
       backend: this.index.identity.backend,
       sanitizedTarget: this.index.identity.sanitizedTarget,
-      ...(generationId === undefined ? {} : { generationId }),
+      ...(!compatibleActive ? {} : { generationId: this.owner.generationId }),
       embedder: this.embedder.identity,
-      ...(counts === undefined ? {} : { counts }),
+      ...(statusCounts === undefined ? {} : { counts: statusCounts }),
       supportedMaintenance: Object.freeze([...new Set([...this.index.supportedMaintenance, 'cleanup-generation' as const])]),
-      ...(this.lastFailure === undefined ? (health?.lastFailure === undefined ? {} : { lastFailure: safeFailure(health.lastFailure.code, health.lastFailure.occurredAt) }) : { lastFailure: this.lastFailure }),
+      ...(this.lastFailure === undefined
+        ? (health?.lastFailure === undefined ? {} : { lastFailure: safeFailure(health.lastFailure.code, health.lastFailure.occurredAt) })
+        : { lastFailure: this.lastFailure }),
       workerRunning: this.workerBusy,
     })
   }
+
   async maintenance(kind: MemoryVectorMaintenanceKind): Promise<MemoryVectorMaintenanceResult> {
     this.logger.info('semantic.maintenance.started kind=%s', kind)
     if (kind !== 'cleanup-generation') return bounded(this.track(this.index.maintenance(kind)), this.operationTimeoutMs)
     const startedAt = now()
-    const active = this.projectionStore.activeGeneration(this.instanceId)
-    const retained = this.projectionStore.retainedGenerations(this.instanceId, active)
+    const retained = await this.projectionStore.retainedGenerations({
+      instanceId: this.instanceId,
+      vectorBackend: this.owner.vectorBackend,
+      vectorTargetId: this.owner.vectorTargetId,
+    })
     if (retained.length === 0) return Object.freeze({ kind, outcome: 'noop', startedAt, completedAt: now() })
-    for (const generationId of retained) {
-      const rows = this.projectionStore.indexed(generationId)
-      if (rows.length > 0) await bounded(this.track(this.index.delete(rows)), this.operationTimeoutMs)
-      this.projectionStore.removeRetainedGeneration(generationId)
+    let removed = 0
+    for (const generation of retained) {
+      const transition = await this.projectionStore.beginRetainedGenerationCleanup(generation, this.transitionExpiry(), now())
+      if (transition === undefined) continue
+      try {
+        const indexed = await this.projectionStore.cleanupIdentities(generation)
+        let currentTransition = transition
+        if (indexed.length > 0) {
+          await bounded(this.track(this.index.delete(indexed)), this.operationTimeoutMs)
+          const renewed = await this.projectionStore.renewGenerationTransition(generation, currentTransition, this.transitionExpiry(), now())
+          if (renewed === undefined) throw Object.assign(new Error('semantic generation cleanup lease expired'), { code: 'identity' })
+          currentTransition = renewed
+        }
+        if (!(await this.projectionStore.completeRetainedGenerationCleanup(generation, currentTransition, now()))) {
+          throw Object.assign(new Error('semantic generation cleanup became obsolete'), { code: 'identity' })
+        }
+        removed += 1
+      } catch (error) {
+        await this.projectionStore.abandonRetainedGenerationCleanup(generation, transition, failureCode(error), now())
+        throw error
+      }
     }
-    return Object.freeze({ kind, outcome: 'ran', startedAt, completedAt: now() })
+    return Object.freeze({ kind, outcome: removed === 0 ? 'already-running' : 'ran', startedAt, completedAt: now() })
   }
 }

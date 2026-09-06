@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
@@ -6,14 +7,18 @@ import { pathToFileURL } from 'node:url'
 import { Context, type Plugin } from '@deepseek-ai/cordis'
 import {
   MemoryService,
+  memoryProjectionOwner,
+  memorySemanticGenerationId,
+  type MemoryApi,
+  type MemoryEmbedderIdentity,
   type MemoryKind,
   type MemorySemanticRetriever,
   type MemoryServiceConfig,
   type MemoryVectorEntry,
   type MemoryVectorIndex,
 } from '@doppelganger/doppelganger-memory'
+import SqliteMemoryPlugin from '@doppelganger/doppelganger-memory/sqlite'
 import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
-import { InstanceSqliteService, type InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
 import { createSQLiteExactMemoryVectorIndex } from '../src/index.ts'
 
 type BackendName = 'lexical-only' | 'sqlite_exact' | 'chroma' | 'qdrant' | 'pgvector'
@@ -297,7 +302,7 @@ async function memorySession(
     }
     await context.plugin(provider)
   }
-  await context.plugin(InstanceSqliteService, { home })
+  await context.plugin(SqliteMemoryPlugin, { home, namespace: 'memory' })
   await context.plugin(MemoryService, { ...config, now: () => new Date(corpus.clock) })
   return context
 }
@@ -322,7 +327,7 @@ async function seedCorpus(home: string, corpus: RetrievalCorpus): Promise<Seeded
     }
     await context.plugin(persona)
     await context.plugin(createActorIdentityPlugin('local-user'))
-    await context.plugin(InstanceSqliteService, { home })
+    await context.plugin(SqliteMemoryPlugin, { home, namespace: 'memory' })
     await context.plugin(MemoryService, {
       now: () => new Date(corpus.clock),
       id: () => `benchmark-id-${String(++id).padStart(4, '0')}`,
@@ -337,9 +342,9 @@ async function seedCorpus(home: string, corpus: RetrievalCorpus): Promise<Seeded
         ...(item.validFrom === undefined ? {} : { validFrom: item.validFrom }),
         ...(item.expiresAt === undefined ? {} : { expiresAt: item.expiresAt }),
       }
-      const initial = item.status === 'active'
+      const initial = await (item.status === 'active'
         ? context.doppelgangerMemory.remember(request)
-        : context.doppelgangerMemory.propose(request)
+        : context.doppelgangerMemory.propose(request))
       ids.set(item.key, initial.id)
       indexed.push({
         key: item.key,
@@ -358,7 +363,7 @@ async function seedCorpus(home: string, corpus: RetrievalCorpus): Promise<Seeded
         }),
       })
       if (item.correction !== undefined) {
-        const corrected = context.doppelgangerMemory.correct({
+        const corrected = await context.doppelgangerMemory.correct({
           operationId: item.correction.operationId,
           id: initial.id,
           expectedRevisionId: initial.revision.id,
@@ -387,15 +392,21 @@ async function seedCorpus(home: string, corpus: RetrievalCorpus): Promise<Seeded
   return Object.freeze({ ids, indexed: Object.freeze(indexed) })
 }
 
-function activateGeneration(context: Context, corpus: RetrievalCorpus): void {
-  const database = (context.doppelgangerMemory as unknown as { database: InstanceSqliteDatabase }).database
-  database.prepare(`
-    INSERT OR IGNORE INTO memory_semantic_generations
-    VALUES (?, 'aiden', '{}', '{}', 'active', ?, ?, ?, NULL)
-  `).run(corpus.generationId, corpus.clock, corpus.clock, corpus.clock)
-  database.prepare(`
-    INSERT OR REPLACE INTO memory_semantic_active_generation VALUES ('aiden', ?, ?)
-  `).run(corpus.generationId, corpus.clock)
+async function activateGeneration(memory: MemoryApi, corpus: RetrievalCorpus, index: MemoryVectorIndex, embedder: MemoryEmbedderIdentity): Promise<void> {
+  const store = memory.projectionStore
+  const owner = memoryProjectionOwner('aiden', corpus.generationId, embedder, index.identity)
+  const transitionUntil = new Date(Date.parse(corpus.clock) + 60_000).toISOString()
+  let transition = await store.prepareGeneration(owner, JSON.stringify(embedder), JSON.stringify(index.identity), corpus.clock, transitionUntil)
+  if (transition === undefined) throw new Error('benchmark generation reservation failed')
+  let cursor: string | undefined
+  for (;;) {
+    const page = await store.rebuildPage(owner, transition, cursor, 128, corpus.clock)
+    if (page.length === 0) break
+    transition = await store.markRebuildPage(owner, transition, page, corpus.clock, transitionUntil)
+    if (transition === undefined) throw new Error('benchmark generation acknowledgment failed')
+    cursor = page.at(-1)!.id
+  }
+  if (!(await store.activateGeneration(owner, transition, corpus.clock))) throw new Error('benchmark generation activation failed')
 }
 
 function semanticRetriever(
@@ -498,14 +509,20 @@ async function measureBackend(
   topK: number,
   queryDeadlineMs: number,
 ): Promise<BackendMeasurement> {
-  await index.upsert(seeded.indexed.map(item => item.entry))
+  const embedder: MemoryEmbedderIdentity = {
+    provider: 'benchmark-fixture', modelId: corpus.corpusId, revision: String(corpus.schemaVersion),
+    artifactDigest: `sha256:${createHash('sha256').update(JSON.stringify(corpus)).digest('hex')}`,
+    pooling: 'fixture', projection: 'none', dimensions: corpus.dimensions, normalized: true, distanceMetric: 'cosine',
+  }
+  corpus = { ...corpus, generationId: memorySemanticGenerationId('aiden', embedder, index.identity) }
+  await index.upsert(seeded.indexed.map(item => ({ ...item.entry, generationId: corpus.generationId })))
   const context = await memorySession(home, corpus, `${backend}-${topK}`, {
     lexicalTopK: corpus.records.length,
     semanticTopK: topK,
     semanticTimeoutMs: queryDeadlineMs,
   }, semanticRetriever(corpus, index))
   try {
-    activateGeneration(context, corpus)
+    await activateGeneration(context.doppelgangerMemory, corpus, index, embedder)
     return await measureQueries(backend, context, corpus, seeded.ids, iterations, warmupIterations, topK, queryDeadlineMs)
   } finally {
     await context.fiber.dispose()

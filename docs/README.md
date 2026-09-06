@@ -14,7 +14,7 @@ This tree is the navigation root and authoritative description of the currently 
 | Features | [CodeGraph](features/codegraph.md) | Optional workspace-bound CodeGraph tools, freshness, subprocess bounds, lifecycle, compatibility, and trust boundary |
 | Features | [Evolution](features/evolution.md) | Optional proposal ledger, state machines, storage, controls, reminders, consent, and executor boundaries |
 | Features | [MCP tool import](features/mcp-tool-import.md) | Runtime Preset-owned MCP transports, operator-owned acquisition, independent background startup, discovery, naming, invocation, approval, refresh, reload, diagnostics, trust, and disposal |
-| Features | [Memory](features/memory.md) | Canonical memory, candidates, retrieval, mutations, and semantic contracts |
+| Features | [Memory](features/memory.md) | Canonical repository authority and schema lifecycle, actor/scope policy, async reads and mutations, candidates, retrieval, and semantic contracts |
 | Features | [Runtime logging](features/runtime-logging.md) | Default-off Cordis log routing, operational event vocabulary and component coverage, bounded session records and sink queues, rolling JSONL files, opt-in activation retention and ownership coordination, private Sentry delivery, reload/disposal, and host neutrality |
 | Hosts | [Oh My Pi](hosts/oh-my-pi.md) | OMP pure-roster activation, child process, RPC, context/tool/approval projection, and failure behavior |
 | Hosts | [DeepSeek Harness](hosts/deepseek-harness.md) | Deferred host, mandatory source-research gate, planned approval projection, and current Agent Skill discovery seam |
@@ -29,9 +29,9 @@ This tree is the navigation root and authoritative description of the currently 
 | Research | [Goose extension surface](research/host-extension-surfaces/goose.md) | Source-pinned Goose MCP, platform-extension, plugin-hook, approval, lifecycle, state, and trust evidence |
 | Research | [Pi extension surface](research/host-extension-surfaces/pi.md) | Source-pinned Pi Extension API, context, provider, tool, approval, lifecycle, state, and reload evidence |
 | Research | [Oh My Pi extension surface](research/host-extension-surfaces/oh-my-pi.md) | Source-pinned OMP native API evidence and current Doppelganger adapter mapping |
-| Operations | [Configuration](operations/configuration.md) | Doppelganger home, ordered roots/trust, selection/defaults, copy-only authoring, logical writable policy, project layout, and patch order |
-| Operations | [Semantic memory](operations/semantic-memory.md) | Embedder, vector backends, generations, health, credentials, and recovery |
-| Operations | [Verification](operations/verification.md) | Repository checks, Persona evolution skill smokes, and opt-in real-backend coverage |
+| Operations | [Configuration](operations/configuration.md) | Doppelganger home, roots/trust, selection/defaults, copy-only authoring, canonical memory provider setup and offline transfer, logical writable policy, project layout, and patch order |
+| Operations | [Semantic memory](operations/semantic-memory.md) | Derived embedder/vector composition, generations, health, credentials, and recovery |
+| Operations | [Verification](operations/verification.md) | Repository checks, mandatory canonical PostgreSQL gate, real OMP requirements, and independently optional real semantic-backend coverage |
 | Modes | [Focused specs](modes/focused-specs.md) | Product-boundary specification shape, executable evidence, and review criteria |
 | Project | [Status and scope](project/status-and-scope.md) | Implemented milestone, acceptance criteria, deferred scope |
 | Audits | [2026-08-30 system audit](audits/2026-08-30-system-audit.md) | Evidence, risks, and recommended follow-up work |

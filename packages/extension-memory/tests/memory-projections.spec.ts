@@ -1,271 +1,404 @@
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createPersonaActivationPlugin } from '@doppelganger/doppelganger-persona'
-import { createActorIdentityPlugin } from '@doppelganger/doppelganger-protocols'
-import { InstanceSqliteService, type InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
-import { MemoryService } from '../src/index.ts'
+import {
+  memoryProjectionOwner,
+  memorySemanticGenerationId,
+  type MemoryEmbedderIdentity,
+  type MemoryProjectionOwner,
+  type MemoryVectorIndexIdentity,
+} from '../src/index.ts'
+import {
+  createMemoryBackendFixture,
+  type MemoryBackendFixture,
+  type MemoryBackendKind,
+  type MemoryBackendSession,
+} from './memory-backend-fixture.ts'
 
-const temporaryRoots: string[] = []
-const now = '2026-08-29T00:00:00.000Z'
+const timestamp = '2026-08-29T00:00:00.000Z'
+const leaseUntil = '2026-08-29T00:01:00.000Z'
+const transitionUntil = '2026-08-29T00:10:00.000Z'
+const backends: MemoryBackendFixture[] = []
 
-interface Fixture {
-  readonly context: Context
-  readonly database: InstanceSqliteDatabase
+const embedder: MemoryEmbedderIdentity = Object.freeze({
+  provider: 'projection-test',
+  modelId: 'projection-model',
+  revision: '1',
+  artifactDigest: `sha256:${'a'.repeat(64)}`,
+  pooling: 'mean',
+  projection: 'none',
+  dimensions: 3,
+  normalized: true,
+  distanceMetric: 'cosine',
+})
+const vectorIndex: MemoryVectorIndexIdentity = Object.freeze({
+  backend: 'sqlite_exact',
+  namespace: 'projection-test',
+  sanitizedTarget: 'memory',
+  configFingerprint: 'b'.repeat(64),
+  dimensions: 3,
+  distanceMetric: 'cosine',
+})
+const generationId = memorySemanticGenerationId('aiden', embedder, vectorIndex)
+
+interface ProjectionFixture {
+  readonly session: MemoryBackendSession
+  readonly owner: MemoryProjectionOwner
+}
+
+interface ProjectionRow extends Record<string, unknown> {
+  readonly id: string
+  readonly generation_id: string
+  readonly record_id: string
+  readonly revision_id: string
+  readonly vector_backend: string
+  readonly vector_target_id: string
+  readonly state: string
 }
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+  await Promise.all(backends.splice(0).map(backend => backend.close()))
 })
 
-async function fixture(withGeneration = true): Promise<Fixture> {
-  const home = await mkdtemp(join(tmpdir(), 'doppelganger-memory-projections-'))
-  temporaryRoots.push(home)
-  const context = new Context()
-  await context.plugin(createPersonaActivationPlugin({
+async function rows(session: MemoryBackendSession, table: 'memory_vector_projection_work' | 'memory_vector_deletions'): Promise<readonly ProjectionRow[]> {
+  return session.database.read(async em => await em.execute(
+    `SELECT id, generation_id, record_id, revision_id, vector_backend, vector_target_id, state FROM ${table} ORDER BY created_at, id`,
+    [],
+    'all',
+  ) as readonly ProjectionRow[])
+}
+
+async function count(session: MemoryBackendSession, table: string): Promise<number> {
+  const result = await session.database.read(async em => await em.execute<{ count: number }>(`SELECT COUNT(*) AS count FROM ${table}`, [], 'get'))
+  return Number(result.count)
+}
+
+async function fixture(kind: MemoryBackendKind = 'sqlite', withGeneration = true): Promise<ProjectionFixture> {
+  const backend = await createMemoryBackendFixture(kind)
+  backends.push(backend)
+  const session = await backend.createSession({
+    actorId: 'local-user',
     instanceId: 'aiden',
     sessionId: 'projection-session',
     projectId: 'project-one',
-    projectRoot: join(home, 'project-one'),
-  }))
-  await context.plugin(createActorIdentityPlugin('local-user'))
-  await context.plugin(InstanceSqliteService, { home })
-  await context.plugin(MemoryService, { now: () => new Date(now) })
-  const database = (context.doppelgangerMemory as unknown as { database: InstanceSqliteDatabase }).database
-  if (withGeneration) database.exec(`
-    INSERT INTO memory_semantic_generations VALUES (
-      'generation-one', 'aiden', '{}', '{}', 'active', '${now}', '${now}', '${now}', NULL
-    );
-    INSERT INTO memory_semantic_active_generation VALUES ('aiden', 'generation-one', '${now}');
-  `)
-  return { context, database }
-}
-
-function work(database: InstanceSqliteDatabase) {
-  return database.prepare(`
-    SELECT id, generation_id, record_id, revision_id, state
-    FROM memory_vector_projection_work ORDER BY created_at, id
-  `).all()
-}
-
-function deletions(database: InstanceSqliteDatabase) {
-  return database.prepare(`
-    SELECT id, generation_id, record_id, revision_id, state
-    FROM memory_vector_deletions ORDER BY created_at, id
-  `).all()
+    now: () => new Date(timestamp),
+  })
+  const owner = memoryProjectionOwner('aiden', generationId, embedder, vectorIndex)
+  if (withGeneration) {
+    const transition = await session.context.doppelgangerMemory.projectionStore.prepareGeneration(
+      owner,
+      JSON.stringify(embedder),
+      JSON.stringify(vectorIndex),
+      timestamp,
+      transitionUntil,
+    )
+    expect(transition).toBeDefined()
+    expect(await session.context.doppelgangerMemory.projectionStore.activateGeneration(owner, transition!, timestamp)).toBe(true)
+  }
+  return { session, owner }
 }
 
 describe('memory vector projection lifecycle', () => {
   it('commits canonical and lexical memory without semantic projection work', async () => {
-    const { context, database } = await fixture(false)
-    const record = context.doppelgangerMemory.remember({
-      operationId: 'remember-without-semantic-generation',
-      subjectKey: 'project.runtime.transport',
-      kind: 'fact',
-      content: 'The runtime uses framed JSON-RPC.',
-    })
-
-    expect(context.doppelgangerMemory.get(record.id)).toMatchObject({ id: record.id })
-    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_fts').get()).toEqual({ count: 1 })
-    expect(work(database)).toEqual([])
-    expect(deletions(database)).toEqual([])
-    await context.fiber.dispose()
+    for (const kind of ['sqlite', 'postgresql'] as const) {
+      const { session } = await fixture(kind, false)
+      const record = await session.memory.remember({
+        operationId: `remember-without-generation-${kind}`,
+        subjectKey: 'project.runtime.transport',
+        kind: 'fact',
+        content: 'The runtime uses framed JSON-RPC.',
+      })
+      expect(await session.memory.get(record.id)).toMatchObject({ id: record.id })
+      expect(await session.memory.search({ query: 'framed JSON-RPC', tokenBudget: 100 })).toEqual([
+        expect.objectContaining({ record: expect.objectContaining({ id: record.id }) }),
+      ])
+      expect(await rows(session, 'memory_vector_projection_work')).toEqual([])
+      expect(await rows(session, 'memory_vector_deletions')).toEqual([])
+    }
   })
 
   it('enqueues active revisions transactionally and deduplicates command replay', async () => {
-    const { context, database } = await fixture()
-    const record = context.doppelgangerMemory.remember({
-      operationId: 'remember-one',
-      subjectKey: 'project.runtime.transport',
-      kind: 'fact',
-      content: 'The runtime uses framed JSON-RPC.',
-    })
-    expect(work(database)).toEqual([
-      expect.objectContaining({
-        generation_id: 'generation-one',
-        record_id: record.id,
-        revision_id: record.revision.id,
-        state: 'pending',
-      }),
-    ])
-
-    context.doppelgangerMemory.remember({
-      operationId: 'remember-one',
-      subjectKey: 'project.runtime.transport',
-      kind: 'fact',
-      content: 'The runtime uses framed JSON-RPC.',
-    })
-    expect(work(database)).toHaveLength(1)
-    await context.fiber.dispose()
+    for (const kind of ['sqlite', 'postgresql'] as const) {
+      const { session, owner } = await fixture(kind)
+      const request = {
+        operationId: `remember-one-${kind}`,
+        subjectKey: 'project.runtime.transport',
+        kind: 'fact' as const,
+        content: 'The runtime uses framed JSON-RPC.',
+      }
+      const record = await session.memory.remember(request)
+      expect(await rows(session, 'memory_vector_projection_work')).toEqual([
+        expect.objectContaining({
+          generation_id: owner.generationId,
+          record_id: record.id,
+          revision_id: record.revision.id,
+          vector_backend: owner.vectorBackend,
+          vector_target_id: owner.vectorTargetId,
+          state: 'pending',
+        }),
+      ])
+      expect((await session.memory.remember(request)).id).toBe(record.id)
+      expect(await rows(session, 'memory_vector_projection_work')).toHaveLength(1)
+    }
   })
 
   it('converges a stale queued revision to deletion and the current upsert', async () => {
-    const { context, database } = await fixture()
-    const initial = context.doppelgangerMemory.remember({
+    const { session, owner } = await fixture()
+    const initial = await session.memory.remember({
       operationId: 'remember-corrected',
       subjectKey: 'project.database.engine',
       kind: 'decision',
       content: 'The project uses an old database.',
     })
-    const staleWorkId = String(work(database)[0]?.id)
-    const corrected = context.doppelgangerMemory.correct({
+    const stale = await session.context.doppelgangerMemory.projectionStore.claim('upsert', owner, 10, leaseUntil, timestamp)
+    expect(stale).toMatchObject({ recordId: initial.id, revisionId: initial.revision.id })
+    const corrected = await session.memory.correct({
       operationId: 'correct-database',
       id: initial.id,
       expectedRevisionId: initial.revision.id,
       content: 'The project uses SQLite.',
     })
 
-    expect(context.doppelgangerMemory.projectionStore.source(staleWorkId, now)).toBeUndefined()
-    expect(deletions(database)).toEqual([
-      expect.objectContaining({ record_id: initial.id, revision_id: initial.revision.id, state: 'pending' }),
+    expect(await session.context.doppelgangerMemory.projectionStore.source(owner, stale!, timestamp)).toBeUndefined()
+    expect(await rows(session, 'memory_vector_deletions')).toEqual([
+      expect.objectContaining({
+        generation_id: owner.generationId,
+        record_id: initial.id,
+        revision_id: initial.revision.id,
+        vector_target_id: owner.vectorTargetId,
+        state: 'pending',
+      }),
     ])
-    const currentWork = work(database)
-    expect(currentWork).toHaveLength(1)
-    expect(currentWork[0]).toEqual(expect.objectContaining({
-      record_id: corrected.id,
-      revision_id: corrected.revision.id,
-    }))
-    const source = context.doppelgangerMemory.projectionStore.source(String(currentWork[0]?.id), now)
+    const current = await session.context.doppelgangerMemory.projectionStore.claim('upsert', owner, 10, leaseUntil, timestamp)
+    const source = await session.context.doppelgangerMemory.projectionStore.source(owner, current!, timestamp)
     expect(source).toMatchObject({
       recordId: corrected.id,
       revisionId: corrected.revision.id,
       content: 'The project uses SQLite.',
       status: 'active',
     })
-    expect(context.doppelgangerMemory.projectionStore.acknowledgeUpsert(String(currentWork[0]?.id), now)).toBe(true)
-    expect(work(database)).toHaveLength(0)
-    await context.fiber.dispose()
+    expect(await session.context.doppelgangerMemory.projectionStore.acknowledgeUpsert(owner, current!, timestamp)).toBe(true)
+    expect(await rows(session, 'memory_vector_projection_work')).toHaveLength(0)
   })
 
-  it('turns expired and rejected projection state into opaque deletion work', async () => {
-    const { context, database } = await fixture()
-    const expired = context.doppelgangerMemory.remember({
+  it('turns expired and rejected projection state into opaque routed deletion work', async () => {
+    const { session, owner } = await fixture()
+    const expired = await session.memory.remember({
       operationId: 'remember-expired',
       subjectKey: 'project.expired.fact',
       kind: 'fact',
       content: 'This fact has expired.',
       expiresAt: '2026-08-28T00:00:00.000Z',
     })
-    const expiredWorkId = String(work(database)[0]?.id)
-    expect(context.doppelgangerMemory.projectionStore.source(expiredWorkId, now)).toBeUndefined()
-    expect(deletions(database)).toContainEqual(expect.objectContaining({
+    const expiredLease = await session.context.doppelgangerMemory.projectionStore.claim('upsert', owner, 10, leaseUntil, timestamp)
+    expect(await session.context.doppelgangerMemory.projectionStore.source(owner, expiredLease!, timestamp)).toBeUndefined()
+    expect(await rows(session, 'memory_vector_deletions')).toContainEqual(expect.objectContaining({
       record_id: expired.id,
       revision_id: expired.revision.id,
+      vector_target_id: owner.vectorTargetId,
     }))
 
-    const candidate = context.doppelgangerMemory.propose({
+    const candidate = await session.memory.propose({
       operationId: 'candidate-one',
       subjectKey: 'project.candidate.fact',
       kind: 'fact',
       content: 'Review this candidate.',
     })
-    database.prepare(`
-      INSERT INTO memory_semantic_indexed_revisions VALUES ('generation-one', ?, ?, ?)
-    `).run(candidate.id, candidate.revision.id, now)
-    context.doppelgangerMemory.reject({ operationId: 'reject-one', candidateId: candidate.id })
-    expect(database.prepare(`
-      SELECT 1 FROM memory_semantic_indexed_revisions WHERE record_id = ?
-    `).get(candidate.id)).toBeUndefined()
-    expect(deletions(database)).toContainEqual(expect.objectContaining({
+    await session.database.write({ instanceId: owner.instanceId }, async em => {
+      await em.execute(`
+        INSERT INTO memory_semantic_indexed_revisions(store_id, instance_id, generation_id, record_id, revision_id, indexed_at)
+        SELECT id, ?, ?, ?, ?, ? FROM memory_store
+      `, [owner.instanceId, owner.generationId, candidate.id, candidate.revision.id, timestamp], 'run')
+    })
+    await session.memory.reject({ operationId: 'reject-one', candidateId: candidate.id })
+    expect(await session.database.read(async em => await em.execute(
+      'SELECT 1 AS found FROM memory_semantic_indexed_revisions WHERE record_id = ?',
+      [candidate.id],
+      'get',
+    ))).toBeUndefined()
+    expect(await rows(session, 'memory_vector_deletions')).toContainEqual(expect.objectContaining({
       record_id: candidate.id,
       revision_id: candidate.revision.id,
+      vector_target_id: owner.vectorTargetId,
     }))
-    await context.fiber.dispose()
   })
 
   it('rolls back a canonical mutation when its transactional outbox write fails', async () => {
-    const { context, database } = await fixture()
-    database.exec(`
-      CREATE TRIGGER fail_projection_insert
-      BEFORE INSERT ON memory_vector_projection_work
-      BEGIN SELECT RAISE(ABORT, 'projection write failed'); END;
-    `)
-    expect(() => context.doppelgangerMemory.remember({
+    const { session, owner } = await fixture()
+    await session.database.write({ instanceId: owner.instanceId }, async em => {
+      await em.execute(`CREATE TRIGGER fail_projection_insert BEFORE INSERT ON memory_vector_projection_work BEGIN SELECT RAISE(ABORT, 'projection write failed'); END`, [], 'run')
+    })
+    await expect(session.memory.remember({
       operationId: 'rolled-back',
       subjectKey: 'project.rollback.fact',
       kind: 'fact',
       content: 'This entire mutation must roll back.',
-    })).toThrow('projection write failed')
+    })).rejects.toMatchObject({ code: 'MEMORY_STORAGE_FAILED' })
     for (const table of ['memory_records', 'memory_revisions', 'memory_evidence', 'memory_fts', 'memory_operations']) {
-      expect(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count).toBe(0)
+      expect(await count(session, table)).toBe(0)
     }
-    await context.fiber.dispose()
   })
 
   it('hard-deletes content immediately and retains only retryable vector identities', async () => {
-    const { context, database } = await fixture()
-    const record = context.doppelgangerMemory.remember({
+    const { session, owner } = await fixture()
+    const record = await session.memory.remember({
       operationId: 'remember-deleted',
       subjectKey: 'project.deleted.fact',
       kind: 'fact',
       content: 'Delete this protected content.',
     })
-    const workId = String(work(database)[0]?.id)
-    database.prepare(`
-      INSERT INTO memory_embedding_cache VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('embedder-one', record.id, record.revision.id, 'digest', 2, Buffer.from([1, 2]), now)
-    expect(context.doppelgangerMemory.projectionStore.acknowledgeUpsert(workId, now)).toBe(true)
+    const lease = await session.context.doppelgangerMemory.projectionStore.claim('upsert', owner, 10, leaseUntil, timestamp)
+    expect(await session.context.doppelgangerMemory.projectionStore.acknowledgeUpsert(owner, lease!, timestamp)).toBe(true)
+    await session.database.write({ instanceId: owner.instanceId }, async em => {
+      await em.execute(`
+        INSERT INTO memory_embedding_cache(embedder_fingerprint, record_id, revision_id, content_digest, dimensions, vector, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [owner.embedderFingerprint, record.id, record.revision.id, 'digest', 2, Buffer.from([1, 2]), timestamp], 'run')
+    })
 
-    expect(context.doppelgangerMemory.forget({ operationId: 'forget-deleted', id: record.id })).toBe(true)
-    expect(context.doppelgangerMemory.get(record.id)).toBeUndefined()
-    expect(await context.doppelgangerMemory.search({ query: 'protected content', tokenBudget: 100 })).toEqual([])
+    expect(await session.memory.forget({ operationId: 'forget-deleted', id: record.id })).toBe(true)
+    expect(await session.memory.get(record.id)).toBeUndefined()
+    expect(await session.memory.search({ query: 'protected content', tokenBudget: 100 })).toEqual([])
     for (const table of ['memory_records', 'memory_revisions', 'memory_fts', 'memory_embedding_cache', 'memory_semantic_indexed_revisions']) {
-      expect(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count).toBe(0)
+      expect(await count(session, table)).toBe(0)
     }
-    const pending = deletions(database)
+    const pending = await rows(session, 'memory_vector_deletions')
     expect(pending).toEqual([
       expect.objectContaining({
-        generation_id: 'generation-one',
+        generation_id: owner.generationId,
         record_id: record.id,
         revision_id: record.revision.id,
+        vector_backend: owner.vectorBackend,
+        vector_target_id: owner.vectorTargetId,
         state: 'pending',
       }),
     ])
     expect(JSON.stringify(pending)).not.toContain('protected content')
-    expect(context.doppelgangerMemory.projectionStore.acknowledgeDeletion(String(pending[0]?.id))).toBe(true)
-    expect(deletions(database)).toHaveLength(0)
-    await context.fiber.dispose()
-  })
-  it('revalidates canonical projection acknowledgments after external work', async () => {
-    const { context, database } = await fixture()
-    const record = context.doppelgangerMemory.remember({ operationId: 'ack-stale', subjectKey: 'project.ack.stale', kind: 'fact', content: 'Stale projection content.' })
-    const workId = String(work(database)[0]?.id)
-    database.prepare('UPDATE memory_records SET status = ? WHERE id = ?').run('rejected', record.id)
-    expect(context.doppelgangerMemory.projectionStore.acknowledgeUpsert(workId, now)).toBe(false)
-    expect(database.prepare('SELECT 1 FROM memory_semantic_indexed_revisions WHERE record_id = ?').get(record.id)).toBeUndefined()
-    await context.fiber.dispose()
-  })
-  it('rejects incomplete activation and active-generation cleanup without losing work', async () => {
-    const { context, database } = await fixture()
-    try {
-      const memory = context.doppelgangerMemory
-      memory.remember({ operationId: 'generation-record', subjectKey: 'project.generation', kind: 'fact', content: 'A generation needs its canonical revision.' })
-      const store = memory.projectionStore
-      const queued = work(database)
-      expect(store.prepareGeneration('candidate', 'aiden', '{}', '{}', now)).toBe(true)
-      expect(store.activateGeneration('candidate', 'aiden', now)).toBe(false)
-      expect(store.activeGeneration('aiden')).toBe('generation-one')
-      expect(store.removeRetainedGeneration('generation-one')).toBe(false)
-      expect(work(database)).toEqual(queued)
-    } finally { await context.fiber.dispose() }
+    const deletion = await session.context.doppelgangerMemory.projectionStore.claim('delete', owner, 10, leaseUntil, timestamp)
+    expect(await session.context.doppelgangerMemory.projectionStore.acknowledgeDeletion(owner, deletion!, timestamp)).toBe(true)
+    expect(await rows(session, 'memory_vector_deletions')).toHaveLength(0)
   })
 
-  it('rejects stale rebuild pages and mismatched generation identities atomically', async () => {
-    const { context, database } = await fixture()
-    try {
-      const memory = context.doppelgangerMemory
-      const record = memory.remember({ operationId: 'rebuild-record', subjectKey: 'project.rebuild', kind: 'fact', content: 'The original rebuild source.' })
-      const store = memory.projectionStore
-      expect(store.prepareGeneration('candidate', 'aiden', '{}', '{}', now)).toBe(true)
-      const page = store.rebuildPage('candidate', 'aiden', undefined, 10)
-      memory.correct({ operationId: 'correct-rebuild', id: record.id, expectedRevisionId: record.revision.id, content: 'The corrected rebuild source.' })
-      expect(() => store.markRebuildPage('candidate', page, now)).toThrow()
-      expect(store.indexed('candidate')).toEqual([])
-      expect(() => store.prepareGeneration('candidate', 'aiden', '{"model":"different"}', '{}', now)).toThrow()
-      expect(store.generation('candidate', 'aiden')).toMatchObject({ state: 'building', embedderIdentityJson: '{}' })
-      expect(database.prepare('SELECT generation_id FROM memory_semantic_active_generation').get()).toEqual({ generation_id: 'generation-one' })
-    } finally { await context.fiber.dispose() }
+  it('revalidates canonical projection acknowledgments after external work', async () => {
+    for (const kind of ['sqlite', 'postgresql'] as const) {
+      const { session, owner } = await fixture(kind)
+      const store = session.memory.projectionStore
+      const record = await session.memory.remember({
+        operationId: 'acknowledgment-source', subjectKey: 'project.acknowledgment',
+        kind: 'fact', content: 'The original projection source.',
+      })
+      const lease = await store.claim('upsert', owner, 10, leaseUntil, timestamp)
+      expect(await store.source(owner, lease!, timestamp)).toMatchObject({ revisionId: record.revision.id })
+      const corrected = await session.memory.correct({
+        operationId: 'acknowledgment-correction', id: record.id,
+        expectedRevisionId: record.revision.id, content: 'The corrected projection source.',
+      })
+      expect(await store.acknowledgeUpsert(owner, lease!, timestamp)).toBe(false)
+      expect(await store.indexed(owner)).toEqual([])
+      expect(await rows(session, 'memory_vector_deletions')).toContainEqual(expect.objectContaining({
+        record_id: record.id, revision_id: record.revision.id, vector_target_id: owner.vectorTargetId,
+      }))
+      const current = await store.claim('upsert', owner, 10, leaseUntil, timestamp)
+      expect(await store.source(owner, current!, timestamp)).toMatchObject({ revisionId: corrected.revision.id })
+      expect(await store.acknowledgeUpsert(owner, current!, timestamp)).toBe(true)
+    }
   })
+
+  it('fences stale post-I/O acknowledgments with unique expiring lease tokens', async () => {
+    const { session, owner } = await fixture()
+    const record = await session.memory.remember({
+      operationId: 'lease-record',
+      subjectKey: 'lease.record',
+      kind: 'fact',
+      content: 'Lease source.',
+    })
+    const first = await session.context.doppelgangerMemory.projectionStore.claim('upsert', owner, 10, leaseUntil, timestamp)
+    await session.context.doppelgangerMemory.projectionStore.recoverLeases(owner, '2026-08-29T00:00:30.000Z')
+    expect(await session.context.doppelgangerMemory.projectionStore.claim('upsert', owner, 10, '2026-08-29T00:02:00.000Z', '2026-08-29T00:00:30.000Z')).toBeUndefined()
+    await session.context.doppelgangerMemory.projectionStore.recoverLeases(owner, '2026-08-29T00:01:00.000Z')
+    const second = await session.context.doppelgangerMemory.projectionStore.claim('upsert', owner, 10, '2026-08-29T00:03:00.000Z', '2026-08-29T00:01:00.000Z')
+    expect(second).toMatchObject({ recordId: record.id, revisionId: record.revision.id })
+    expect(second?.leaseToken).not.toBe(first?.leaseToken)
+    expect(await session.context.doppelgangerMemory.projectionStore.acknowledgeUpsert(owner, first!, '2026-08-29T00:01:01.000Z')).toBe(false)
+    expect(await session.context.doppelgangerMemory.projectionStore.acknowledgeUpsert(owner, second!, '2026-08-29T00:01:01.000Z')).toBe(true)
+  })
+
+  it('routes identifier-only deletion debt to the original backend target after source loss', async () => {
+    const { session, owner } = await fixture()
+    const record = await session.memory.remember({
+      operationId: 'routed-delete-record',
+      subjectKey: 'routed.delete',
+      kind: 'fact',
+      content: 'This content must disappear before vector deletion.',
+    })
+    const upsert = await session.context.doppelgangerMemory.projectionStore.claim('upsert', owner, 10, leaseUntil, timestamp)
+    expect(await session.context.doppelgangerMemory.projectionStore.acknowledgeUpsert(owner, upsert!, timestamp)).toBe(true)
+    expect(await session.memory.forget({ operationId: 'routed-delete-forget', id: record.id })).toBe(true)
+
+    const otherTarget = Object.freeze({ ...owner, vectorTargetId: 'f'.repeat(64) })
+    expect(await session.context.doppelgangerMemory.projectionStore.claim('delete', otherTarget, 10, leaseUntil, timestamp)).toBeUndefined()
+    const routed = await session.context.doppelgangerMemory.projectionStore.claim('delete', owner, 10, leaseUntil, timestamp)
+    expect(routed).toMatchObject({ generationId: owner.generationId, recordId: record.id, revisionId: record.revision.id })
+    expect(JSON.stringify(routed)).not.toContain('This content must disappear')
+  })
+
+  it('serializes generation transition recovery and rejects stale rebuild acknowledgments', async () => {
+    const { session, owner } = await fixture('sqlite', false)
+    const store = session.context.doppelgangerMemory.projectionStore
+    const record = await session.memory.remember({ operationId: 'rebuild-record', subjectKey: 'project.rebuild', kind: 'fact', content: 'The original rebuild source.' })
+    const transition = await store.prepareGeneration(owner, JSON.stringify(embedder), JSON.stringify(vectorIndex), timestamp, leaseUntil)
+    expect(transition).toBeDefined()
+    expect(await store.prepareGeneration(owner, JSON.stringify(embedder), JSON.stringify(vectorIndex), '2026-08-29T00:00:30.000Z', '2026-08-29T00:02:00.000Z')).toBeUndefined()
+    const page = await store.rebuildPage(owner, transition!, undefined, 10, timestamp)
+    await session.memory.correct({ operationId: 'correct-rebuild', id: record.id, expectedRevisionId: record.revision.id, content: 'The corrected rebuild source.' })
+    await expect(store.markRebuildPage(owner, transition!, page, '2026-08-29T00:00:30.000Z', '2026-08-29T00:02:00.000Z')).rejects.toThrow('changed before acknowledgment')
+    expect(await store.indexed(owner)).toEqual([])
+
+    const recovered = await store.prepareGeneration(owner, JSON.stringify(embedder), JSON.stringify(vectorIndex), leaseUntil, '2026-08-29T00:03:00.000Z')
+    expect(recovered?.generationRevision).toBe((transition?.generationRevision ?? 0) + 1)
+    expect(recovered?.transitionToken).not.toBe(transition?.transitionToken)
+    expect(await store.activateGeneration(owner, transition!, '2026-08-29T00:01:01.000Z')).toBe(false)
+    expect(await store.generation(owner)).toMatchObject({ state: 'building', generationRevision: recovered?.generationRevision })
+  })
+  it('allows only one concurrent activation from the same durable active-generation revision', async () => {
+    const { session, owner: firstOwner } = await fixture('sqlite', false)
+    const secondEmbedder = Object.freeze({ ...embedder, revision: '2' })
+    const secondOwner = memoryProjectionOwner(
+      'aiden',
+      memorySemanticGenerationId('aiden', secondEmbedder, vectorIndex),
+      secondEmbedder,
+      vectorIndex,
+    )
+    const store = session.context.doppelgangerMemory.projectionStore
+    const [first, second] = await Promise.all([
+      store.prepareGeneration(firstOwner, JSON.stringify(embedder), JSON.stringify(vectorIndex), timestamp, transitionUntil),
+      store.prepareGeneration(secondOwner, JSON.stringify(secondEmbedder), JSON.stringify(vectorIndex), timestamp, transitionUntil),
+    ])
+    expect(first?.activeGenerationRevision).toBe(0)
+    expect(second?.activeGenerationRevision).toBe(0)
+    const activated = await Promise.all([
+      store.activateGeneration(firstOwner, first!, timestamp),
+      store.activateGeneration(secondOwner, second!, timestamp),
+    ])
+    expect(activated.filter(Boolean)).toHaveLength(1)
+    const active = await store.activeGeneration('aiden')
+    expect([firstOwner.generationId, secondOwner.generationId]).toContain(active?.generationId)
+    expect(active?.generationRevision).toBe(1)
+    const inactiveOwner = active?.generationId === firstOwner.generationId ? secondOwner : firstOwner
+    expect(await store.generation(inactiveOwner)).toMatchObject({ state: 'building' })
+  })
+
+  it('rebuilds only temporally eligible active revisions', async () => {
+    const { session, owner } = await fixture('sqlite', false)
+    const expired = await session.memory.remember({ operationId: 'rebuild-expired', subjectKey: 'rebuild.expired', kind: 'fact', content: 'Expired.', expiresAt: '2026-08-28T00:00:00.000Z' })
+    const future = await session.memory.remember({ operationId: 'rebuild-future', subjectKey: 'rebuild.future', kind: 'fact', content: 'Future.', validFrom: '2026-08-30T00:00:00.000Z' })
+    const current = await session.memory.remember({ operationId: 'rebuild-current', subjectKey: 'rebuild.current', kind: 'fact', content: 'Current.' })
+    const store = session.context.doppelgangerMemory.projectionStore
+    const transition = await store.prepareGeneration(owner, JSON.stringify(embedder), JSON.stringify(vectorIndex), timestamp, transitionUntil)
+    const page = await store.rebuildPage(owner, transition!, undefined, 10, timestamp)
+    expect(page.map(source => source.recordId)).toEqual([current.id])
+    expect(page.map(source => source.recordId)).not.toContain(expired.id)
+    expect(page.map(source => source.recordId)).not.toContain(future.id)
+    const renewed = await store.markRebuildPage(owner, transition!, page, timestamp, transitionUntil)
+    expect(await store.activateGeneration(owner, renewed!, timestamp)).toBe(true)
+  })
+
 })

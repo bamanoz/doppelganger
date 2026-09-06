@@ -5,12 +5,8 @@ import {
   type JsonValue,
   type ToolInvocationContext,
 } from '@doppelganger/doppelganger-protocols'
-import {
-  MemoryError,
-  type MemoryKind,
-  type MemoryRecord,
-  type MemoryRole,
-} from './service.ts'
+import { MemoryError } from './service.ts'
+import type { MemoryKind, MemoryRecord, MemoryRole } from './repository.ts'
 import type {} from './service.ts'
 
 interface JsonSchemaObject {
@@ -255,8 +251,8 @@ export const MemoryProtocolPlugin: Plugin = {
     register('memory.forget', 'Permanently delete canonical and locally derived memory state.', objectSchema({
       ...operationProperty,
       ...idProperty,
-    }, ['operationId', 'id']), input => ({
-      deleted: ctx.doppelgangerMemory.forget({
+    }, ['operationId', 'id']), async input => ({
+      deleted: await ctx.doppelgangerMemory.forget({
         operationId: requiredString(input, 'operationId'),
         id: requiredString(input, 'id'),
       }),

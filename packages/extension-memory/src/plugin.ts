@@ -5,7 +5,6 @@ import { MemoryService, type MemoryServiceConfig } from './service.ts'
 
 export type MemoryPluginConfig = Omit<MemoryServiceConfig, 'now' | 'id'>
 const MEMORY_PLUGIN_CONFIG_KEYS = new Set([
-  'namespace',
   'automaticPromotionDistinctSessions',
   'lexicalTopK',
   'semanticTopK',
@@ -24,7 +23,6 @@ function validateConfig(config: MemoryPluginConfig): void {
 
 
 export const MemoryPluginConfigSchema: Schema<MemoryPluginConfig> = Schema.object({
-  namespace: Schema.string().min(1).max(256),
   automaticPromotionDistinctSessions: Schema.natural().min(2).max(100),
   lexicalTopK: Schema.natural().min(1).max(10_000),
   semanticTopK: Schema.natural().min(1).max(10_000),
@@ -41,7 +39,7 @@ export const MemoryPlugin: Plugin<MemoryPluginConfig> = {
     'doppelgangerPersona',
     'doppelgangerContext',
     'doppelgangerTools',
-    'doppelgangerInstanceSqlite',
+    'doppelgangerMemoryRepository',
   ],
   async apply(ctx: Context, config: MemoryPluginConfig = {}) {
     validateConfig(config)

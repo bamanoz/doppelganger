@@ -14,9 +14,9 @@ Persona is the first product layer built on the runtime. It is composed from ord
 - Host-neutral context, tool, and lifecycle protocols.
 - Persona identity and ordered traits as portable plugins.
 - Optional logical-target Persona inspection and one-shot approved trait revision with exact-byte CAS and HMR-confirmed rollback.
-- SQLite-backed, partitioned canonical memory with immutable revisions and provenance.
+- SQLite- or PostgreSQL-backed, actor-partitioned canonical memory with immutable revisions and provenance.
 - Explicit active memory and optional candidate capture as separate write paths.
-- Independent FTS5 and optional semantic top-K retrieval, deterministic reciprocal-rank fusion, canonical revalidation, temporal eligibility, and hard budgets.
+- Provider-backed lexical and optional semantic top-K retrieval, deterministic reciprocal-rank fusion, fresh canonical revalidation, temporal eligibility, and hard budgets.
 - A versioned framed JSON-RPC bridge for Oh My Pi (OMP).
 - Dynamic OMP tools translated from runtime JSON Schemas.
 - Optional session-owned Dynamic Runtime Plugins with source-verified inspection, immutable Packages, guarded JavaScript evaluation, and exact one-shot approval.
@@ -37,6 +37,8 @@ npm install
 npm run check
 ```
 
+The root gate includes a mandatory real canonical-PostgreSQL run through `scripts/with-memory-postgresql.mjs`. Set `DOPPELGANGER_TEST_POSTGRESQL_DSN` to an explicit disposable service or allow the wrapper to provision and clean up a bounded PostgreSQL 17 Docker container. Missing both a usable DSN and Docker is a failure, not a skipped backend. See [Verification](docs/operations/verification.md#canonical-postgresql-gate) for the gate and [Configuration](docs/operations/configuration.md#canonical-memory-providers) for provider setup and offline transfer.
+
 Useful commands:
 
 ```bash
@@ -48,7 +50,7 @@ npm run check:integrity
 npm run check:security
 ```
 
-`npm run check` is the deterministic, network-free repository gate. It runs every workspace typecheck and test, verifies that one Cordis installation is used, validates dependencies/imports against `scripts/package-boundaries.json`, and checks documentation inventory, links, live OpenSpec ownership, and executable evidence. `npm run check:focused-specs` exposes the focused-spec gate directly; `npm run check:focused-specs:change -- <change-name>` is the strict pre-archive form. `npm run check:security` is separate because it queries the npm registry and compares unresolved production advisories with the reviewed baseline.
+`npm run check` is the deterministic repository gate. It runs every workspace typecheck and test, verifies that one Cordis installation is used, validates dependencies/imports against `scripts/package-boundaries.json`, checks documentation inventory, links, live OpenSpec ownership, and executable evidence, and includes the disposable real canonical-PostgreSQL step above. `npm run check:focused-specs` exposes the focused-spec gate directly; `npm run check:focused-specs:change -- <change-name>` is the strict pre-archive form. `npm run check:security` is separate because it queries the npm registry and compares unresolved production advisories with the reviewed baseline.
 
 ## Repository layout
 
@@ -64,9 +66,9 @@ packages/
 ├── extension-logging-file  Opt-in rolling JSONL destination for normalized Runtime Session logs
 ├── extension-logging-sentry  Opt-in private-client Sentry destination for normalized Runtime Session logs
 ├── extension-sqlite    Directly loadable SQLite infrastructure
-├── extension-memory    Canonical memory, lexical/hybrid retrieval, tools, capture, and semantic contracts
+├── extension-memory    Canonical repository contract/providers, lexical/hybrid retrieval, tools, capture, and semantic contracts
 ├── extension-embedding-local  Lazy EmbeddingGemma/MiniLM Loader plugin and validated model cache
-├── extension-memory-vectors   Semantic coordinator and SQLite/Chroma/Qdrant/pgvector Loader backends
+├── extension-memory-vectors   Derived semantic coordinator and SQLite exact/Chroma/Qdrant/pgvector Loader backends
 ├── host-omp            Generic OMP adapter, child runtime, and framed RPC transport
 └── omp                 Private local OMP plugin install unit and neutral entrypoint
 
@@ -183,22 +185,28 @@ A Runtime Preset is a complete Cordis Loader tree plus adjacent owned assets. Pl
     traits:
       - { name: engineer, path: traits/engineer.md, priority: 700 }
       - { name: concise, path: traits/concise.md, priority: 600 }
-- id: doppelganger-sqlite
-  name: "@doppelganger/doppelganger-sqlite"
-  isolate: { doppelgangerInstanceSqlite: session }
+- id: doppelganger-memory-sqlite
+  name: "@doppelganger/doppelganger-memory/sqlite"
+  inject: [doppelgangerActor]
+  isolate:
+    doppelgangerActor: session
+    doppelgangerMemoryRepository: session
   config:
     home: /absolute/plugin-owned/state/path
+    namespace: memory
 - id: doppelganger-memory
   name: "@doppelganger/doppelganger-memory"
-  inject: [doppelgangerActor, doppelgangerPersona, doppelgangerContext, doppelgangerTools, doppelgangerInstanceSqlite]
+  inject: [doppelgangerActor, doppelgangerPersona, doppelgangerContext, doppelgangerTools, doppelgangerMemoryRepository]
   isolate:
     doppelgangerActor: session
     doppelgangerPersona: session
     doppelgangerContext: session
     doppelgangerTools: session
-    doppelgangerInstanceSqlite: session
+    doppelgangerMemoryRepository: session
     doppelgangerMemory: session
 ```
+
+Replace only the provider row with `@doppelganger/doppelganger-memory/postgresql` for shared canonical storage; the memory row remains backend-neutral. PostgreSQL configuration references a DSN environment-variable name and a dedicated non-`public` schema. Exact SQLite/PostgreSQL fields, timeout bounds, TLS policy, migration privileges, and offline transfer are owned by [Configuration](docs/operations/configuration.md#canonical-memory-providers).
 
 Project selection is deliberately minimal:
 
@@ -288,9 +296,9 @@ The optional `retention` block cleans completed activation families at startup a
 
 ### Optional full-stack user presets
 
-An editable user Runtime Preset may extend `standard` with Persona Authoring, Evolution, a structured-inference provider, Dynamic Runtime Plugins, CodeGraph, MCP tool import, SQLite, lexical memory, a local embedder, one vector backend, and the semantic coordinator. Such a composition remains user-owned configuration rather than a shipped or repository-specific preset. Each feature stays an independently addressable Loader row, and tests construct equivalent full-stack presets under temporary roots.
+An editable user Runtime Preset may extend `standard` with Persona Authoring, Evolution, a structured-inference provider, Dynamic Runtime Plugins, CodeGraph, MCP tool import, one canonical memory provider, lexical memory, a local embedder, one derived vector backend, and the semantic coordinator. Such a composition remains user-owned configuration rather than a shipped or repository-specific preset. Each feature stays an independently addressable Loader row, and verification constructs equivalent full-stack presets under temporary roots.
 
-Persona Authoring writes only explicitly configured logical trait targets. Evolution exists only when its Loader row is present, stores non-executing proposals in actor-partitioned SQLite or project YAML, and defaults to bounded deterministic signal discovery from completed lifecycle events. Structured inference exists only when a provider row is present; Evolution model calls additionally require `signalInferenceEnabled: true`. Dynamic Runtime Plugins exist only when their Loader row is present and keep every definition in Runtime Session process memory. CodeGraph exists only when its Loader row is present and uses the Runtime Session workspace plus a separately installed, user-initialized local index. MCP tool import exists only when its Loader row is present and owns only its configured external server connections and imported portable tool sets. Omitting a row leaves that feature and its tools absent.
+Persona Authoring writes only explicitly configured logical trait targets. Memory uses exactly one actor-bound SQLite or PostgreSQL repository provider; its persisted reads and mutations are asynchronous and must be awaited. Evolution remains separately backed by actor-partitioned instance SQLite or project YAML. Structured inference exists only when a provider row is present; Evolution model calls additionally require `signalInferenceEnabled: true`. Dynamic Runtime Plugins exist only when their Loader row is present and keep every definition in Runtime Session process memory. CodeGraph exists only when its Loader row is present and uses the Runtime Session workspace plus a separately installed, user-initialized local index. MCP tool import exists only when its Loader row is present and connects independently in the background. The shipped `standard` preset remains empty and actor-neutral.
 
 ### CodeGraph code intelligence
 
@@ -499,7 +507,7 @@ The skill grants no executor or planning authority. It inspects the selected pro
 
 The Loader entrypoints validate bounded configuration. Memory owns retrieval limits (`lexicalTopK`, `semanticTopK`, `semanticQueryMaximumCharacters`, `semanticTimeoutMs`); the local embedder accepts `model`, `cacheDir`, `offline`, `device`, `batchSize`, `maximumCharacters`, and `acquisitionTimeoutMs`. The coordinator accepts `instanceId`, `pollIntervalMs`, `batchSize`, `maximumAttempts`, `retryBaseMs`, and `operationTimeoutMs`. SQLite exact requires `databasePath` (absolute) and `dimensions`; `namespace`, `sanitizedTarget`, and `busyTimeoutMs` are optional. Backend dimensions must equal the selected embedder dimensions. The example's explicit limits are safe bounded starting points, not universal performance claims; tune them from representative retrieval and latency measurements.
 
-Server backends are explicit alternatives, never fallbacks selected by the host. Chroma uses a server endpoint plus non-secret tenant/database/collection namespaces and an optional token environment-variable name. Qdrant uses a server URL, non-secret collection namespace, and an API-key environment-variable name. pgvector uses an environment-variable name whose value is the PostgreSQL DSN; never place resolved credentials in the Loader row.
+Server vector backends are explicit alternatives, never fallbacks selected by the host. Chroma uses a server endpoint plus non-secret tenant/database/collection namespaces and an optional token environment-variable name. Qdrant uses a server URL, non-secret collection namespace, and an API-key environment-variable name. pgvector uses an environment-variable name whose value is its PostgreSQL DSN; never place resolved credentials in the Loader row. This optional pgvector projection is independent of the canonical PostgreSQL memory provider.
 
 Endpoints and namespaces must be sanitized, non-secret labels. Environment-variable references are resolved by the selected backend at activation; credential values are excluded from generation fingerprints, health, errors, and Runtime Session metadata.
 
@@ -546,7 +554,7 @@ Each selected backend row still requires the local embedder and semantic coordin
 
 ### Semantic model cache and offline operation
 
-The local embedder is lazy: no ONNX/tokenizer work occurs when its row is absent, and the first embedding request acquires the pinned model revision into `cacheDir` (default `~/.cache/doppelganger/models`). The default EmbeddingGemma profile validates the q8 `onnx/model_quantized.onnx` pair and emits 384-dimensional normalized vectors. Acquisition is bounded by `acquisitionTimeoutMs`; artifacts are checked against pinned size and SHA-256 metadata. A missing artifact with `offline: true` reports `OFFLINE_MODEL_UNAVAILABLE`; a corrupt artifact reports `CORRUPT_CACHE`. A cache containing only the legacy q4 files is not a valid q8 cache. These failures leave canonical writes and lexical FTS5 recall available. To prepare an offline deployment, warm the exact configured model/revision online, preserve its cache directory, validate one real embedding, then deploy that directory with `offline: true`.
+The local embedder is lazy: no ONNX/tokenizer work occurs when its row is absent, and the first embedding request acquires the pinned model revision into `cacheDir` (default `~/.cache/doppelganger/models`). The default EmbeddingGemma profile validates the q8 `onnx/model_quantized.onnx` pair and emits 384-dimensional normalized vectors. Acquisition is bounded by `acquisitionTimeoutMs`; artifacts are checked against pinned size and SHA-256 metadata. A missing artifact with `offline: true` reports `OFFLINE_MODEL_UNAVAILABLE`; a corrupt artifact reports `CORRUPT_CACHE`. A cache containing only the legacy q4 files is not a valid q8 cache. These failures leave canonical writes and lexical recall available. To prepare an offline deployment, warm the exact configured model/revision online, preserve its cache directory, validate one real embedding, then deploy that directory with `offline: true`.
 
 `device` is operational rather than part of vector-space identity. An unavailable accelerator falls back to CPU without allowing vectors from a different model space. Changing the pinned model, revision, artifact digest, pooling, projection, normalization, metric, or dimensions requires a new generation. Existing EmbeddingGemma q4/256 projections are incompatible derived data and must be rebuilt from canonical memory; they are never resized into q8/384 vectors.
 
@@ -557,17 +565,17 @@ The local embedder is lazy: no ONNX/tokenizer work occurs when its row is absent
 | `sqlite_exact` | Writable local filesystem; no server | Exact cosine scan and transactional writes. Predictable default for small and moderate Persona indexes; scan cost grows linearly with indexed vectors. |
 | `chroma` | Reachable Chroma **server** | Server-managed collections and filters. There is no embedded Node mode; plan server backup, availability, and collection lifecycle. |
 | `qdrant` | Reachable Qdrant service | Cosine collections, payload filters, and server-side scaling; operate snapshots/replication outside Doppelganger. |
-| `pgvector` | PostgreSQL with the `vector` extension | Exact cosine by default; shared SQL operations and backups. HNSW build/reindex is explicit maintenance for scale and adds index-build/write cost. |
+| `pgvector` | PostgreSQL with the `vector` extension | Optional derived exact-cosine index by default; HNSW build/reindex is explicit maintenance for scale and adds index-build/write cost. This is not the canonical PostgreSQL repository. |
 
-Choose from measured record count, latency, durability, and service-operating requirements. SQLite exact avoids infrastructure but is not an ANN design. Remote services add network latency and outage modes; semantic deadlines contain those failures and lexical recall continues.
+Choose from measured record count, latency, durability, and service-operating requirements. SQLite exact avoids vector-service infrastructure but is not an ANN design and does not make canonical memory shared. Remote vector services add network latency and outage modes; semantic deadlines contain those failures and canonical lexical recall continues.
 
 ### Generation operations, health, and deletion
 
-Vector data is a derived, non-authoritative projection. Canonical SQLite owns records, current revisions, eligibility, receipts, conflicts, FTS5, generation pointers, projection work, and opaque deletion tombstones. Semantic hits are identifiers only and are revalidated against canonical partition, scope, status, time, active generation, record, and current revision before ranking.
+Vector data is a derived, non-authoritative projection. The selected canonical SQLite or PostgreSQL repository owns records, current revisions, eligibility, receipts, conflicts, lexical indexes, generation pointers, projection work, and opaque deletion tombstones. Semantic hits are identifiers only and are reloaded in one fresh canonical bulk snapshot against partition, scope, status, time, active generation, record, and current revision before return.
 
-A model or backend swap creates a new generation from deterministic canonical pages; it never overwrites, resizes, or copies the active vector space in place. Verify identity and indexed/current/missing/stale counts, then let the coordinator switch the canonical active-generation pointer atomically. An interrupted build fails candidate activation, leaves the previous runtime/generation active, and remains retryable from canonical state. SQLite exact and Qdrant bind dimensions to a namespace or collection, so a q4/256-to-q8/384 deployment must use a new non-secret namespace such as `aiden-prod.embeddinggemma-q8-384`; Chroma isolates generations by collection and pgvector includes dimensions in its storage identity. The immediate fallback is to remove/disable the coordinator, embedder, and backend rows, restoring lexical-only operation without changing canonical memory. Returning to q4/256 requires restoring the previous release/configuration and rebuilding its configured generation; `memory.semantic.rollback` never crosses incompatible vector spaces.
+A model or backend swap creates a new generation from deterministic canonical pages; it never overwrites, resizes, or copies the active vector space in place. Verify identity and indexed/current/missing/stale counts, then let the repository switch the canonical active-generation pointer atomically. An interrupted build fails candidate activation and remains retryable from canonical state. SQLite exact and Qdrant bind dimensions to a namespace or collection, so a q4/256-to-q8/384 deployment must use a new non-secret namespace such as `aiden-prod.embeddinggemma-q8-384`; Chroma isolates generations by collection and pgvector includes dimensions in its storage identity. The immediate fallback is to remove or disable semantic rows for canonical lexical-only operation.
 
-Semantic status exposes only the backend kind, sanitized target, active generation, embedder identity, supported maintenance, indexed/current/stale/missing counts, pending upserts/deletes, and bounded last-failure code/time. Treat increasing missing or pending-upsert counts as projection lag; stale counts as superseded projection cleanup; and pending deletes as remote cleanup debt. Maintenance is serialized and backend-declared: SQLite supports compaction, pgvector can explicitly build/reindex HNSW, and generation cleanup removes only retained derived data.
+Semantic status exposes only the backend kind, sanitized target, active generation, embedder identity, supported maintenance, indexed/current/stale/missing counts, pending upserts/deletes, and bounded last-failure code/time. Treat increasing missing or pending-upsert counts as projection lag; stale counts as superseded projection cleanup; and pending deletes as remote cleanup debt. Maintenance is serialized and backend-declared: SQLite exact supports compaction, pgvector can explicitly build/reindex HNSW, and generation cleanup removes only retained derived data.
 
 The coordinator registers four host-projected operator tools when the semantic stack is active: `memory.semantic.status` reports the sanitized state above; `memory.semantic.rebuild` builds and atomically activates the configured generation; `memory.semantic.rollback` activates a named retained compatible generation; and `memory.semantic.maintenance` runs one backend-declared operation (`build-index`, `cleanup-generation`, `compact`, or `reindex`). Rebuild, rollback, and maintenance failures return the stable `SEMANTIC_OPERATION_FAILED` tool error without backend exception text or credentials. Use status before and after an operation; concurrent maintenance reports `already-running` rather than overlapping work.
 
@@ -579,14 +587,15 @@ The backend matrix and operational emphasis were inspired by MemPalace. Doppelga
 
 ## Memory behavior
 
-Memory is an optional actor-aware plugin, not a kernel service.
+Memory is an optional actor-aware plugin, not a kernel service. It consumes one backend-neutral repository provider; canonical PostgreSQL and optional pgvector are different composition choices.
 
 - `remember` creates active memory in the bound `(Persona Instance, host actor)` partition.
 - Capture creates review candidates only and is disabled by default.
 - Candidates never enter recall before manual approval or policy-based corroboration.
 - Project memory is further limited by project; relationship memory follows the bound actor and Persona Instance.
 - Memory tools expose no actor selector and reject `actorId` and the removed `principalId` alias.
-- Missing host actor identity fails memory activation before canonical storage opens; actor-independent presets remain valid.
+- Missing host actor identity fails provider activation before canonical storage opens; actor-independent presets remain valid.
+- Persisted reads and mutations return Promises and callers await their results.
 - Mutations use stable operation IDs for idempotent delivery.
 - Corrections create immutable revisions with compare-and-swap protection.
 - Evidence, conflicts, receipts, full-text rows, and embeddings participate in hard deletion.
@@ -603,4 +612,4 @@ This syntax is intentionally conservative. Alternative extractors can implement 
 
 ## Current boundary
 
-The completed milestone proves one portable Persona Definition across the generic runtime and the OMP host, including persistence, candidate capture, lifecycle transport, dynamic tools, hot reload, optional Dynamic Runtime Plugins, and optional Evolution proposals/reminders. A native DeepSeek Harness host is the next integration milestone; it should reuse the same definitions and feature plugins without duplicating Persona or Evolution logic.
+The current implemented boundary supports one portable Persona Definition across the generic runtime and the OMP host, including persistence, candidate capture, lifecycle transport, dynamic tools, hot reload, optional Dynamic Runtime Plugins, and optional Evolution proposals/reminders. Public release remains deferred. A native DeepSeek Harness host is the next integration milestone; it should reuse the same definitions and feature plugins without duplicating Persona or Evolution logic.

@@ -11,12 +11,11 @@ import {
   serializeLifecycleValue,
   type TurnCommittedEvent,
 } from '@doppelganger/doppelganger-protocols'
-import { InstanceSqliteService, type InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
 import {
   createMemoryCapturePlugin,
   type MemoryCandidateExtractor,
 } from '@doppelganger/doppelganger-memory/capture'
-import { MemoryService, type MemorySemanticRetriever } from '../src/index.ts'
+import { MemoryService, SqliteMemoryPlugin, type MemorySemanticRetriever } from '../src/index.ts'
 
 const temporaryRoots: string[] = []
 
@@ -24,21 +23,28 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
+interface SetupIdentity {
+  readonly instanceHome?: string
+  readonly actorId?: string
+  readonly sessionId?: string
+}
+
 async function setup(
   options: Parameters<typeof createMemoryCapturePlugin>[0] | undefined,
   semantic?: MemorySemanticRetriever,
+  identity: SetupIdentity = {},
 ) {
-  const instanceHome = await mkdtemp(join(tmpdir(), 'doppelganger-memory-capture-'))
-  temporaryRoots.push(instanceHome)
+  const instanceHome = identity.instanceHome ?? await mkdtemp(join(tmpdir(), 'doppelganger-memory-capture-'))
+  if (identity.instanceHome === undefined) temporaryRoots.push(instanceHome)
   const context = new Context()
   await context.plugin(createPersonaActivationPlugin({
     instanceId: 'aiden',
-    sessionId: 'capture-session',
+    sessionId: identity.sessionId ?? 'capture-session',
     projectId: 'project-one',
     projectRoot: join(instanceHome, 'project'),
   }))
-  await context.plugin(createActorIdentityPlugin('local-user'))
-  await context.plugin(InstanceSqliteService, { home: instanceHome })
+  await context.plugin(createActorIdentityPlugin(identity.actorId ?? 'local-user'))
+  await context.plugin(SqliteMemoryPlugin, { home: instanceHome })
   await context.plugin(MemoryService)
   if (semantic !== undefined) {
     const provider: Plugin = {
@@ -72,15 +78,15 @@ function committed(
 describe('optional memory capture', () => {
   it('leaves memory operational when capture and extractors are absent', async () => {
     const context = await setup(undefined)
-    const active = context.doppelgangerMemory.remember({
+    const active = await context.doppelgangerMemory.remember({
       operationId: 'direct-remember',
       subjectKey: 'project.direct.fact',
       kind: 'fact',
       content: 'Direct memory remains available.',
     })
     await publishLifecycleEvent(context, committed('no-capture', '[fact:project.candidate] Candidate text.'))
-    expect(context.doppelgangerMemory.inspect(active.id).status).toBe('active')
-    expect(context.doppelgangerMemory.listCandidates()).toEqual([])
+    expect((await context.doppelgangerMemory.inspect(active.id)).status).toBe('active')
+    expect(await context.doppelgangerMemory.listCandidates()).toEqual([])
     await context.fiber.dispose()
   })
 
@@ -94,7 +100,7 @@ describe('optional memory capture', () => {
         '[decision:project.database.engine] Use SQLite.',
       ].join('\n'),
     ))
-    expect(context.doppelgangerMemory.listCandidates().map(candidate => ({
+    expect((await context.doppelgangerMemory.listCandidates()).map(candidate => ({
       subjectKey: candidate.subjectKey,
       content: candidate.revision.content,
       status: candidate.status,
@@ -123,7 +129,7 @@ describe('optional memory capture', () => {
       'факт:project.runtime.protocol — Runtime использует committed turns.',
       'процедура:project.release.steps - Сначала запускаем узкие проверки.',
     ].join('\n')))
-    expect(context.doppelgangerMemory.listCandidates()
+    expect((await context.doppelgangerMemory.listCandidates())
       .map(candidate => `${candidate.kind}:${candidate.subjectKey}`)
       .sort()).toEqual([
       'decision:project.database.engine',
@@ -146,8 +152,38 @@ describe('optional memory capture', () => {
     }
     const context = await setup({ enabled: true, extractor, onDiagnostic: item => diagnostics.push(item.code) })
     await expect(publishLifecycleEvent(context, committed('invalid-custom', 'Extract candidates.'))).resolves.toBeUndefined()
-    expect(context.doppelgangerMemory.listCandidates().map(candidate => candidate.subjectKey)).toEqual(['project.valid.fact'])
+    expect((await context.doppelgangerMemory.listCandidates()).map(candidate => candidate.subjectKey)).toEqual(['project.valid.fact'])
     expect(diagnostics).toEqual(['validation', 'validation', 'validation'])
+    await context.fiber.dispose()
+  })
+
+  it('awaits repository-backed proposals before reporting capture completion', async () => {
+    const context = await setup({ enabled: true })
+    const memory = context.doppelgangerMemory
+    const originalPropose = memory.propose.bind(memory)
+    let signalProposalStarted!: () => void
+    let releaseProposal!: () => void
+    const proposalStarted = new Promise<void>(resolve => { signalProposalStarted = resolve })
+    const proposalReleased = new Promise<void>(resolve => { releaseProposal = resolve })
+    memory.propose = async request => {
+      signalProposalStarted()
+      await proposalReleased
+      return originalPropose(request)
+    }
+    let settled = false
+    const publishing = publishLifecycleEvent(
+      context,
+      committed('await-proposal', '[fact:project.capture.awaited] Capture awaits repository proposals.'),
+    ).then(() => { settled = true })
+    await proposalStarted
+    expect(settled).toBe(false)
+    expect(await memory.listCandidates()).toEqual([])
+    releaseProposal()
+    await publishing
+    expect(settled).toBe(true)
+    expect(await memory.listCandidates()).toEqual([
+      expect.objectContaining({ subjectKey: 'project.capture.awaited', status: 'candidate' }),
+    ])
     await context.fiber.dispose()
   })
 
@@ -171,8 +207,14 @@ describe('optional memory capture', () => {
       status: () => ({ active: true, supportedMaintenance: [] }),
       async maintenance() { throw new Error('unused') },
     }
-    const context = await setup({ enabled: true, onSuggestion: item => suggestions.push(item) }, semantic)
-    const active = context.doppelgangerMemory.remember({
+    const instanceHome = await mkdtemp(join(tmpdir(), 'doppelganger-memory-capture-neighbors-'))
+    temporaryRoots.push(instanceHome)
+    const context = await setup(
+      { enabled: true, onSuggestion: item => suggestions.push(item) },
+      semantic,
+      { instanceHome },
+    )
+    const active = await context.doppelgangerMemory.remember({
       operationId: 'neighbor-active',
       subjectKey: 'project.runtime.transport',
       kind: 'fact',
@@ -180,7 +222,12 @@ describe('optional memory capture', () => {
     })
     activeId = active.id
     activeRevisionId = active.revision.id
-    const foreign = context.doppelgangerMemory.remember({
+    const foreignContext = await setup(undefined, undefined, {
+      instanceHome,
+      actorId: 'other-actor',
+      sessionId: 'foreign-session',
+    })
+    const foreign = await foreignContext.doppelgangerMemory.remember({
       operationId: 'neighbor-foreign',
       subjectKey: 'project.foreign.transport',
       kind: 'fact',
@@ -188,8 +235,6 @@ describe('optional memory capture', () => {
     })
     foreignId = foreign.id
     foreignRevisionId = foreign.revision.id
-    const database = (context.doppelgangerMemory as unknown as { database: InstanceSqliteDatabase }).database
-    database.prepare('UPDATE memory_records SET actor_id = ? WHERE id = ?').run('other-actor', foreign.id)
     await publishLifecycleEvent(context, committed('neighbor-candidate', '[fact:project.runtime.protocol] Runtime communication uses JSON frames.'))
     expect(requests).toEqual([expect.objectContaining({
       instanceId: 'aiden', actorId: 'local-user', scopeKind: 'project', projectId: 'project-one', kind: 'fact', limit: 4,
@@ -197,12 +242,13 @@ describe('optional memory capture', () => {
     expect(suggestions).toEqual([expect.objectContaining({
       recordId: active.id, revisionId: active.revision.id, relation: 'paraphrase', candidateSubjectKey: 'project.runtime.protocol',
     })])
-    expect(context.doppelgangerMemory.inspect(active.id)).toMatchObject({
+    expect(await context.doppelgangerMemory.inspect(active.id)).toMatchObject({
       status: 'active', subjectKey: 'project.runtime.transport', revision: { id: active.revision.id, content: active.revision.content },
     })
-    expect(context.doppelgangerMemory.listCandidates()).toHaveLength(1)
-    expect(context.doppelgangerMemory.conflicts()).toEqual([])
+    expect(await context.doppelgangerMemory.listCandidates()).toHaveLength(1)
+    expect(await context.doppelgangerMemory.conflicts()).toEqual([])
     await context.fiber.dispose()
+    await foreignContext.fiber.dispose()
   })
 
   it('contains neighbor and suggestion observer failures while preserving committed candidate writes', async () => {
@@ -216,7 +262,7 @@ describe('optional memory capture', () => {
     const failed = await setup({ enabled: true, onDiagnostic: item => diagnostics.push(item.code) }, throwingNeighbor)
     await expect(publishLifecycleEvent(failed, committed('neighbor-failure', '[fact:project.failure.boundary] Capture remains fail-open.'))).resolves.toBeUndefined()
     expect(diagnostics).toEqual(['neighbor'])
-    expect(failed.doppelgangerMemory.listCandidates()).toHaveLength(1)
+    expect(await failed.doppelgangerMemory.listCandidates()).toHaveLength(1)
     await failed.fiber.dispose()
 
     let activeId = ''
@@ -228,12 +274,12 @@ describe('optional memory capture', () => {
       async maintenance() { throw new Error('unused') },
     }
     const observed = await setup({ enabled: true, onSuggestion: () => { throw new Error('observer failed') } }, observerNeighbor)
-    const active = observed.doppelgangerMemory.remember({ operationId: 'observer-active', subjectKey: 'project.observer.active', kind: 'fact', content: 'Observer source.' })
+    const active = await observed.doppelgangerMemory.remember({ operationId: 'observer-active', subjectKey: 'project.observer.active', kind: 'fact', content: 'Observer source.' })
     activeId = active.id
     revisionId = active.revision.id
     await expect(publishLifecycleEvent(observed, committed('observer-failure', '[fact:project.observer.candidate] Observer candidate.'))).resolves.toBeUndefined()
-    expect(observed.doppelgangerMemory.listCandidates()).toHaveLength(1)
-    expect(observed.doppelgangerMemory.inspect(active.id).status).toBe('active')
+    expect(await observed.doppelgangerMemory.listCandidates()).toHaveLength(1)
+    expect((await observed.doppelgangerMemory.inspect(active.id)).status).toBe('active')
     await observed.fiber.dispose()
   })
   it('filters recursive context, trivial, generated, secret, non-string, and oversized material before extraction', async () => {
@@ -261,7 +307,7 @@ describe('optional memory capture', () => {
       await publishLifecycleEvent(context, committed(`filtered:${index}`, input))
     }
     expect(calls).toBe(0)
-    expect(context.doppelgangerMemory.listCandidates()).toEqual([])
+    expect(await context.doppelgangerMemory.listCandidates()).toEqual([])
     await context.fiber.dispose()
   })
 
@@ -270,9 +316,9 @@ describe('optional memory capture', () => {
     const event = committed('duplicate-delivery', '[fact:project.runtime.protocol] Runtime uses committed events.')
     await publishLifecycleEvent(context, event)
     await publishLifecycleEvent(context, event)
-    const candidate = context.doppelgangerMemory.listCandidates()[0]!
-    expect(context.doppelgangerMemory.listCandidates()).toHaveLength(1)
-    expect(context.doppelgangerMemory.evidence(candidate.id)).toHaveLength(1)
+    const candidate = (await context.doppelgangerMemory.listCandidates())[0]!
+    expect(await context.doppelgangerMemory.listCandidates()).toHaveLength(1)
+    expect(await context.doppelgangerMemory.evidence(candidate.id)).toHaveLength(1)
     await publishLifecycleEvent(context, {
       protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
       type: 'session-disposed',
@@ -281,7 +327,7 @@ describe('optional memory capture', () => {
       timestamp: 2,
       reason: 'host teardown',
     })
-    expect(context.doppelgangerMemory.listCandidates()).toHaveLength(1)
+    expect(await context.doppelgangerMemory.listCandidates()).toHaveLength(1)
     await context.fiber.dispose()
   })
 })

@@ -2,13 +2,13 @@
 
 ## Current status
 
-Doppelganger is experimental and private. The generic OMP Runtime Preset vertical slice, authoritative Runtime Preset roster, actor-neutral shared Runtime Host API and conformance suite, private local `@doppelganger/doppelganger-omp` install package, typed OMP-native event provider, provider-neutral structured inference with an optional Pi SDK adapter, opt-in Persona Authoring, Dynamic Runtime Plugins, Evolution with bounded proactive lifecycle signals, CodeGraph code intelligence, independent background MCP tool import, and default-off session runtime logging with rolling JSONL and private Sentry destinations are implemented. OMP uses one child and framed transport for shared and OMP-specific protected providers. Actor Identity is a separate optional session plugin with absent, unbound, and bound states; the Runtime Host capability profile contains no logging seam.
+Doppelganger is experimental and private. The generic OMP Runtime Preset vertical slice, authoritative Runtime Preset roster, actor-neutral shared Runtime Host API and conformance suite, private local `@doppelganger/doppelganger-omp` install package, typed OMP-native event provider, provider-neutral structured inference with an optional Pi SDK adapter, opt-in Persona Authoring, actor-bound canonical memory with SQLite and PostgreSQL repository providers, Dynamic Runtime Plugins, Evolution with bounded proactive lifecycle signals, CodeGraph code intelligence, independent background MCP tool import, and default-off session runtime logging with rolling JSONL and private Sentry destinations are implemented. OMP uses one child and framed transport for shared and OMP-specific protected providers. Actor Identity is a separate optional session plugin with absent, unbound, and bound states; the Runtime Host capability profile contains no logging or database seam.
 
 The native DeepSeek Harness host is the next integration milestone. Its reconciled active change consumes the shared bridge directly in-process, the closed capability profile, revisioned catalog and invocation contracts, one-shot approval revalidation, cancellation, declared lifecycle availability, separate Actor Identity, typed host-specific extension convention, and the same transport-independent conformance suite. DSH's existing project Agent Skill loader already discovers installed repository skills from `.agents/skills`; compatible runtime services and tools still require the deferred adapter. Public npm release, marketplace distribution, compatibility policy, actor onboarding/authentication, persistent generated-plugin promotion, automatic dependency installation, and hostile-code containment remain deferred.
 
 ## Runtime Preset acceptance
 
-The implemented cutover is accepted when:
+The milestone contract requires:
 
 1. explicit, project, user-default, deployment-default, and explicitly defaultless no-selection precedence are deterministic;
 2. package-owned, configured, and derived user roots obey first-root-wins precedence without falling through broken winners;
@@ -23,7 +23,7 @@ The implemented cutover is accepted when:
 11. the private OMP install package owns the shipped `standard` dependency closure while `host-omp` remains free of Persona, storage, memory, embedding, vector, and named-preset dependencies;
 12. the project-local OMP extension delegates to the same neutral package entrypoint used by plugin linking and supplies no development home, actor, child path, or construction logic;
 13. an arbitrary actor-aware user Runtime Preset activates through explicit selection and host actor binding, with extension-owned Persona configuration and storage;
-14. generated full-stack test presets prove context, tools, actor-isolated lexical and semantic memory, canonical migration, persistence, rebuild, and reload without depending on personal runtime assets;
+14. generated full-stack verification presets must cover context, tools, actor-isolated canonical SQLite and PostgreSQL memory, lexical and semantic retrieval, canonical migration, persistence, rebuild, fresh post-await validation, and reload without depending on personal runtime assets;
 15. Persona Authoring is optional, makes only configured logical traits writable, requires exact one-shot host approval, serializes competing writers, and reports success only after exact-revision HMR confirmation;
 16. the canonical `doppelganger-persona-evolution` skill installs project-locally into `.agents/skills` and is discoverable through OMP and DSH native invocation syntax without granting alternate mutation authority;
 17. shipped `standard`, unrelated runtime tools, and presets omitting Persona Authoring retain their prior behavior.
@@ -54,6 +54,10 @@ The implemented cutover is accepted when:
 42. Sentry resolves one named environment credential per generation, uses only a private client and scope, correlates breadcrumbs and errors by concrete activation, and bounds shutdown without mutating host-global Sentry state;
 43. OMP keeps stdout exclusively for framed JSON-RPC, retains stderr for emergency diagnostics, adds no ordinary-log RPC, callback, capability, report, tool, context, or UI route, and can run concurrent templated file exporters without shared rotation state.
 44. Composition Runtime and the default first-party Context, Tools, Persona, Memory, Evolution, Dynamic Runtime Plugins, CodeGraph, MCP, local embedding, vector backend, and semantic coordinator components emit searchable metadata-only operational events through ordinary Cordis loggers without exposing raw domain payloads.
+45. canonical memory injects exactly one session-isolated `doppelgangerMemoryRepository`; SQLite and PostgreSQL providers preserve the same actor/Persona/scope authority while the memory service, tools, coordinator, runtime, and hosts remain free of SQL and backend clients;
+46. canonical schema version 5 supports both providers, every persisted read and mutation is asynchronous, final retrieval uses one fresh canonical bulk snapshot after semantic work, and database-owned instance-generation then actor locks serialize competing writers;
+47. the offline SQLite/PostgreSQL transfer requires a stopped source and empty compatible destination, preserves revisions, receipts, deletion state, and opaque cleanup debt, and performs no Runtime Preset rewrite or source deletion;
+48. the root repository gate requires a disposable real PostgreSQL service, using an explicit `DOPPELGANGER_TEST_POSTGRESQL_DSN` or bounded PostgreSQL 17 Docker provisioning, while Chroma, Qdrant, pgvector, and local-vector service smokes remain independently optional.
 
 ## Deferred scope
 

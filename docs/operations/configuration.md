@@ -93,6 +93,87 @@ Runtime Preset health and Composition Runtime activation use the same portable L
 
 A preset's Loader rows own feature configuration, credentials by environment-variable reference, state directories, databases, migrations, partitions, and assets. The runtime does not create Persona Instance directories or assign storage. Persona rows own agent identity only; actor-aware persistence injects the separate host-owned `doppelgangerActor` service.
 
+## Canonical memory providers
+
+Canonical memory composition has two rows: exactly one actor-bound repository provider, then the backend-neutral memory service. Both services use the same Runtime Session isolation realm. The provider derives the actor only from `doppelgangerActor`; neither its configuration nor memory tools accept an actor override.
+
+Local SQLite configuration:
+
+```yaml
+- id: doppelganger-memory-sqlite
+  name: "@doppelganger/doppelganger-memory/sqlite"
+  inject: [doppelgangerActor]
+  isolate:
+    doppelgangerActor: session
+    doppelgangerMemoryRepository: session
+  config:
+    home: /absolute/plugin-owned/state/path
+    namespace: memory
+    busyTimeoutMs: 5000
+
+- id: doppelganger-memory
+  name: "@doppelganger/doppelganger-memory"
+  inject: [doppelgangerActor, doppelgangerPersona, doppelgangerContext, doppelgangerTools, doppelgangerMemoryRepository]
+  isolate:
+    doppelgangerActor: session
+    doppelgangerPersona: session
+    doppelgangerContext: session
+    doppelgangerTools: session
+    doppelgangerMemoryRepository: session
+    doppelgangerMemory: session
+```
+
+`home` must be absolute after normalization. `namespace` defaults to `memory` and retains the existing lowercase/hyphen identifier policy. `busyTimeoutMs` defaults to `5000`, accepts `0`, and is bounded at `120000`. The provider owns the namespace and canonical file; the memory service no longer injects `doppelgangerInstanceSqlite`. Separate processes may share only the same local file. Use PostgreSQL for a remotely shared canonical database.
+
+Shared PostgreSQL configuration replaces only the provider row:
+
+```yaml
+- id: doppelganger-memory-postgresql
+  name: "@doppelganger/doppelganger-memory/postgresql"
+  inject: [doppelgangerActor]
+  isolate:
+    doppelgangerActor: session
+    doppelgangerMemoryRepository: session
+  config:
+    connectionStringEnv: DOPPELGANGER_MEMORY_POSTGRESQL_DSN
+    schema: doppelganger_memory
+    poolSize: 4
+    connectionTimeoutMs: 5000
+    statementTimeoutMs: 30000
+    lockTimeoutMs: 5000
+```
+
+`connectionStringEnv` names an environment variable; a literal DSN is rejected. `schema` is a dedicated non-system schema name and cannot be `public` or a PostgreSQL system schema. The provider creates the schema when absent and owns its canonical objects. `poolSize` defaults to `4` and is bounded at `64`. `connectionTimeoutMs` defaults to `5000` and is bounded at `120000`; `statementTimeoutMs` defaults to `30000` and is bounded at `600000`; `lockTimeoutMs` defaults to `5000` and is bounded at `120000`.
+
+The DSN query may contain only `sslmode`, `sslcert`, `sslkey`, `sslrootcert`, and `application_name`, each at most once. Other query parameters—including alternate host routing or connection, statement, and lock deadline overrides—are rejected so authored bounds and transport policy remain authoritative. Remote PostgreSQL connections default to TLS certificate and hostname verification (`verify-full`). `sslmode=disable` is accepted only as an explicit operator decision for a separately secured network; weaker TLS modes are not supported. Resolved DSNs and credentials never appear in logs, diagnostics, health, Runtime Session metadata, or identity fingerprints.
+
+Provider activation creates the dedicated schema if needed and performs required canonical schema migration. The credential used for activation must therefore be able to create that schema when absent and create or alter the provider's objects. A deployment that later rotates to a narrower steady-state credential must provision the required runtime access itself. Doppelganger currently provides no database-role/bootstrap command, so these documents intentionally do not prescribe a complete grant script.
+
+Direct database access is a trusted-plugin boundary, not adversarial tenant isolation. Actor and scope filters govern repository operations; a process with unrestricted database credentials can bypass them. Do not give agent processes superuser credentials or expose arbitrary SQL tools.
+
+Canonical schema version 5 is the current repository-backend schema. Version 6 is reserved for the later context-engine change and is not created by these providers.
+
+### Offline transfer and recovery
+
+Move canonical state between SQLite and PostgreSQL in either direction only while the source is stopped. Place each strict JSON `MemoryDatabaseConfig` in a named environment variable, then run:
+
+```sh
+npm run memory:transfer -- --source-config-env SOURCE_CONFIG --destination-config-env DEST_CONFIG --legacy-actor-id ACTOR --source-stopped
+```
+
+For example, the referenced values use the same provider fields and a required `kind` discriminator:
+
+```json
+{"kind":"sqlite","home":"/absolute/state","namespace":"memory","busyTimeoutMs":5000}
+{"kind":"postgresql","connectionStringEnv":"DOPPELGANGER_MEMORY_POSTGRESQL_DSN","schema":"doppelganger_memory","poolSize":4,"connectionTimeoutMs":5000,"statementTimeoutMs":30000,"lockTimeoutMs":5000}
+```
+
+The command takes one consistent source snapshot, requires an empty destination, preserves deleted receipts and opaque semantic-cleanup debt, and rejects incompatible active targets. `--legacy-actor-id` supplies the actor partition required when importing legacy canonical state. It performs no automatic Runtime Preset rewrite, source deletion, live replication, or failover. After a successful copy, update the user-owned provider row separately and retain the stopped source until the destination is accepted.
+
+If the destination has accepted new writes, pointing back to the old source would lose acknowledged state. Stop destination writers and coordinators, reverse-transfer into a new empty compatible store, verify the preserved history, then change the provider selection. Roll back binaries only against a compatible schema or a verified pre-migration backup.
+
+The transfer process resolves a PostgreSQL DSN only from the nested `connectionStringEnv`; the JSON itself must never contain a literal connection string. Use disposable credentials and targets when rehearsing recovery. Canonical provider lifecycle and migration semantics are owned by [Memory](../features/memory.md#persistence-lifecycle); this section owns the transfer command and operator procedure, while derived-vector rebuild and recovery are owned by [Semantic memory](semantic-memory.md#projection-and-generation-lifecycle).
+
 Runtime logging destinations are opt-in Loader rows and never fields in `config.yaml`, project selection manifests, host options, Runtime Session metadata, or Runtime Host capabilities. Both rows require and isolate `doppelgangerLogging` in the `session` realm:
 
 ```yaml

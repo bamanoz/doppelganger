@@ -3,18 +3,37 @@ import { Context, Service, type Logger } from '@deepseek-ai/cordis'
 import type {} from '@doppelganger/doppelganger-persona'
 import { containsCredentialMaterial } from '@doppelganger/doppelganger-protocols'
 import type {} from '@doppelganger/doppelganger-protocols'
-import type { InstanceSqliteDatabase } from '@doppelganger/doppelganger-sqlite'
-import type {} from '@doppelganger/doppelganger-sqlite'
-import { memoryEligibility, memoryTemporalState, type MemoryPartition } from './eligibility.ts'
-import { deleteMemoryRecordRows, migrateMemorySchema } from './schema.ts'
-import {
-  activeMemorySemanticGeneration,
-  enqueueActiveMemoryProjection,
-  enqueueKnownMemoryProjectionDeletions,
-  enqueueMemoryRevisionReplacement,
-  MemoryProjectionStore,
-} from './projection-store.ts'
+import type { MemoryProjectionStore } from './projection-store.ts'
 import { projectMemorySemanticQuery } from './query-projection.ts'
+import type {
+  CandidateDecisionRequest,
+  CandidateEvidenceRequest,
+  CorrectMemoryRequest,
+  ForgetMemoryRequest,
+  MemoryApi,
+  MemoryConflict,
+  MemoryEvidence,
+  MemoryEvidenceInput,
+  MemoryEvidenceRelation,
+  MemoryKind,
+  MemoryOperationReceipt,
+  MemoryPartition,
+  MemoryRecord,
+  MemoryRepository,
+  MemoryRepositoryReader,
+  MemoryRevision,
+  MemoryRole,
+  MemoryScope,
+  MemorySearchRequest,
+  MemorySearchResult,
+  MemoryStatus,
+  MemoryTemporalInput,
+  MemoryUnitOfWork,
+  ObserveMemoryRequest,
+  PinMemoryRequest,
+  RememberMemoryRequest,
+  ResolveMemoryConflictRequest,
+} from './repository.ts'
 import type {
   MemorySemanticFailureCode,
   MemorySemanticHit,
@@ -22,158 +41,8 @@ import type {
   MemoryVectorFailure,
 } from './semantic.ts'
 
-export type MemoryKind = 'decision' | 'fact' | 'preference' | 'procedure'
-export type MemoryStatus = 'active' | 'candidate' | 'rejected'
-export type MemoryRole = 'principal' | 'assistant' | 'tool' | 'system'
-export type MemoryEvidenceRelation = 'support' | 'contradiction'
-
-export interface MemoryScope {
-  readonly kind: 'relationship' | 'project'
-  readonly projectId?: string
-}
-
-export interface MemoryTemporalInput {
-  readonly validFrom?: string
-  readonly validUntil?: string
-  readonly expiresAt?: string
-}
-
-export interface MemoryRevision extends MemoryTemporalInput {
-  readonly id: string
-  readonly ordinal: number
-  readonly content: string
-  readonly sourceSessionId: string
-  readonly sourceKind: string
-  readonly supersedesRevisionId?: string
-  readonly createdAt: string
-}
-
-export interface MemoryRecord extends MemoryTemporalInput {
-  readonly id: string
-  readonly instanceId: string
-  readonly actorId: string
-  readonly kind: MemoryKind
-  readonly subjectKey: string
-  readonly scope: MemoryScope
-  readonly status: MemoryStatus
-  readonly pinned: boolean
-  readonly confidence: number
-  readonly salience: number
-  readonly temporalState: 'eligible' | 'expired' | 'not-yet-valid'
-  readonly hasUnresolvedConflict: boolean
-  readonly sourceSessionId: string
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly revision: MemoryRevision
-}
-
-export interface MemoryEvidence {
-  readonly id: string
-  readonly recordId: string
-  readonly sourceSessionId: string
-  readonly sourceTurnId: string
-  readonly role: MemoryRole
-  readonly relation: MemoryEvidenceRelation
-  readonly excerpt: string
-  readonly createdAt: string
-}
-
-export interface MemoryConflict {
-  readonly id: string
-  readonly activeRecordId: string
-  readonly candidateRecordId: string
-  readonly evidenceId?: string
-  readonly status: 'unresolved' | 'resolved-active' | 'resolved-candidate' | 'dismissed'
-  readonly createdAt: string
-  readonly resolvedAt?: string
-  readonly resolutionRevisionId?: string
-}
-
-export interface MemoryEvidenceInput {
-  readonly turnId?: string
-  readonly role?: MemoryRole
-  readonly relation?: MemoryEvidenceRelation
-  readonly excerpt?: string
-}
-
-export interface RememberMemoryRequest extends MemoryTemporalInput {
-  readonly operationId: string
-  readonly subjectKey: string
-  readonly content: string
-  readonly kind: MemoryKind
-  readonly scope?: 'relationship' | 'project'
-  readonly confidence?: number
-  readonly salience?: number
-  readonly evidence?: MemoryEvidenceInput
-}
-
-export interface ObserveMemoryRequest {
-  readonly operationId: string
-  readonly recordId: string
-  readonly turnId: string
-  readonly role: MemoryRole
-  readonly relation: MemoryEvidenceRelation
-  readonly excerpt: string
-}
-
-export interface CorrectMemoryRequest extends MemoryTemporalInput {
-  readonly operationId: string
-  readonly id: string
-  readonly content: string
-  readonly expectedRevisionId: string
-  readonly confidence?: number
-  readonly salience?: number
-  readonly evidence?: MemoryEvidenceInput
-}
-
-export interface CandidateDecisionRequest {
-  readonly operationId: string
-  readonly candidateId: string
-}
-
-export interface CandidateEvidenceRequest {
-  readonly operationId: string
-  readonly candidateId: string
-  readonly turnId: string
-  readonly content: string
-  readonly role?: MemoryRole
-  readonly contradiction?: boolean
-}
-
-export interface PinMemoryRequest {
-  readonly operationId: string
-  readonly id: string
-  readonly pinned: boolean
-}
-
-export interface ForgetMemoryRequest {
-  readonly operationId: string
-  readonly id: string
-}
-
-export interface ResolveMemoryConflictRequest {
-  readonly operationId: string
-  readonly conflictId: string
-  readonly expectedRevisionId: string
-  readonly resolution: 'dismiss' | 'keep-active' | 'promote-candidate'
-}
-
-
-export interface MemorySearchRequest {
-  readonly query: string
-  readonly tokenBudget: number
-  readonly limit?: number
-}
-
-export interface MemorySearchResult {
-  readonly record: MemoryRecord
-  readonly score: number
-  readonly lexicalRank?: number
-  readonly semanticRank?: number
-}
 
 export interface MemoryServiceConfig {
-  readonly namespace?: string
   readonly now?: () => Date
   readonly id?: () => string
   readonly automaticPromotionDistinctSessions?: number
@@ -193,53 +62,15 @@ export class MemoryError extends Error {
   }
 }
 
-interface OperationReceipt {
-  readonly command_digest: unknown
-  readonly result_kind: unknown
-  readonly result_record_id: unknown
-  readonly result_revision_id: unknown
-}
-
-const RECORD_SELECT = `
-  SELECT
-    r.id, r.instance_id, r.actor_id, r.kind, r.subject_key,
-    r.scope_kind, r.project_id, r.status, r.pinned, r.confidence, r.salience,
-    r.valid_from, r.valid_until, r.expires_at,
-    r.source_session_id, r.created_at, r.updated_at,
-    EXISTS(
-      SELECT 1 FROM memory_conflicts c
-      WHERE (c.active_record_id = r.id OR c.candidate_record_id = r.id)
-        AND c.status = 'unresolved'
-    ) AS has_unresolved_conflict,
-    v.id AS revision_id, v.ordinal, v.content,
-    v.source_session_id AS revision_source_session_id,
-    v.source_kind, v.supersedes_revision_id,
-    v.valid_from AS revision_valid_from,
-    v.valid_until AS revision_valid_until,
-    v.expires_at AS revision_expires_at,
-    v.created_at AS revision_created_at
-  FROM memory_records r
-  JOIN memory_revisions v ON v.id = r.current_revision_id
-`
-
 const SUBJECT_KEY_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/
 const MAX_CONTENT_LENGTH = 16_000
 const MAX_EVIDENCE_LENGTH = 1_000
 const RRF_K = 60
 const STABLE_PROFILE_LIMIT = 20
 
-
-function text(value: unknown, field: string): string {
-  if (typeof value !== 'string') throw new Error(`invalid memory database ${field}`)
-  return value
-}
-
-function optionalText(value: unknown, field: string): string | undefined {
-  return value === null || value === undefined ? undefined : text(value, field)
-}
-
-function finite(value: unknown, field: string): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`invalid memory database ${field}`)
+function text(value: string, field: string): string {
+  value = value.trim()
+  if (value.length === 0 || value.length > 200) throw new MemoryError('INVALID_ID', `${field} must be 1-200 characters`)
   return value
 }
 
@@ -280,12 +111,6 @@ function validateRelation(relation: MemoryEvidenceRelation): MemoryEvidenceRelat
   return relation
 }
 
-function requiredId(field: string, value: string): string {
-  value = value.trim()
-  if (value.length === 0 || value.length > 200) throw new MemoryError('INVALID_ID', `${field} must be 1-200 characters`)
-  return value
-}
-
 function subjectKey(value: string): string {
   value = value.trim()
   if (value.length > 200 || !SUBJECT_KEY_PATTERN.test(value)) {
@@ -311,22 +136,26 @@ function iso(field: string, value: string | undefined): string | undefined {
   return value
 }
 
-function temporal(input: MemoryTemporalInput): Required<MemoryTemporalInput> | {
-  readonly validFrom?: string
-  readonly validUntil?: string
-  readonly expiresAt?: string
-} {
+function temporalFields(
+  validFrom: string | undefined,
+  validUntil: string | undefined,
+  expiresAt: string | undefined,
+): MemoryTemporalInput {
+  return Object.freeze({
+    ...(validFrom === undefined ? {} : { validFrom }),
+    ...(validUntil === undefined ? {} : { validUntil }),
+    ...(expiresAt === undefined ? {} : { expiresAt }),
+  })
+}
+
+function temporal(input: MemoryTemporalInput): MemoryTemporalInput {
   const validFrom = iso('validFrom', input.validFrom)
   const validUntil = iso('validUntil', input.validUntil)
   const expiresAt = iso('expiresAt', input.expiresAt)
   if (validFrom !== undefined && validUntil !== undefined && validUntil <= validFrom) {
     throw new MemoryError('INVALID_TIME_RANGE', 'validUntil must be later than validFrom')
   }
-  return {
-    ...(validFrom === undefined ? {} : { validFrom }),
-    ...(validUntil === undefined ? {} : { validUntil }),
-    ...(expiresAt === undefined ? {} : { expiresAt }),
-  }
+  return temporalFields(validFrom, validUntil, expiresAt)
 }
 
 function stableJson(value: unknown): string {
@@ -345,119 +174,37 @@ function digest(command: string, payload: unknown): string {
   return createHash('sha256').update(stableJson({ command, payload })).digest('hex')
 }
 
-function recordFrom(row: Record<string, unknown>, now: string): MemoryRecord {
-  const projectId = optionalText(row.project_id, 'project_id')
-  const validFrom = optionalText(row.valid_from, 'valid_from')
-  const validUntil = optionalText(row.valid_until, 'valid_until')
-  const expiresAt = optionalText(row.expires_at, 'expires_at')
-  const revisionValidFrom = optionalText(row.revision_valid_from, 'revision_valid_from')
-  const revisionValidUntil = optionalText(row.revision_valid_until, 'revision_valid_until')
-  const revisionExpiresAt = optionalText(row.revision_expires_at, 'revision_expires_at')
-  return Object.freeze({
-    id: text(row.id, 'id'),
-    instanceId: text(row.instance_id, 'instance_id'),
-    actorId: text(row.actor_id, 'actor_id'),
-    kind: text(row.kind, 'kind') as MemoryKind,
-    subjectKey: text(row.subject_key, 'subject_key'),
-    scope: Object.freeze({
-      kind: text(row.scope_kind, 'scope_kind') as MemoryScope['kind'],
-      ...(projectId === undefined ? {} : { projectId }),
-    }),
-    status: text(row.status, 'status') as MemoryStatus,
-    pinned: row.pinned === 1,
-    confidence: finite(row.confidence, 'confidence'),
-    salience: finite(row.salience, 'salience'),
-    ...(validFrom === undefined ? {} : { validFrom }),
-    ...(validUntil === undefined ? {} : { validUntil }),
-    ...(expiresAt === undefined ? {} : { expiresAt }),
-    temporalState: memoryTemporalState({
-      ...(validFrom === undefined ? {} : { validFrom }),
-      ...(validUntil === undefined ? {} : { validUntil }),
-      ...(expiresAt === undefined ? {} : { expiresAt }),
-    }, now),
-    hasUnresolvedConflict: row.has_unresolved_conflict === 1,
-    sourceSessionId: text(row.source_session_id, 'source_session_id'),
-    createdAt: text(row.created_at, 'created_at'),
-    updatedAt: text(row.updated_at, 'updated_at'),
-    revision: Object.freeze({
-      id: text(row.revision_id, 'revision_id'),
-      ordinal: Number(row.ordinal),
-      content: text(row.content, 'content'),
-      sourceSessionId: text(row.revision_source_session_id, 'revision_source_session_id'),
-      sourceKind: text(row.source_kind, 'source_kind'),
-      ...(optionalText(row.supersedes_revision_id, 'supersedes_revision_id') === undefined
-        ? {}
-        : { supersedesRevisionId: text(row.supersedes_revision_id, 'supersedes_revision_id') }),
-      ...(revisionValidFrom === undefined ? {} : { validFrom: revisionValidFrom }),
-      ...(revisionValidUntil === undefined ? {} : { validUntil: revisionValidUntil }),
-      ...(revisionExpiresAt === undefined ? {} : { expiresAt: revisionExpiresAt }),
-      createdAt: text(row.revision_created_at, 'revision_created_at'),
-    }),
-  })
-}
-
-function evidenceFrom(row: Record<string, unknown>): MemoryEvidence {
-  return Object.freeze({
-    id: text(row.id, 'evidence.id'),
-    recordId: text(row.record_id, 'evidence.record_id'),
-    sourceSessionId: text(row.source_session_id, 'evidence.source_session_id'),
-    sourceTurnId: text(row.source_turn_id, 'evidence.source_turn_id'),
-    role: text(row.role, 'evidence.role') as MemoryRole,
-    relation: text(row.relation, 'evidence.relation') as MemoryEvidenceRelation,
-    excerpt: text(row.excerpt, 'evidence.excerpt'),
-    createdAt: text(row.created_at, 'evidence.created_at'),
-  })
-}
-
-function conflictFrom(row: Record<string, unknown>): MemoryConflict {
-  const evidenceId = optionalText(row.evidence_id, 'conflict.evidence_id')
-  const resolvedAt = optionalText(row.resolved_at, 'conflict.resolved_at')
-  const resolutionRevisionId = optionalText(row.resolution_revision_id, 'conflict.resolution_revision_id')
-  return Object.freeze({
-    id: text(row.id, 'conflict.id'),
-    activeRecordId: text(row.active_record_id, 'conflict.active_record_id'),
-    candidateRecordId: text(row.candidate_record_id, 'conflict.candidate_record_id'),
-    ...(evidenceId === undefined ? {} : { evidenceId }),
-    status: text(row.status, 'conflict.status') as MemoryConflict['status'],
-    createdAt: text(row.created_at, 'conflict.created_at'),
-    ...(resolvedAt === undefined ? {} : { resolvedAt }),
-    ...(resolutionRevisionId === undefined ? {} : { resolutionRevisionId }),
-  })
-}
-
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    doppelgangerMemory: MemoryService
+    doppelgangerMemory: MemoryApi
+    doppelgangerMemoryRepository: MemoryRepository
   }
 }
 
-export class MemoryService extends Service {
-  static inject = ['doppelgangerInstanceSqlite', 'doppelgangerPersona', 'doppelgangerActor']
+export class MemoryService extends Service implements MemoryApi {
+  static inject = ['doppelgangerMemoryRepository', 'doppelgangerPersona', 'doppelgangerActor']
 
-  private database!: InstanceSqliteDatabase
   private readonly logger: Logger
   private readonly now: () => Date
-  private projectionStoreInstance?: MemoryProjectionStore
-
-  get projectionStore(): MemoryProjectionStore {
-    if (this.projectionStoreInstance === undefined) throw new Error('memory service is not initialized')
-    return this.projectionStoreInstance
-  }
   private readonly id: () => string
-  private readonly namespace: string
   private readonly automaticPromotionDistinctSessions: number
   private readonly lexicalTopK: number
   private readonly semanticTopK: number
   private readonly semanticQueryMaximumCharacters: number
   private readonly semanticTimeoutMs: number
+  private repository!: MemoryRepository
   private lastSemanticFailure: MemoryVectorFailure | undefined
+
+  get projectionStore(): MemoryProjectionStore {
+    if (this.repository === undefined) throw new Error('memory service is not initialized')
+    return this.repository.projectionStore
+  }
 
   constructor(ctx: Context, config: MemoryServiceConfig = {}) {
     super(ctx, 'doppelgangerMemory')
     this.logger = ctx.logger('doppelganger-memory')
     this.now = config.now ?? (() => new Date())
     this.id = config.id ?? randomUUID
-    this.namespace = config.namespace ?? 'memory'
     this.automaticPromotionDistinctSessions = config.automaticPromotionDistinctSessions ?? 2
     this.lexicalTopK = config.lexicalTopK ?? 40
     this.semanticTopK = config.semanticTopK ?? 40
@@ -479,11 +226,8 @@ export class MemoryService extends Service {
   async *[Service.init]() {
     this.logger.info('component.activation.started')
     try {
-      const actor = this.ctx.doppelgangerActor
-      if (actor.state !== 'bound') throw new Error('memory requires a bound host actor')
-      this.database = await this.ctx.doppelgangerInstanceSqlite.open(this.namespace)
-      migrateMemorySchema(this.database, { legacyActorId: actor.actorId })
-      this.projectionStoreInstance = new MemoryProjectionStore(this.database)
+      if (this.ctx.doppelgangerActor.state !== 'bound') throw new Error('memory requires a bound host actor')
+      this.repository = this.ctx.doppelgangerMemoryRepository
       this.logger.info('component.active')
     } catch (error) {
       this.logger.error('component.activation.failed reason=%s', error instanceof MemoryError ? error.code : error instanceof Error ? error.name : typeof error)
@@ -491,10 +235,10 @@ export class MemoryService extends Service {
     }
   }
 
-  private mutate<T>(operation: string, callback: () => T): T {
+  private async mutate<T>(operation: string, callback: () => Promise<T>): Promise<T> {
     this.logger.debug('memory.mutation.started operation=%s', operation)
     try {
-      const result = callback()
+      const result = await callback()
       this.logger.info('memory.mutation.completed operation=%s', operation)
       return result
     } catch (error) {
@@ -524,110 +268,33 @@ export class MemoryService extends Service {
     return Object.freeze({ kind: 'project', projectId })
   }
 
-  private visibleRecord(
-    database: InstanceSqliteDatabase,
+  private async requireRecord(
+    reader: MemoryRepositoryReader,
+    partition: MemoryPartition,
     id: string,
+    now: string,
     statuses?: readonly MemoryStatus[],
-    temporalOnly = false,
-  ): MemoryRecord | undefined {
-    const now = this.timestamp()
-    const eligible = memoryEligibility(this.partition(), now, {
-      ...(statuses === undefined ? {} : { statuses }),
-      temporal: temporalOnly,
-    })
-    const row = database.prepare(`${RECORD_SELECT} WHERE r.id = ? AND ${eligible.sql}`)
-      .get(id, ...eligible.parameters)
-    return row === undefined ? undefined : recordFrom(row, now)
-  }
-
-  private requireRecord(
-    database: InstanceSqliteDatabase,
-    id: string,
-    statuses?: readonly MemoryStatus[],
-  ): MemoryRecord {
-    const record = this.visibleRecord(database, requiredId('memory id', id), statuses)
+  ): Promise<MemoryRecord> {
+    const recordId = text(id, 'memory id')
+    const record = await reader.getRecord(partition, recordId, now, statuses === undefined ? {} : { statuses })
     if (record === undefined) throw new MemoryError('NOT_FOUND', `memory "${id}" was not found in the active partition`)
     return record
   }
 
-  private receipt(
-    database: InstanceSqliteDatabase,
-    operationId: string,
-  ): OperationReceipt | undefined {
-    const partition = this.partition()
-    return database.prepare(`
-      SELECT command_digest, result_kind, result_record_id, result_revision_id
-      FROM memory_operations
-      WHERE instance_id = ? AND actor_id = ? AND operation_id = ?
-    `).get(partition.instanceId, partition.actorId, operationId) as OperationReceipt | undefined
-  }
-
-  private replayRecord(receipt: OperationReceipt, commandDigest: string): MemoryRecord {
-    if (text(receipt.command_digest, 'operation.command_digest') !== commandDigest) {
+  private async replayRecord(
+    reader: MemoryRepositoryReader,
+    partition: MemoryPartition,
+    receipt: MemoryOperationReceipt,
+    commandDigest: string,
+    now: string,
+  ): Promise<MemoryRecord> {
+    if (receipt.commandDigest !== commandDigest) {
       throw new MemoryError('IDEMPOTENCY_CONFLICT', 'operationId was already used for a different memory command')
     }
-    const recordId = optionalText(receipt.result_record_id, 'operation.result_record_id')
-    if (recordId === undefined) {
+    if (receipt.resultRecordId === undefined) {
       throw new MemoryError('OPERATION_RESULT_DELETED', 'the original memory result was permanently deleted')
     }
-    return this.requireRecord(this.database, recordId)
-  }
-
-  private insertReceipt(
-    database: InstanceSqliteDatabase,
-    operationId: string,
-    commandKind: string,
-    commandDigest: string,
-    resultKind: string,
-    recordId: string | undefined,
-    revisionId: string | undefined,
-    timestamp: string,
-  ): void {
-    const partition = this.partition()
-    database.prepare(`
-      INSERT INTO memory_operations(
-        instance_id, actor_id, operation_id, command_kind, command_digest,
-        result_kind, result_record_id, result_revision_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      partition.instanceId,
-      partition.actorId,
-      operationId,
-      commandKind,
-      commandDigest,
-      resultKind,
-      recordId ?? null,
-      revisionId ?? null,
-      timestamp,
-    )
-  }
-
-  private insertEvidence(
-    database: InstanceSqliteDatabase,
-    recordId: string,
-    input: Required<Pick<MemoryEvidenceInput, 'turnId' | 'role' | 'relation' | 'excerpt'>>,
-    timestamp: string,
-  ): MemoryEvidence {
-    const evidenceId = this.id()
-    const metadata = this.ctx.doppelgangerPersona
-    const turnId = requiredId('memory evidence turnId', input.turnId)
-    const role = validateRole(input.role)
-    const relation = validateRelation(input.relation)
-    const excerpt = boundedEvidence(input.excerpt)
-    const insertion = database.prepare(`
-      INSERT OR IGNORE INTO memory_evidence(
-        id, record_id, source_session_id, source_turn_id, role, relation, excerpt, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(evidenceId, recordId, metadata.sessionId, turnId, role, relation, excerpt, timestamp)
-    const row = insertion.changes === 1
-      ? database.prepare('SELECT * FROM memory_evidence WHERE id = ?').get(evidenceId)
-      : database.prepare(`
-          SELECT * FROM memory_evidence
-          WHERE record_id = ? AND source_session_id = ? AND source_turn_id = ?
-            AND role = ? AND relation = ? AND excerpt = ?
-        `).get(recordId, metadata.sessionId, turnId, role, relation, excerpt)
-    if (row === undefined) throw new Error('memory evidence insertion produced no canonical row')
-    return evidenceFrom(row)
+    return this.requireRecord(reader, partition, receipt.resultRecordId, now)
   }
 
   private initialEvidence(
@@ -643,54 +310,38 @@ export class MemoryService extends Service {
     }
   }
 
-  private exactSubjectPredicate(scope: MemoryScope): { readonly sql: string; readonly parameters: readonly string[] } {
-    return scope.kind === 'relationship'
-      ? { sql: `r.scope_kind = 'relationship' AND r.project_id IS NULL`, parameters: [] }
-      : { sql: `r.scope_kind = 'project' AND r.project_id = ?`, parameters: [scope.projectId!] }
+  private async insertEvidence(
+    unitOfWork: MemoryUnitOfWork,
+    recordId: string,
+    input: Required<Pick<MemoryEvidenceInput, 'turnId' | 'role' | 'relation' | 'excerpt'>>,
+    timestamp: string,
+  ): Promise<MemoryEvidence> {
+    return unitOfWork.insertEvidence({
+      id: this.id(),
+      recordId,
+      sourceSessionId: this.ctx.doppelgangerPersona.sessionId,
+      sourceTurnId: text(input.turnId, 'memory evidence turnId'),
+      role: validateRole(input.role),
+      relation: validateRelation(input.relation),
+      excerpt: boundedEvidence(input.excerpt),
+      createdAt: timestamp,
+    })
   }
 
-  private sameSubject(
-    database: InstanceSqliteDatabase,
-    kind: MemoryKind,
-    key: string,
-    scope: MemoryScope,
-    status: MemoryStatus,
-    content?: string,
-  ): MemoryRecord | undefined {
-    const partition = this.partition()
-    const exactScope = this.exactSubjectPredicate(scope)
-    const row = database.prepare(`${RECORD_SELECT}
-      WHERE r.instance_id = ? AND r.actor_id = ?
-        AND ${exactScope.sql} AND r.kind = ? AND r.subject_key = ? AND r.status = ?
-        ${content === undefined ? '' : 'AND v.content = ?'}
-      ORDER BY r.created_at, r.id
-      LIMIT 1
-    `).get(
-      partition.instanceId,
-      partition.actorId,
-      ...exactScope.parameters,
-      kind,
-      key,
-      status,
-      ...(content === undefined ? [] : [content]),
-    )
-    return row === undefined ? undefined : recordFrom(row, this.timestamp())
-  }
-
-  remember(request: RememberMemoryRequest): MemoryRecord {
+  remember(request: RememberMemoryRequest): Promise<MemoryRecord> {
     return this.mutate('remember', () => this.create(request, 'active', 'explicit'))
   }
 
-  propose(request: RememberMemoryRequest): MemoryRecord {
+  propose(request: RememberMemoryRequest): Promise<MemoryRecord> {
     return this.mutate('propose', () => this.create(request, 'candidate', 'inferred'))
   }
 
-  private create(
+  private async create(
     request: RememberMemoryRequest,
     requestedStatus: 'active' | 'candidate',
     sourceKind: 'explicit' | 'inferred',
-  ): MemoryRecord {
-    const operationId = requiredId('memory operationId', request.operationId)
+  ): Promise<MemoryRecord> {
+    const operationId = text(request.operationId, 'memory operationId')
     const content = validateContent(request.content)
     const kind = validateKind(request.kind)
     const key = subjectKey(request.subjectKey)
@@ -700,339 +351,260 @@ export class MemoryService extends Service {
     const times = temporal(request)
     const commandKind = sourceKind === 'explicit' ? 'remember' : 'propose'
     const commandDigest = digest(commandKind, { ...request, content, subjectKey: key, scope: scope.kind })
-    const existingReceipt = this.receipt(this.database, operationId)
-    if (existingReceipt !== undefined) return this.replayRecord(existingReceipt, commandDigest)
-    return this.database.transaction((storage) => {
-      const replay = this.receipt(storage, operationId)
-      if (replay !== undefined) return this.replayRecord(replay, commandDigest)
+    const partition = this.partition()
+    return this.repository.transaction(partition, async unitOfWork => {
       const timestamp = this.timestamp()
-      const active = this.sameSubject(storage, kind, key, scope, 'active')
+      const replay = await unitOfWork.getReceipt(partition, operationId)
+      if (replay !== undefined) return this.replayRecord(unitOfWork, partition, replay, commandDigest, timestamp)
+      const active = await unitOfWork.findSubject(partition, { kind, subjectKey: key, scope, status: 'active' }, timestamp)
       if (active !== undefined && active.revision.content === content) {
-        this.insertEvidence(storage, active.id, this.initialEvidence(request, sourceKind, content), timestamp)
-        this.insertReceipt(storage, operationId, commandKind, commandDigest, 'record', active.id, active.revision.id, timestamp)
-        return this.requireRecord(storage, active.id)
+        await this.insertEvidence(unitOfWork, active.id, this.initialEvidence(request, sourceKind, content), timestamp)
+        await unitOfWork.insertReceipt(partition, operationId, commandKind, commandDigest, 'record', active.id, active.revision.id, timestamp)
+        return this.requireRecord(unitOfWork, partition, active.id, timestamp)
       }
       if (sourceKind === 'explicit' && active !== undefined) {
         throw new MemoryError('SUBJECT_CONFLICT', `active memory for subject "${key}" must be changed with correct`)
       }
       let record: MemoryRecord | undefined
-      if (sourceKind === 'inferred') record = this.sameSubject(storage, kind, key, scope, 'candidate', content)
+      if (sourceKind === 'inferred') {
+        record = await unitOfWork.findSubject(partition, { kind, subjectKey: key, scope, status: 'candidate', content }, timestamp)
+      }
       if (record === undefined) {
         const recordId = this.id()
         const revisionId = this.id()
         const status = active === undefined ? requestedStatus : 'candidate'
-        const metadata = this.ctx.doppelgangerPersona
-        const partition = this.partition()
-        storage.prepare(`
-          INSERT INTO memory_records(
-            id, instance_id, actor_id, kind, subject_key, scope_kind, project_id,
-            status, pinned, confidence, salience, valid_from, valid_until, expires_at,
-            current_revision_id, source_session_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          recordId,
-          partition.instanceId,
-          partition.actorId,
+        const sessionId = this.ctx.doppelgangerPersona.sessionId
+        await unitOfWork.insertRecord({
+          id: recordId,
+          partition,
           kind,
-          key,
-          scope.kind,
-          scope.projectId ?? null,
+          subjectKey: key,
+          scope,
           status,
+          pinned: false,
           confidence,
           salience,
-          times.validFrom ?? null,
-          times.validUntil ?? null,
-          times.expiresAt ?? null,
-          revisionId,
-          metadata.sessionId,
+          ...times,
+          currentRevisionId: revisionId,
+          sourceSessionId: sessionId,
           timestamp,
-          timestamp,
-        )
-        storage.prepare(`
-          INSERT INTO memory_revisions(
-            id, record_id, ordinal, content, source_session_id, source_kind,
-            supersedes_revision_id, valid_from, valid_until, expires_at, created_at
-          ) VALUES (?, ?, 1, ?, ?, ?, NULL, ?, ?, ?, ?)
-        `).run(
-          revisionId,
+        })
+        await unitOfWork.insertRevision({
+          id: revisionId,
           recordId,
+          ordinal: 1,
           content,
-          metadata.sessionId,
+          sourceSessionId: sessionId,
           sourceKind,
-          times.validFrom ?? null,
-          times.validUntil ?? null,
-          times.expiresAt ?? null,
-          timestamp,
-        )
+          ...times,
+          createdAt: timestamp,
+        })
         if (status === 'active') {
-          storage.prepare('INSERT INTO memory_fts(record_id, revision_id, content) VALUES (?, ?, ?)')
-            .run(recordId, revisionId, content)
-          enqueueActiveMemoryProjection(
-            storage,
-            metadata.instanceId,
-            recordId,
-            revisionId,
-            timestamp,
-          )
+          await unitOfWork.replaceLexicalEntry(recordId, revisionId, content)
+          await unitOfWork.enqueueActiveProjection(partition.instanceId, recordId, revisionId, timestamp)
         }
-        record = this.requireRecord(storage, recordId)
+        record = await this.requireRecord(unitOfWork, partition, recordId, timestamp)
       }
-      const evidence = this.insertEvidence(storage, record.id, this.initialEvidence(request, sourceKind, content), timestamp)
-      if (sourceKind === 'inferred') {
-        storage.prepare('INSERT OR IGNORE INTO memory_candidate_evidence(candidate_id, evidence_id) VALUES (?, ?)')
-          .run(record.id, evidence.id)
-      }
+      const evidence = await this.insertEvidence(unitOfWork, record.id, this.initialEvidence(request, sourceKind, content), timestamp)
+      if (sourceKind === 'inferred') await unitOfWork.linkCandidateEvidence(record.id, evidence.id)
       if (active !== undefined && record.id !== active.id) {
-        const conflictId = this.id()
-        storage.prepare(`
-          INSERT OR IGNORE INTO memory_conflicts(
-            id, active_record_id, candidate_record_id, evidence_id, status, created_at
-          ) VALUES (?, ?, ?, ?, 'unresolved', ?)
-        `).run(conflictId, active.id, record.id, evidence.id, timestamp)
+        await unitOfWork.insertConflict({
+          id: this.id(),
+          activeRecordId: active.id,
+          candidateRecordId: record.id,
+          evidenceId: evidence.id,
+          createdAt: timestamp,
+        })
       }
-      if (record.status === 'candidate') this.maybePromote(storage, record.id, timestamp)
-      const result = this.requireRecord(storage, record.id)
-      this.insertReceipt(storage, operationId, commandKind, commandDigest, 'record', result.id, result.revision.id, timestamp)
+      if (record.status === 'candidate') await this.maybePromote(unitOfWork, partition, record.id, timestamp)
+      const result = await this.requireRecord(unitOfWork, partition, record.id, timestamp)
+      await unitOfWork.insertReceipt(partition, operationId, commandKind, commandDigest, 'record', result.id, result.revision.id, timestamp)
       return result
     })
   }
 
-  get(id: string): MemoryRecord | undefined {
-    return this.visibleRecord(this.database, id)
+  get(id: string): Promise<MemoryRecord | undefined> {
+    return this.repository.getRecord(this.partition(), id, this.timestamp())
   }
 
-  inspect(id: string): MemoryRecord {
-    return this.requireRecord(this.database, id)
+  inspect(id: string): Promise<MemoryRecord> {
+    const partition = this.partition()
+    return this.requireRecord(this.repository, partition, id, this.timestamp())
   }
 
-  evidence(id: string): readonly MemoryEvidence[] {
-    const record = this.requireRecord(this.database, id)
-    const rows = this.database.prepare(`
-      SELECT * FROM memory_evidence WHERE record_id = ? ORDER BY created_at, id
-    `).all(record.id)
-    return Object.freeze(rows.map(evidenceFrom))
+  async evidence(id: string): Promise<readonly MemoryEvidence[]> {
+    const partition = this.partition()
+    const timestamp = this.timestamp()
+    const record = await this.requireRecord(this.repository, partition, id, timestamp)
+    return this.repository.listEvidence(partition, record.id, timestamp)
   }
 
-  observe(request: ObserveMemoryRequest): MemoryRecord {
-    return this.mutate('observe', () => {
-      const operationId = requiredId('memory operationId', request.operationId)
+  observe(request: ObserveMemoryRequest): Promise<MemoryRecord> {
+    return this.mutate('observe', async () => {
+      const operationId = text(request.operationId, 'memory operationId')
       const commandDigest = digest('observe', request)
-      const existing = this.receipt(this.database, operationId)
-      if (existing !== undefined) return this.replayRecord(existing, commandDigest)
-      return this.database.transaction(storage => {
-        const replay = this.receipt(storage, operationId)
-        if (replay !== undefined) return this.replayRecord(replay, commandDigest)
-        const record = this.requireRecord(storage, request.recordId, ['active', 'candidate'])
+      const partition = this.partition()
+      return this.repository.transaction(partition, async unitOfWork => {
         const timestamp = this.timestamp()
-        const evidence = this.insertEvidence(storage, record.id, {
+        const replay = await unitOfWork.getReceipt(partition, operationId)
+        if (replay !== undefined) return this.replayRecord(unitOfWork, partition, replay, commandDigest, timestamp)
+        const record = await this.requireRecord(unitOfWork, partition, request.recordId, timestamp, ['active', 'candidate'])
+        const evidence = await this.insertEvidence(unitOfWork, record.id, {
           turnId: request.turnId,
           role: request.role,
           relation: request.relation,
           excerpt: request.excerpt,
         }, timestamp)
         if (record.status === 'candidate') {
-          storage.prepare('INSERT OR IGNORE INTO memory_candidate_evidence(candidate_id, evidence_id) VALUES (?, ?)')
-            .run(record.id, evidence.id)
-          this.maybePromote(storage, record.id, timestamp)
+          await unitOfWork.linkCandidateEvidence(record.id, evidence.id)
+          await this.maybePromote(unitOfWork, partition, record.id, timestamp)
         }
-        const result = this.requireRecord(storage, record.id)
-        this.insertReceipt(storage, operationId, 'observe', commandDigest, 'record', result.id, result.revision.id, timestamp)
+        const result = await this.requireRecord(unitOfWork, partition, record.id, timestamp)
+        await unitOfWork.insertReceipt(partition, operationId, 'observe', commandDigest, 'record', result.id, result.revision.id, timestamp)
         return result
       })
     })
   }
 
-  correct(request: CorrectMemoryRequest): MemoryRecord {
-    const operationId = requiredId('memory operationId', request.operationId)
-    const content = validateContent(request.content)
-    const times = temporal(request)
-    const commandDigest = digest('correct', { ...request, content })
-    const existing = this.receipt(this.database, operationId)
-    if (existing !== undefined) return this.replayRecord(existing, commandDigest)
-    return this.database.transaction(storage => {
-      const replay = this.receipt(storage, operationId)
-      if (replay !== undefined) return this.replayRecord(replay, commandDigest)
-      const record = this.requireRecord(storage, request.id, ['active'])
-      if (record.revision.id !== request.expectedRevisionId) {
-        throw new MemoryError('REVISION_CONFLICT', `memory "${request.id}" changed before correction`)
-      }
-      const revisionId = this.id()
-      const timestamp = this.timestamp()
-      storage.prepare(`
-        INSERT INTO memory_revisions(
-          id, record_id, ordinal, content, source_session_id, source_kind,
-          supersedes_revision_id, valid_from, valid_until, expires_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, 'correction', ?, ?, ?, ?, ?)
-      `).run(
-        revisionId,
-        record.id,
-        record.revision.ordinal + 1,
-        content,
-        this.ctx.doppelgangerPersona.sessionId,
-        record.revision.id,
-        times.validFrom ?? record.validFrom ?? null,
-        times.validUntil ?? record.validUntil ?? null,
-        times.expiresAt ?? record.expiresAt ?? null,
-        timestamp,
-      )
-      const update = storage.prepare(`
-        UPDATE memory_records
-        SET current_revision_id = ?, confidence = ?, salience = ?,
-            valid_from = ?, valid_until = ?, expires_at = ?, updated_at = ?
-        WHERE id = ? AND current_revision_id = ?
-      `).run(
-        revisionId,
-        unit('memory confidence', request.confidence, record.confidence),
-        unit('memory salience', request.salience, record.salience),
-        times.validFrom ?? record.validFrom ?? null,
-        times.validUntil ?? record.validUntil ?? null,
-        times.expiresAt ?? record.expiresAt ?? null,
-        timestamp,
-        record.id,
-        request.expectedRevisionId,
-      )
-      if (update.changes !== 1) throw new MemoryError('REVISION_CONFLICT', `memory "${request.id}" changed before correction`)
-      storage.prepare('DELETE FROM memory_fts WHERE record_id = ?').run(record.id)
-      storage.prepare('INSERT INTO memory_fts(record_id, revision_id, content) VALUES (?, ?, ?)')
-        .run(record.id, revisionId, content)
-      enqueueMemoryRevisionReplacement(
-        storage,
-        record.instanceId,
-        record.id,
-        record.revision.id,
-        revisionId,
-        timestamp,
-      )
-      this.insertEvidence(storage, record.id, {
-        turnId: request.evidence?.turnId ?? operationId,
-        role: request.evidence?.role ?? 'principal',
-        relation: request.evidence?.relation ?? 'support',
-        excerpt: request.evidence?.excerpt ?? content,
-      }, timestamp)
-      const result = this.requireRecord(storage, record.id)
-      this.insertReceipt(storage, operationId, 'correct', commandDigest, 'record', result.id, result.revision.id, timestamp)
-      return result
-    })
-  }
-
-  forget(request: ForgetMemoryRequest): boolean {
-    const operationId = requiredId('memory operationId', request.operationId)
-    const commandDigest = digest('forget', request)
-    const existing = this.receipt(this.database, operationId)
-    if (existing !== undefined) {
-      if (text(existing.command_digest, 'operation.command_digest') !== commandDigest) {
-        throw new MemoryError('IDEMPOTENCY_CONFLICT', 'operationId was already used for a different memory command')
-      }
-      return text(existing.result_kind, 'operation.result_kind') === 'deleted'
-    }
-    return this.database.transaction(storage => {
-      const replay = this.receipt(storage, operationId)
-      if (replay !== undefined) return text(replay.result_kind, 'operation.result_kind') === 'deleted'
-      const record = this.requireRecord(storage, request.id)
-      const timestamp = this.timestamp()
-      enqueueKnownMemoryProjectionDeletions(storage, record.id, timestamp)
-      deleteMemoryRecordRows(storage, record.id)
-      this.insertReceipt(storage, operationId, 'forget', commandDigest, 'deleted', undefined, undefined, timestamp)
-      return true
-    })
-  }
-
-  pin(request: PinMemoryRequest): MemoryRecord {
-    const operationId = requiredId('memory operationId', request.operationId)
-    const commandDigest = digest(request.pinned ? 'pin' : 'unpin', request)
-    const existing = this.receipt(this.database, operationId)
-    if (existing !== undefined) return this.replayRecord(existing, commandDigest)
-    return this.database.transaction(storage => {
-      const replay = this.receipt(storage, operationId)
-      if (replay !== undefined) return this.replayRecord(replay, commandDigest)
-      const record = this.requireRecord(storage, request.id, ['active'])
-      const timestamp = this.timestamp()
-      storage.prepare('UPDATE memory_records SET pinned = ?, updated_at = ? WHERE id = ?')
-        .run(request.pinned ? 1 : 0, timestamp, record.id)
-      const result = this.requireRecord(storage, record.id)
-      this.insertReceipt(
-        storage,
-        operationId,
-        request.pinned ? 'pin' : 'unpin',
-        commandDigest,
-        'record',
-        result.id,
-        result.revision.id,
-        timestamp,
-      )
-      return result
-    })
-  }
-
-  history(id: string): readonly MemoryRevision[] {
-    const record = this.requireRecord(this.database, id)
-    const rows = this.database.prepare(`
-      SELECT id, ordinal, content, source_session_id, source_kind,
-             supersedes_revision_id, valid_from, valid_until, expires_at, created_at
-      FROM memory_revisions WHERE record_id = ? ORDER BY ordinal
-    `).all(record.id)
-    return Object.freeze(rows.map(row => {
-      const validFrom = optionalText(row.valid_from, 'revision.valid_from')
-      const validUntil = optionalText(row.valid_until, 'revision.valid_until')
-      const expiresAt = optionalText(row.expires_at, 'revision.expires_at')
-      return Object.freeze({
-        id: text(row.id, 'revision.id'),
-        ordinal: Number(row.ordinal),
-        content: text(row.content, 'revision.content'),
-        sourceSessionId: text(row.source_session_id, 'revision.source_session_id'),
-        sourceKind: text(row.source_kind, 'revision.source_kind'),
-        ...(optionalText(row.supersedes_revision_id, 'revision.supersedes_revision_id') === undefined
-          ? {}
-          : { supersedesRevisionId: text(row.supersedes_revision_id, 'revision.supersedes_revision_id') }),
-        ...(validFrom === undefined ? {} : { validFrom }),
-        ...(validUntil === undefined ? {} : { validUntil }),
-        ...(expiresAt === undefined ? {} : { expiresAt }),
-        createdAt: text(row.created_at, 'revision.created_at'),
+  correct(request: CorrectMemoryRequest): Promise<MemoryRecord> {
+    return this.mutate('correct', async () => {
+      const operationId = text(request.operationId, 'memory operationId')
+      const content = validateContent(request.content)
+      const times = temporal(request)
+      const commandDigest = digest('correct', { ...request, content })
+      const partition = this.partition()
+      return this.repository.transaction(partition, async unitOfWork => {
+        const timestamp = this.timestamp()
+        const replay = await unitOfWork.getReceipt(partition, operationId)
+        if (replay !== undefined) return this.replayRecord(unitOfWork, partition, replay, commandDigest, timestamp)
+        const record = await this.requireRecord(unitOfWork, partition, request.id, timestamp, ['active'])
+        if (record.revision.id !== request.expectedRevisionId) {
+          throw new MemoryError('REVISION_CONFLICT', `memory "${request.id}" changed before correction`)
+        }
+        const revisionId = this.id()
+        const resolvedTimes = temporalFields(
+          times.validFrom ?? record.validFrom,
+          times.validUntil ?? record.validUntil,
+          times.expiresAt ?? record.expiresAt,
+        )
+        await unitOfWork.insertRevision({
+          id: revisionId,
+          recordId: record.id,
+          ordinal: record.revision.ordinal + 1,
+          content,
+          sourceSessionId: this.ctx.doppelgangerPersona.sessionId,
+          sourceKind: 'correction',
+          supersedesRevisionId: record.revision.id,
+          ...resolvedTimes,
+          createdAt: timestamp,
+        })
+        const updated = await unitOfWork.updateCurrentRevision({
+          recordId: record.id,
+          expectedRevisionId: request.expectedRevisionId,
+          revisionId,
+          confidence: unit('memory confidence', request.confidence, record.confidence),
+          salience: unit('memory salience', request.salience, record.salience),
+          ...resolvedTimes,
+          timestamp,
+        })
+        if (!updated) throw new MemoryError('REVISION_CONFLICT', `memory "${request.id}" changed before correction`)
+        await unitOfWork.replaceLexicalEntry(record.id, revisionId, content)
+        await unitOfWork.enqueueRevisionReplacement(record.instanceId, record.id, record.revision.id, revisionId, timestamp)
+        await this.insertEvidence(unitOfWork, record.id, {
+          turnId: request.evidence?.turnId ?? operationId,
+          role: request.evidence?.role ?? 'principal',
+          relation: request.evidence?.relation ?? 'support',
+          excerpt: request.evidence?.excerpt ?? content,
+        }, timestamp)
+        const result = await this.requireRecord(unitOfWork, partition, record.id, timestamp)
+        await unitOfWork.insertReceipt(partition, operationId, 'correct', commandDigest, 'record', result.id, result.revision.id, timestamp)
+        return result
       })
-    }))
+    })
   }
 
-  listCandidates(): readonly MemoryRecord[] {
-    const now = this.timestamp()
-    const eligible = memoryEligibility(this.partition(), now, { statuses: ['candidate'] })
-    const rows = this.database.prepare(`${RECORD_SELECT}
-      WHERE ${eligible.sql}
-      ORDER BY r.created_at, r.id
-    `).all(...eligible.parameters)
-    return Object.freeze(rows.map(row => recordFrom(row, now)))
+  forget(request: ForgetMemoryRequest): Promise<boolean> {
+    return this.mutate('forget', async () => {
+      const operationId = text(request.operationId, 'memory operationId')
+      const commandDigest = digest('forget', request)
+      const partition = this.partition()
+      return this.repository.transaction(partition, async unitOfWork => {
+        const replay = await unitOfWork.getReceipt(partition, operationId)
+        if (replay !== undefined) {
+          if (replay.commandDigest !== commandDigest) {
+            throw new MemoryError('IDEMPOTENCY_CONFLICT', 'operationId was already used for a different memory command')
+          }
+          return replay.resultKind === 'deleted'
+        }
+        const timestamp = this.timestamp()
+        const record = await this.requireRecord(unitOfWork, partition, request.id, timestamp)
+        await unitOfWork.enqueueKnownProjectionDeletions(record.id, timestamp)
+        await unitOfWork.deleteRecord(record.id)
+        await unitOfWork.insertReceipt(partition, operationId, 'forget', commandDigest, 'deleted', undefined, undefined, timestamp)
+        return true
+      })
+    })
   }
 
-  approve(request: CandidateDecisionRequest): MemoryRecord {
+  pin(request: PinMemoryRequest): Promise<MemoryRecord> {
+    return this.mutate(request.pinned ? 'pin' : 'unpin', async () => {
+      const operationId = text(request.operationId, 'memory operationId')
+      const commandKind = request.pinned ? 'pin' : 'unpin'
+      const commandDigest = digest(commandKind, request)
+      const partition = this.partition()
+      return this.repository.transaction(partition, async unitOfWork => {
+        const timestamp = this.timestamp()
+        const replay = await unitOfWork.getReceipt(partition, operationId)
+        if (replay !== undefined) return this.replayRecord(unitOfWork, partition, replay, commandDigest, timestamp)
+        const record = await this.requireRecord(unitOfWork, partition, request.id, timestamp, ['active'])
+        await unitOfWork.setPinned(record.id, request.pinned, timestamp)
+        const result = await this.requireRecord(unitOfWork, partition, record.id, timestamp)
+        await unitOfWork.insertReceipt(partition, operationId, commandKind, commandDigest, 'record', result.id, result.revision.id, timestamp)
+        return result
+      })
+    })
+  }
+
+  async history(id: string): Promise<readonly MemoryRevision[]> {
+    const partition = this.partition()
+    const timestamp = this.timestamp()
+    const record = await this.requireRecord(this.repository, partition, id, timestamp)
+    return this.repository.listRevisions(partition, record.id, timestamp)
+  }
+
+  listCandidates(): Promise<readonly MemoryRecord[]> {
+    return this.repository.listCandidates(this.partition(), this.timestamp())
+  }
+
+  approve(request: CandidateDecisionRequest): Promise<MemoryRecord> {
     return this.mutate('approve-candidate', () => this.decideCandidate(request, 'approve'))
   }
 
-  reject(request: CandidateDecisionRequest): MemoryRecord {
+  reject(request: CandidateDecisionRequest): Promise<MemoryRecord> {
     return this.mutate('reject-candidate', () => this.decideCandidate(request, 'reject'))
   }
 
-  private decideCandidate(request: CandidateDecisionRequest, decision: 'approve' | 'reject'): MemoryRecord {
-    const operationId = requiredId('memory operationId', request.operationId)
+  private async decideCandidate(request: CandidateDecisionRequest, decision: 'approve' | 'reject'): Promise<MemoryRecord> {
+    const operationId = text(request.operationId, 'memory operationId')
     const commandDigest = digest(decision, request)
-    const existing = this.receipt(this.database, operationId)
-    if (existing !== undefined) return this.replayRecord(existing, commandDigest)
-    return this.database.transaction(storage => {
-      const replay = this.receipt(storage, operationId)
-      if (replay !== undefined) return this.replayRecord(replay, commandDigest)
-      const candidate = this.requireRecord(storage, request.candidateId, ['candidate'])
+    const partition = this.partition()
+    return this.repository.transaction(partition, async unitOfWork => {
       const timestamp = this.timestamp()
-      if (decision === 'approve') this.promote(storage, candidate, 'manual-approval', timestamp, true)
+      const replay = await unitOfWork.getReceipt(partition, operationId)
+      if (replay !== undefined) return this.replayRecord(unitOfWork, partition, replay, commandDigest, timestamp)
+      const candidate = await this.requireRecord(unitOfWork, partition, request.candidateId, timestamp, ['candidate'])
+      if (decision === 'approve') await this.promote(unitOfWork, partition, candidate, 'manual-approval', timestamp, true)
       else {
-        storage.prepare(`UPDATE memory_records SET status = 'rejected', updated_at = ? WHERE id = ? AND status = 'candidate'`)
-          .run(timestamp, candidate.id)
-        enqueueKnownMemoryProjectionDeletions(storage, candidate.id, timestamp)
+        await unitOfWork.transitionStatus(candidate.id, 'candidate', 'rejected', timestamp)
+        await unitOfWork.enqueueKnownProjectionDeletions(candidate.id, timestamp)
       }
-      const result = this.requireRecord(storage, candidate.id)
-      this.insertReceipt(storage, operationId, decision, commandDigest, 'record', result.id, result.revision.id, timestamp)
+      const result = await this.requireRecord(unitOfWork, partition, candidate.id, timestamp)
+      await unitOfWork.insertReceipt(partition, operationId, decision, commandDigest, 'record', result.id, result.revision.id, timestamp)
       return result
     })
   }
 
-  corroborate(request: CandidateEvidenceRequest): MemoryRecord {
+  corroborate(request: CandidateEvidenceRequest): Promise<MemoryRecord> {
     return this.observe({
       operationId: request.operationId,
       recordId: request.candidateId,
@@ -1043,171 +615,117 @@ export class MemoryService extends Service {
     })
   }
 
-  conflicts(recordId?: string): readonly MemoryConflict[] {
-    if (recordId !== undefined) this.requireRecord(this.database, recordId)
-    const now = this.timestamp()
-    const eligible = memoryEligibility(this.partition(), now)
-    const rows = this.database.prepare(`
-      SELECT c.* FROM memory_conflicts c
-      JOIN memory_records r ON r.id = c.candidate_record_id
-      WHERE ${eligible.sql}
-        ${recordId === undefined ? '' : 'AND (c.active_record_id = ? OR c.candidate_record_id = ?)'}
-      ORDER BY c.created_at, c.id
-    `).all(...eligible.parameters, ...(recordId === undefined ? [] : [recordId, recordId]))
-    return Object.freeze(rows.map(conflictFrom))
+  async conflicts(recordId?: string): Promise<readonly MemoryConflict[]> {
+    const partition = this.partition()
+    const timestamp = this.timestamp()
+    if (recordId !== undefined) await this.requireRecord(this.repository, partition, recordId, timestamp)
+    return this.repository.listConflicts(partition, recordId)
   }
 
-  resolveConflict(request: ResolveMemoryConflictRequest): MemoryRecord {
-    const operationId = requiredId('memory operationId', request.operationId)
-    const commandDigest = digest('resolve-conflict', request)
-    const existing = this.receipt(this.database, operationId)
-    if (existing !== undefined) return this.replayRecord(existing, commandDigest)
-    return this.database.transaction(storage => {
-      const replay = this.receipt(storage, operationId)
-      if (replay !== undefined) return this.replayRecord(replay, commandDigest)
-      const conflictRow = storage.prepare('SELECT * FROM memory_conflicts WHERE id = ? AND status = ?')
-        .get(request.conflictId, 'unresolved')
-      if (conflictRow === undefined) throw new MemoryError('CONFLICT_NOT_FOUND', 'unresolved memory conflict was not found')
-      const conflict = conflictFrom(conflictRow)
-      const active = this.requireRecord(storage, conflict.activeRecordId, ['active'])
-      const candidate = this.requireRecord(storage, conflict.candidateRecordId, ['candidate'])
-      if (active.revision.id !== request.expectedRevisionId) {
-        throw new MemoryError('REVISION_CONFLICT', `memory "${active.id}" changed before conflict resolution`)
-      }
-      const timestamp = this.timestamp()
-      let resolutionRevisionId: string | undefined
-      let status: MemoryConflict['status']
-      if (request.resolution === 'promote-candidate') {
-        resolutionRevisionId = this.id()
-        storage.prepare(`
-          INSERT INTO memory_revisions(
-            id, record_id, ordinal, content, source_session_id, source_kind,
-            supersedes_revision_id, valid_from, valid_until, expires_at, created_at
-          ) VALUES (?, ?, ?, ?, ?, 'conflict-resolution', ?, ?, ?, ?, ?)
-        `).run(
-          resolutionRevisionId,
-          active.id,
-          active.revision.ordinal + 1,
-          candidate.revision.content,
-          this.ctx.doppelgangerPersona.sessionId,
-          active.revision.id,
-          candidate.validFrom ?? null,
-          candidate.validUntil ?? null,
-          candidate.expiresAt ?? null,
-          timestamp,
-        )
-        const update = storage.prepare(`
-          UPDATE memory_records
-          SET current_revision_id = ?, confidence = ?, salience = ?,
-              valid_from = ?, valid_until = ?, expires_at = ?, updated_at = ?
-          WHERE id = ? AND current_revision_id = ?
-        `).run(
-          resolutionRevisionId,
-          candidate.confidence,
-          candidate.salience,
-          candidate.validFrom ?? null,
-          candidate.validUntil ?? null,
-          candidate.expiresAt ?? null,
-          timestamp,
-          active.id,
-          request.expectedRevisionId,
-        )
-        if (update.changes !== 1) throw new MemoryError('REVISION_CONFLICT', `memory "${active.id}" changed before conflict resolution`)
-        storage.prepare(`UPDATE memory_records SET status = 'rejected', updated_at = ? WHERE id = ?`).run(timestamp, candidate.id)
-        storage.prepare('DELETE FROM memory_fts WHERE record_id = ?').run(active.id)
-        storage.prepare('INSERT INTO memory_fts(record_id, revision_id, content) VALUES (?, ?, ?)')
-          .run(active.id, resolutionRevisionId, candidate.revision.content)
-        enqueueMemoryRevisionReplacement(
-          storage,
-          active.instanceId,
-          active.id,
-          active.revision.id,
-          resolutionRevisionId,
-          timestamp,
-        )
-        enqueueKnownMemoryProjectionDeletions(storage, candidate.id, timestamp)
-        status = 'resolved-candidate'
-      } else {
-        status = request.resolution === 'keep-active' ? 'resolved-active' : 'dismissed'
-        if (request.resolution === 'keep-active') {
-          storage.prepare(`UPDATE memory_records SET status = 'rejected', updated_at = ? WHERE id = ?`).run(timestamp, candidate.id)
-          enqueueKnownMemoryProjectionDeletions(storage, candidate.id, timestamp)
+  resolveConflict(request: ResolveMemoryConflictRequest): Promise<MemoryRecord> {
+    return this.mutate('resolve-conflict', async () => {
+      const operationId = text(request.operationId, 'memory operationId')
+      const commandDigest = digest('resolve-conflict', request)
+      const partition = this.partition()
+      return this.repository.transaction(partition, async unitOfWork => {
+        const timestamp = this.timestamp()
+        const replay = await unitOfWork.getReceipt(partition, operationId)
+        if (replay !== undefined) return this.replayRecord(unitOfWork, partition, replay, commandDigest, timestamp)
+        const conflict = await unitOfWork.getUnresolvedConflict(partition, request.conflictId, timestamp)
+        if (conflict === undefined) throw new MemoryError('CONFLICT_NOT_FOUND', 'unresolved memory conflict was not found')
+        const active = await this.requireRecord(unitOfWork, partition, conflict.activeRecordId, timestamp, ['active'])
+        const candidate = await this.requireRecord(unitOfWork, partition, conflict.candidateRecordId, timestamp, ['candidate'])
+        if (active.revision.id !== request.expectedRevisionId) {
+          throw new MemoryError('REVISION_CONFLICT', `memory "${active.id}" changed before conflict resolution`)
         }
-      }
-      storage.prepare(`
-        UPDATE memory_conflicts
-        SET status = ?, resolved_at = ?, resolution_revision_id = ?
-        WHERE id = ? AND status = 'unresolved'
-      `).run(status, timestamp, resolutionRevisionId ?? null, conflict.id)
-      const result = this.requireRecord(storage, active.id)
-      this.insertReceipt(storage, operationId, 'resolve-conflict', commandDigest, 'record', result.id, result.revision.id, timestamp)
-      return result
+        let resolutionRevisionId: string | undefined
+        let status: MemoryConflict['status']
+        if (request.resolution === 'promote-candidate') {
+          resolutionRevisionId = this.id()
+          const candidateTimes = temporalFields(candidate.validFrom, candidate.validUntil, candidate.expiresAt)
+          await unitOfWork.insertRevision({
+            id: resolutionRevisionId,
+            recordId: active.id,
+            ordinal: active.revision.ordinal + 1,
+            content: candidate.revision.content,
+            sourceSessionId: this.ctx.doppelgangerPersona.sessionId,
+            sourceKind: 'conflict-resolution',
+            supersedesRevisionId: active.revision.id,
+            ...candidateTimes,
+            createdAt: timestamp,
+          })
+          const updated = await unitOfWork.updateCurrentRevision({
+            recordId: active.id,
+            expectedRevisionId: request.expectedRevisionId,
+            revisionId: resolutionRevisionId,
+            confidence: candidate.confidence,
+            salience: candidate.salience,
+            ...candidateTimes,
+            timestamp,
+          })
+          if (!updated) throw new MemoryError('REVISION_CONFLICT', `memory "${active.id}" changed before conflict resolution`)
+          await unitOfWork.transitionStatus(candidate.id, 'candidate', 'rejected', timestamp)
+          await unitOfWork.replaceLexicalEntry(active.id, resolutionRevisionId, candidate.revision.content)
+          await unitOfWork.enqueueRevisionReplacement(active.instanceId, active.id, active.revision.id, resolutionRevisionId, timestamp)
+          await unitOfWork.enqueueKnownProjectionDeletions(candidate.id, timestamp)
+          status = 'resolved-candidate'
+        } else {
+          status = request.resolution === 'keep-active' ? 'resolved-active' : 'dismissed'
+          if (request.resolution === 'keep-active') {
+            await unitOfWork.transitionStatus(candidate.id, 'candidate', 'rejected', timestamp)
+            await unitOfWork.enqueueKnownProjectionDeletions(candidate.id, timestamp)
+          }
+        }
+        await unitOfWork.resolveConflict(conflict.id, status, timestamp, resolutionRevisionId)
+        const result = await this.requireRecord(unitOfWork, partition, active.id, timestamp)
+        await unitOfWork.insertReceipt(partition, operationId, 'resolve-conflict', commandDigest, 'record', result.id, result.revision.id, timestamp)
+        return result
+      })
     })
   }
 
-  private maybePromote(database: InstanceSqliteDatabase, candidateId: string, timestamp: string): void {
-    const candidate = this.requireRecord(database, candidateId, ['candidate'])
-    const contradiction = database.prepare(`
-      SELECT 1 AS found FROM memory_evidence
-      WHERE record_id = ? AND relation = 'contradiction' LIMIT 1
-    `).get(candidate.id)
-    const conflict = database.prepare(`
-      SELECT 1 AS found FROM memory_conflicts
-      WHERE candidate_record_id = ? AND status = 'unresolved' LIMIT 1
-    `).get(candidate.id)
-    if (contradiction !== undefined || conflict !== undefined) return
-    const rolePredicate = candidate.kind === 'preference' ? `AND role = 'principal'` : ''
-    const sessions = Number(database.prepare(`
-      SELECT COUNT(DISTINCT source_session_id) AS count
-      FROM memory_evidence
-      WHERE record_id = ? AND relation = 'support' ${rolePredicate}
-    `).get(candidate.id)?.count)
-    if (sessions < this.automaticPromotionDistinctSessions) return
-    this.promote(database, candidate, 'corroboration', timestamp, false)
+  private async maybePromote(
+    unitOfWork: MemoryUnitOfWork,
+    partition: MemoryPartition,
+    candidateId: string,
+    timestamp: string,
+  ): Promise<void> {
+    const candidate = await this.requireRecord(unitOfWork, partition, candidateId, timestamp, ['candidate'])
+    const evidence = await unitOfWork.promotionEvidence(candidate.id, candidate.kind === 'preference')
+    if (evidence.contradiction || evidence.unresolvedConflict) return
+    if (evidence.distinctSupportingSessions < this.automaticPromotionDistinctSessions) return
+    await this.promote(unitOfWork, partition, candidate, 'corroboration', timestamp, false)
   }
 
-  private promote(
-    database: InstanceSqliteDatabase,
+  private async promote(
+    unitOfWork: MemoryUnitOfWork,
+    partition: MemoryPartition,
     candidate: MemoryRecord,
     sourceKind: string,
     timestamp: string,
     manual: boolean,
-  ): void {
-    const unresolved = database.prepare(`
-      SELECT 1 AS found
-      FROM memory_conflicts c
-      WHERE c.candidate_record_id = ? AND c.status = 'unresolved'
-      UNION ALL
-      SELECT 1 AS found
-      FROM memory_evidence e
-      WHERE e.record_id = ? AND e.relation = 'contradiction'
-      LIMIT 1
-    `).get(candidate.id, candidate.id)
-    if (unresolved !== undefined) {
+  ): Promise<void> {
+    const evidence = await unitOfWork.promotionEvidence(candidate.id, false)
+    if (evidence.contradiction || evidence.unresolvedConflict) {
       if (manual) throw new MemoryError('UNRESOLVED_CONFLICT', 'candidate has unresolved contradiction evidence')
       return
     }
-    const active = this.sameSubject(database, candidate.kind, candidate.subjectKey, candidate.scope, 'active')
+    const active = await unitOfWork.findSubject(partition, {
+      kind: candidate.kind,
+      subjectKey: candidate.subjectKey,
+      scope: candidate.scope,
+      status: 'active',
+    }, timestamp)
     if (active !== undefined) {
       if (manual) throw new MemoryError('SUBJECT_CONFLICT', 'candidate conflicts with active memory and must be resolved explicitly')
       return
     }
-    const result = database.prepare(`
-      UPDATE memory_records SET status = 'active', updated_at = ?
-      WHERE id = ? AND status = 'candidate'
-    `).run(timestamp, candidate.id)
-    if (result.changes !== 1) throw new MemoryError('INVALID_CANDIDATE', `candidate "${candidate.id}" is not eligible`)
-    database.prepare('INSERT INTO memory_fts(record_id, revision_id, content) VALUES (?, ?, ?)')
-      .run(candidate.id, candidate.revision.id, candidate.revision.content)
-    enqueueActiveMemoryProjection(
-      database,
-      candidate.instanceId,
-      candidate.id,
-      candidate.revision.id,
-      timestamp,
-    )
-    database.prepare('UPDATE memory_revisions SET source_kind = ? WHERE id = ?')
-      .run(sourceKind, candidate.revision.id)
+    if (!await unitOfWork.transitionStatus(candidate.id, 'candidate', 'active', timestamp)) {
+      throw new MemoryError('INVALID_CANDIDATE', `candidate "${candidate.id}" is not eligible`)
+    }
+    await unitOfWork.replaceLexicalEntry(candidate.id, candidate.revision.id, candidate.revision.content)
+    await unitOfWork.enqueueActiveProjection(candidate.instanceId, candidate.id, candidate.revision.id, timestamp)
+    await unitOfWork.updateRevisionSourceKind(candidate.revision.id, sourceKind)
   }
 
   semanticFailure(): MemoryVectorFailure | undefined {
@@ -1215,8 +733,8 @@ export class MemoryService extends Service {
   }
 
   private recordSemanticFailure(error: unknown): void {
-    const candidate = typeof error === 'object' && error !== null
-      ? (error as { code?: unknown }).code
+    const candidate = typeof error === 'object' && error !== null && 'code' in error
+      ? error.code
       : undefined
     const code: MemorySemanticFailureCode = [
       'backend', 'dimension', 'embedder', 'health', 'identity', 'malformed-hit', 'timeout',
@@ -1230,58 +748,41 @@ export class MemoryService extends Service {
   }
 
   private validSemanticHit(value: unknown, generationId: string): MemorySemanticHit | undefined {
-    if (typeof value !== 'object' || value === null) return undefined
-    const hit = value as Partial<MemorySemanticHit>
-    if (hit.generationId !== generationId
-      || typeof hit.recordId !== 'string' || hit.recordId.length === 0
-      || typeof hit.revisionId !== 'string' || hit.revisionId.length === 0
-      || !Number.isSafeInteger(hit.rank) || Number(hit.rank) <= 0) return undefined
+    if (typeof value !== 'object' || value === null
+      || !('generationId' in value) || value.generationId !== generationId
+      || !('recordId' in value) || typeof value.recordId !== 'string' || value.recordId.length === 0
+      || !('revisionId' in value) || typeof value.revisionId !== 'string' || value.revisionId.length === 0
+      || !('rank' in value) || typeof value.rank !== 'number' || !Number.isSafeInteger(value.rank) || value.rank <= 0) return undefined
     return Object.freeze({
       generationId,
-      recordId: hit.recordId,
-      revisionId: hit.revisionId,
-      rank: Number(hit.rank),
+      recordId: value.recordId,
+      revisionId: value.revisionId,
+      rank: value.rank,
     })
   }
 
-  stableProfile(): readonly MemoryRecord[] {
-    const now = this.timestamp()
-    const eligible = memoryEligibility(this.partition(), now, { statuses: ['active'], temporal: true })
-    const rows = this.database.prepare(`${RECORD_SELECT}
-      WHERE ${eligible.sql}
-        AND r.scope_kind = 'relationship'
-        AND (
-          (r.pinned = 1 AND r.kind = 'preference')
-          OR (r.kind = 'fact' AND r.subject_key LIKE 'principal.identity.%')
-        )
-      ORDER BY
-        CASE WHEN r.pinned = 1 AND r.kind = 'preference' THEN 1 ELSE 0 END DESC,
-        r.salience DESC,
-        r.updated_at DESC,
-        r.id
-      LIMIT ?
-    `).all(...eligible.parameters, STABLE_PROFILE_LIMIT)
-    return Object.freeze(rows.map(row => recordFrom(row, now)))
+  stableProfile(): Promise<readonly MemoryRecord[]> {
+    return this.repository.stableProfile(this.partition(), this.timestamp(), STABLE_PROFILE_LIMIT)
   }
 
-  /**
-   * Assemble automatic recall behind one final canonical validation boundary.
-   * Semantic retrieval may await external work, so stable identities are retained
-   * only as record ids and reloaded before any contribution is returned.
-   */
   async automaticRecall(query: string, tokenBudget: number): Promise<readonly MemoryRecord[]> {
-    if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 0) throw new MemoryError('INVALID_BUDGET', 'memory recall token budget must be a non-negative safe integer')
+    if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 0) {
+      throw new MemoryError('INVALID_BUDGET', 'memory recall token budget must be a non-negative safe integer')
+    }
     if (tokenBudget === 0) return Object.freeze([])
-    const stableIds = this.stableProfile().map(record => record.id)
+    const stable = await this.stableProfile()
     const ranked = query.trim().length === 0 ? [] : await this.search({ query, tokenBudget })
+    const partition = this.partition()
+    const orderedIds = [...stable.map(record => record.id), ...ranked.map(result => result.record.id)]
+    const snapshot = await this.repository.readCanonicalSnapshot(partition, orderedIds, this.timestamp())
+    const records = new Map(snapshot.records.map(record => [record.id, record]))
     const selected: MemoryRecord[] = []
     const seen = new Set<string>()
     let tokens = 0
-    const finalCandidates = [...stableIds, ...ranked.map(result => result.record.id)]
-    for (const id of finalCandidates) {
+    for (const id of orderedIds) {
       if (seen.has(id)) continue
       seen.add(id)
-      const current = this.visibleRecord(this.database, id, ['active'], true)
+      const current = records.get(id)
       if (current === undefined) continue
       const candidateTokens = Math.ceil(Buffer.byteLength(current.revision.content, 'utf8') / 4)
       if (tokens + candidateTokens > tokenBudget) continue
@@ -1292,7 +793,8 @@ export class MemoryService extends Service {
   }
 
   async search(request: MemorySearchRequest): Promise<readonly MemorySearchResult[]> {
-    this.logger.debug('memory.search.started semantic=%s', this.ctx.get('doppelgangerMemorySemantic') === undefined ? 'absent' : 'available')
+    const semantic = this.ctx.get('doppelgangerMemorySemantic') as MemorySemanticRetriever | undefined
+    this.logger.debug('memory.search.started semantic=%s', semantic === undefined ? 'absent' : 'available')
     const query = request.query.trim()
     if (query.length === 0) throw new MemoryError('INVALID_QUERY', 'memory search query must be non-empty')
     if (!Number.isSafeInteger(request.tokenBudget) || request.tokenBudget < 0) {
@@ -1302,32 +804,24 @@ export class MemoryService extends Service {
     if (!Number.isSafeInteger(limit) || limit <= 0) {
       throw new MemoryError('INVALID_LIMIT', 'memory search limit must be a positive safe integer')
     }
-    const now = this.timestamp()
+
     const partition = this.partition()
-    const eligible = memoryEligibility(partition, now, { statuses: ['active'], temporal: true })
-    const lexicalQuery = [...query.matchAll(/[\p{L}\p{N}_-]+/gu)]
-      .map(match => `"${match[0].replaceAll('"', '""')}"`).join(' OR ')
-    const lexicalRows = lexicalQuery.length === 0
-      ? []
-      : this.database.prepare(`${RECORD_SELECT}
-          JOIN memory_fts f ON f.record_id = r.id AND f.revision_id = r.current_revision_id
-          WHERE ${eligible.sql} AND memory_fts MATCH ?
-          ORDER BY bm25(memory_fts), r.id
-          LIMIT ?
-        `).all(...eligible.parameters, lexicalQuery, this.lexicalTopK)
+    const initialTimestamp = this.timestamp()
+    const [lexical, generationId] = await Promise.all([
+      this.repository.lexicalCandidates(partition, query, initialTimestamp, this.lexicalTopK),
+      this.repository.activeGeneration(partition.instanceId),
+    ])
     const ranks = new Map<string, { lexicalRank?: number; semanticRank?: number }>()
     const expectedRevisions = new Map<string, string>()
-    lexicalRows.forEach((row, index) => {
-      const record = recordFrom(row, now)
-      ranks.set(record.id, { lexicalRank: index + 1 })
-      expectedRevisions.set(record.id, record.revision.id)
+    lexical.forEach((candidate, index) => {
+      ranks.set(candidate.recordId, { lexicalRank: index + 1 })
+      expectedRevisions.set(candidate.recordId, candidate.revisionId)
     })
 
-    const semantic = this.ctx.get('doppelgangerMemorySemantic') as MemorySemanticRetriever | undefined
-    const generationId = activeMemorySemanticGeneration(this.database, partition.instanceId)
+    const semanticHits: MemorySemanticHit[] = []
     if (semantic !== undefined && generationId !== undefined) {
       const projection = projectMemorySemanticQuery(query, this.semanticQueryMaximumCharacters)
-      let timeout: ReturnType<typeof setTimeout> | undefined
+      let timeout: NodeJS.Timeout | undefined
       try {
         const deadline = new Promise<never>((_resolve, reject) => {
           timeout = setTimeout(() => reject(Object.assign(new Error('semantic retrieval timed out'), { code: 'timeout' })), this.semanticTimeoutMs)
@@ -1345,40 +839,40 @@ export class MemoryService extends Service {
         if (!Array.isArray(response)) {
           throw Object.assign(new Error('semantic retrieval returned a malformed response'), { code: 'malformed-hit' })
         }
-        const validated: MemorySemanticHit[] = []
         for (const value of response) {
           const hit = this.validSemanticHit(value, generationId)
           if (hit === undefined) {
             throw Object.assign(new Error('semantic retrieval returned a malformed hit'), { code: 'malformed-hit' })
           }
-          validated.push(hit)
-        }
-        for (const hit of validated) {
-          const record = this.visibleRecord(this.database, hit.recordId, ['active'], true)
-          if (record === undefined || record.revision.id !== hit.revisionId) continue
-          const components = ranks.get(hit.recordId) ?? {}
-          if (components.semanticRank === undefined || hit.rank < components.semanticRank) {
-            components.semanticRank = hit.rank
-          }
-          ranks.set(hit.recordId, components)
-          expectedRevisions.set(hit.recordId, hit.revisionId)
+          semanticHits.push(hit)
         }
         this.lastSemanticFailure = undefined
       } catch (error) {
+        semanticHits.length = 0
         this.recordSemanticFailure(error)
       } finally {
         clearTimeout(timeout)
       }
     }
 
-    const revalidated = new Map<string, MemoryRecord>()
-    for (const [id, expectedRevisionId] of expectedRevisions) {
-      const current = this.visibleRecord(this.database, id, ['active'], true)
-      if (current !== undefined && current.revision.id === expectedRevisionId) revalidated.set(id, current)
+    const allIds = [...new Set([...lexical.map(candidate => candidate.recordId), ...semanticHits.map(hit => hit.recordId)])]
+    const snapshot = await this.repository.readCanonicalSnapshot(partition, allIds, this.timestamp())
+    const current = new Map(snapshot.records.map(record => [record.id, record]))
+    if (generationId !== undefined && snapshot.activeGenerationId === generationId) {
+      for (const hit of semanticHits) {
+        const record = current.get(hit.recordId)
+        if (record === undefined || record.revision.id !== hit.revisionId) continue
+        const components = ranks.get(hit.recordId) ?? {}
+        if (components.semanticRank === undefined || hit.rank < components.semanticRank) components.semanticRank = hit.rank
+        ranks.set(hit.recordId, components)
+        expectedRevisions.set(hit.recordId, hit.revisionId)
+      }
     }
+
     const ranked = [...ranks.entries()].flatMap(([id, components]) => {
-      const record = revalidated.get(id)
-      if (record === undefined) return []
+      const record = current.get(id)
+      const expectedRevisionId = expectedRevisions.get(id)
+      if (record === undefined || expectedRevisionId === undefined || record.revision.id !== expectedRevisionId) return []
       const score = (components.lexicalRank === undefined ? 0 : 1 / (RRF_K + components.lexicalRank))
         + (components.semanticRank === undefined ? 0 : 1 / (RRF_K + components.semanticRank))
       return [{ record, score, ...components }]

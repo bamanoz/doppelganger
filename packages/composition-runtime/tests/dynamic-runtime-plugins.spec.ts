@@ -188,7 +188,11 @@ describe('Dynamic Runtime Plugins under Composition Runtime', () => {
     const session = await runtime.activate({
       composition: definition,
       sessionId: 'dynamic-composition-session',
-      runtimePlugins: { host },
+      protectedComposition: {
+        entries: [
+          { id: 'host', plugin: host },
+        ],
+      },
     })
     if (tools === undefined) throw new Error('host tools did not activate')
     expect(tools.snapshot().tools.map(tool => tool.name)).toContain('runtime-plugin.run')

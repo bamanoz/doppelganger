@@ -19,6 +19,7 @@ function tool(name, description = name, inputSchema = { type: 'object', addition
 }
 
 function tools(cursor) {
+  if (process.env.MCP_INITIAL_DISCOVERY_MODE === 'empty') return { tools: [] }
   if (process.env.MCP_INITIAL_DISCOVERY_MODE === 'duplicate') return { tools: [tool('duplicate'), tool('duplicate')] }
   if (process.env.MCP_INITIAL_DISCOVERY_MODE === 'invalid-schema') {
     return { tools: [tool('invalid_schema', 'invalid', { type: 'object', properties: { value: { type: 'not-a-json-type' } } })] }

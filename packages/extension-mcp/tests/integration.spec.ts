@@ -34,12 +34,13 @@ async function setup(config: McpPluginConfig, beforePlugin?: (ctx: Context) => v
   ctx.provide('doppelgangerRuntimeSession', Object.freeze({ sessionId: randomUUID(), runtimePresetId: 'mcp-test' }))
   const tools = await ctx.plugin(ToolRegistry)
   beforePlugin?.(ctx)
+  const fiber = ctx.plugin(McpImportPlugin, config)
   try {
-    const fiber = await ctx.plugin(McpImportPlugin, config)
+    await fiber
     fibersByContext.set(ctx, [tools, fiber])
     return { ctx, fiber }
   } catch (cause) {
-    await tools.dispose()
+    await Promise.allSettled([fiber.dispose(), tools.dispose()])
     throw cause
   }
 }
@@ -153,6 +154,12 @@ async function startHttpFixture(expectedAuthorization: string, options: { readon
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('HTTP fixture did not bind a TCP port')
   return { server, url: `http://127.0.0.1:${address.port}/mcp` }
+}
+
+async function closeHttpServer(server: HttpServer): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>()
+  server.close(error => error === undefined ? resolve() : reject(error))
+  await promise
 }
 
 describe.sequential('MCP importer integrations', () => {
@@ -365,7 +372,7 @@ describe.sequential('MCP importer integrations', () => {
       await disposeContext(ctx)
     } finally {
       delete process.env.MCP_TEST_AUTHORIZATION
-      await new Promise<void>((resolve, reject) => fixture.server.close(error => error === undefined ? resolve() : reject(error)))
+      await closeHttpServer(fixture.server)
     }
   })
 
@@ -390,7 +397,7 @@ describe.sequential('MCP importer integrations', () => {
       expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
       await waitForServer(ctx, 'delayed', 'active')
     } finally {
-      await new Promise<void>((resolve, reject) => fixture.server.close(error => error === undefined ? resolve() : reject(error)))
+      await closeHttpServer(fixture.server)
     }
   })
 
@@ -744,6 +751,223 @@ describe.sequential('MCP importer integrations', () => {
     await waitForServer(ctx, 'spawn', 'failed')
     await new Promise(resolve => setTimeout(resolve, 80))
     expect(ctx.doppelgangerMcp.snapshot().diagnostics.filter(diagnostic => diagnostic.code === 'MCP_SPAWN_FAILED')).toHaveLength(1)
+  })
+
+  it('rejects invalid startup mode before starting any MCP server', async () => {
+    const marker = join(tmpdir(), `doppelganger-mcp-${randomUUID()}.args`)
+    process.env.MCP_TEST_ARGUMENT_MARKER = marker
+    let context: Context | undefined
+
+    await expect(setup({
+      startupMode: 'invalid',
+      servers: {
+        fixture: {
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [stdioFixture],
+            environment: { MCP_ARGUMENT_MARKER: { env: 'MCP_TEST_ARGUMENT_MARKER' } },
+          },
+        },
+      },
+    } as unknown as McpPluginConfig, ctx => { context = ctx })).rejects.toThrow('must be "background" or "await-ready"')
+
+    expect(existsSync(marker)).toBe(false)
+    expect(context?.get('doppelgangerMcp', false)).toBeUndefined()
+  })
+
+  it('treats an empty enabled MCP set as ready in await-ready mode', async () => {
+    const { ctx } = await setup({
+      startupMode: 'await-ready',
+      servers: {
+        disabled: {
+          enabled: false,
+          transport: { type: 'stdio', command: join(tmpdir(), `missing-mcp-${randomUUID()}`) },
+        },
+      },
+    })
+
+    expect(ctx.doppelgangerMcp.snapshot()).toMatchObject({ servers: [], diagnostics: [] })
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
+  })
+
+  it('completes stdio and HTTP catalogs before await-ready apply returns', async () => {
+    process.env.MCP_TEST_AUTHORIZATION = 'Bearer await-ready-secret'
+    const fixture = await startHttpFixture(process.env.MCP_TEST_AUTHORIZATION, { discoveryDelayMs: 80 })
+    try {
+      const { ctx } = await setup({
+        startupMode: 'await-ready',
+        servers: {
+          local: { transport: { type: 'stdio', command: process.execPath, args: [stdioFixture] } },
+          remote: {
+            transport: {
+              type: 'streamable-http',
+              url: fixture.url,
+              headers: { Authorization: { env: 'MCP_TEST_AUTHORIZATION' } },
+            },
+          },
+        },
+      })
+
+      expect(ctx.doppelgangerMcp.snapshot().servers).toEqual([
+        expect.objectContaining({ id: 'local', state: 'active' }),
+        expect.objectContaining({ id: 'remote', state: 'active' }),
+      ])
+      const names = ctx.doppelgangerTools.snapshot().tools.map(tool => tool.name)
+      expect(names).toContain('mcp-local.echo-value')
+      expect(names).toContain('mcp-remote.remote-echo')
+    } finally {
+      await closeHttpServer(fixture.server)
+    }
+  })
+
+  it('publishes the MCP service before await-ready external work completes', async () => {
+    process.env.MCP_TEST_SLOW_INITIALIZE = '180'
+    const ctx = new Context()
+    ctx.provide('doppelgangerRuntimeSession', Object.freeze({ sessionId: randomUUID(), runtimePresetId: 'mcp-test' }))
+    const tools = await ctx.plugin(ToolRegistry)
+    const fiber = ctx.plugin(McpImportPlugin, {
+      startupMode: 'await-ready',
+      servers: {
+        slow: {
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [stdioFixture],
+            environment: { MCP_INITIALIZE_DELAY_MS: { env: 'MCP_TEST_SLOW_INITIALIZE' } },
+          },
+        },
+      },
+    })
+    let settled = false
+    const activation = fiber.await().finally(() => { settled = true })
+    fibersByContext.set(ctx, [tools, fiber])
+
+    await waitFor(() => ctx.get('doppelgangerMcp', false) !== undefined)
+    expect(settled).toBe(false)
+    expect(ctx.doppelgangerMcp.snapshot().servers).toEqual([
+      expect.objectContaining({ id: 'slow', state: 'connecting' }),
+    ])
+    await activation
+    expect(ctx.doppelgangerMcp.snapshot().servers[0]).toMatchObject({ state: 'active' })
+  })
+
+  it('accepts an active await-ready MCP server with zero tools', async () => {
+    process.env.MCP_TEST_EMPTY_DISCOVERY = 'empty'
+    const { ctx } = await setup({
+      startupMode: 'await-ready',
+      servers: {
+        empty: {
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [stdioFixture],
+            environment: { MCP_INITIAL_DISCOVERY_MODE: { env: 'MCP_TEST_EMPTY_DISCOVERY' } },
+          },
+        },
+      },
+    })
+
+    expect(ctx.doppelgangerMcp.snapshot().servers).toEqual([
+      expect.objectContaining({ id: 'empty', state: 'active', toolCount: 0 }),
+    ])
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
+  })
+
+  it('retains an unchanged MCP generation after await-ready activation', async () => {
+    const config: McpPluginConfig = {
+      startupMode: 'await-ready',
+      servers: {
+        fixture: { transport: { type: 'stdio', command: process.execPath, args: [stdioFixture] } },
+      },
+    }
+    const { ctx, fiber } = await setup(config)
+    const before = descriptor(ctx, 'mcp-fixture.echo-value')
+
+    await Promise.resolve(fiber.update({ ...config, startupMode: 'background' }))
+
+    expect(ctx.doppelgangerMcp.snapshot().servers[0]).toMatchObject({ state: 'active' })
+    expect(descriptor(ctx, 'mcp-fixture.echo-value').revision).toBe(before.revision)
+  })
+
+  it('keeps in-place MCP updates background after await-ready activation', async () => {
+    process.env.MCP_TEST_REPLACEMENT_DELAY = '180'
+    const { ctx, fiber } = await setup({
+      startupMode: 'await-ready',
+      servers: {
+        fixture: { transport: { type: 'stdio', command: process.execPath, args: [stdioFixture] } },
+      },
+    })
+
+    await Promise.resolve(fiber.update({
+      startupMode: 'await-ready',
+      servers: {
+        fixture: {
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [stdioFixture],
+            environment: { MCP_INITIALIZE_DELAY_MS: { env: 'MCP_TEST_REPLACEMENT_DELAY' } },
+          },
+          tools: { echo_value: { alias: 'replacement-echo' } },
+        },
+      },
+    }))
+
+    expect(ctx.doppelgangerMcp.snapshot().servers[0]).toMatchObject({ state: 'connecting', toolCount: 0 })
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
+    await waitForServer(ctx, 'fixture', 'active')
+    expect(descriptor(ctx, 'mcp-fixture.replacement-echo')).toBeDefined()
+
+    await Promise.resolve(fiber.update({
+      startupMode: 'await-ready',
+      servers: {
+        fixture: { transport: { type: 'stdio', command: join(tmpdir(), `missing-mcp-${randomUUID()}`) } },
+      },
+    }))
+    await waitForServer(ctx, 'fixture', 'failed')
+    expect(ctx.doppelgangerTools.snapshot().tools).toEqual([])
+  })
+
+  it('ignores stale startup after replacing a server in an await-ready row', async () => {
+    process.env.MCP_TEST_STALE_DELAY = '180'
+    const { ctx, fiber } = await setup({
+      startupMode: 'await-ready',
+      servers: {
+        fixture: { transport: { type: 'stdio', command: process.execPath, args: [stdioFixture] } },
+      },
+    })
+
+    await Promise.resolve(fiber.update({
+      startupMode: 'await-ready',
+      servers: {
+        fixture: {
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [stdioFixture],
+            environment: { MCP_DISCOVERY_DELAY_MS: { env: 'MCP_TEST_STALE_DELAY' } },
+          },
+          tools: { echo_value: { alias: 'stale-await-ready' } },
+        },
+      },
+    }))
+    expect(ctx.doppelgangerMcp.snapshot().servers[0]).toMatchObject({ state: 'connecting' })
+
+    await Promise.resolve(fiber.update({
+      startupMode: 'background',
+      servers: {
+        fixture: {
+          transport: { type: 'stdio', command: process.execPath, args: [stdioFixture] },
+          tools: { echo_value: { alias: 'current-await-ready' } },
+        },
+      },
+    }))
+    await waitForServer(ctx, 'fixture', 'active')
+    await new Promise(resolve => setTimeout(resolve, 220))
+    const names = ctx.doppelgangerTools.snapshot().tools.map(tool => tool.name)
+    expect(names).toContain('mcp-fixture.current-await-ready')
+    expect(names).not.toContain('mcp-fixture.stale-await-ready')
   })
 
   it('disposes while an unavailable executable spawn is still settling', async () => {

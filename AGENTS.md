@@ -10,6 +10,7 @@ This file contains durable operating instructions for coding agents. Current arc
 packages/
   runtime-presets/       discovery, strict selection, preset metadata
   composition-runtime/   Loader activation, patches, sessions, audit, reload
+  host-extension-runtime/ exact-host definitions, trusted catalogs, plans, protected entries
   extension-protocols/   host-neutral context, tools, and lifecycle protocols
   extension-sqlite/      plugin-owned SQLite infrastructure
   extension-persona/     Persona activation, identity, and traits
@@ -38,10 +39,11 @@ Allowed internal package edges are defined only in `scripts/package-boundaries.j
 
 - Use Cordis for dependency injection, plugins, lifecycle, services, scopes, Loader semantics, and HMR. Do not introduce a parallel framework for any of them.
 - Keep the kernel domain-neutral. Persona, identity, traits, storage, memory, and capture are ordinary plugins, not composition-runtime concepts.
-- Treat a Runtime Preset as one complete portable Cordis Loader tree. Host packages append the protected host bridge; presets do not embed a concrete host plugin.
-- Keep `host-omp` preset-neutral. It may depend on composition, Runtime Preset selection, and standard protocols, never Persona, memory, SQLite, or a named preset.
-- Keep `extension-protocols`, `extension-sqlite`, and `runtime-presets` independent of other Doppelganger packages.
+- Treat a Runtime Preset as one complete portable Cordis Loader tree. Hosts append one separately selected protected Host Extension composition; presets never embed, select, or target Host Extensions.
+- Keep `host-omp` and `host-openclaw` preset- and feature-neutral. They may depend on composition, Host Extension, Runtime Preset selection, and standard protocols, never Persona, memory, SQLite, or a named preset.
+- Keep `extension-protocols`, `extension-sqlite`, and `runtime-presets` independent of other Doppelganger packages. Keep `host-extension-runtime` independent of concrete hosts and feature packages.
 - Use the workspace `@deepseek-ai/cordis` peer everywhere. Duplicate Cordis installations break service identity and isolation.
+- Host Extension definitions target one exact host kind, receive only closed JSON-compatible session facts, instantiate fresh plugin entries per Runtime Session, and reuse the adapter's one binding or transport. Module/configuration/fact changes replace the Runtime Session; Runtime Preset HMR never mutates the protected composition.
 - Keep Runtime Session metadata limited to stable session ID, selected Runtime Preset ID, and optional absolute workspace root. Feature metadata belongs to its owning extension.
 - Keep runtime-owned user and project configuration selection-only. Plugin configuration and durable state belong to Loader rows and plugin-owned paths.
 - Never write normalized Loader input back to authored base or patch files.

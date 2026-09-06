@@ -32,6 +32,7 @@ describe('MCP Loader configuration', () => {
     })
 
     expect(config).toEqual({
+      startupMode: 'background',
       servers: [
         {
           id: 'filesystem',
@@ -71,6 +72,14 @@ describe('MCP Loader configuration', () => {
     expect(JSON.stringify(config)).not.toContain('secret-value')
   })
 
+  it('defaults MCP startup mode to background', () => {
+    expect(normalizeMcpPluginConfig({ servers: {} }).startupMode).toBe('background')
+  })
+
+  it('accepts await-ready MCP startup mode', () => {
+    expect(normalizeMcpPluginConfig({ startupMode: 'await-ready', servers: {} }).startupMode).toBe('await-ready')
+  })
+
   it('defaults and bounds startup timeout without interpreting operator-owned acquisition', () => {
     const defaults = normalizeMcpPluginConfig({
       servers: {
@@ -96,6 +105,7 @@ describe('MCP Loader configuration', () => {
   })
 
   it.each([
+    [{ startupMode: 'eventually', servers: {} }, 'must be "background" or "await-ready"'],
     [{ servers: { Bad_ID: { transport: { type: 'stdio', command: 'server' } } } }, 'lowercase kebab-case'],
     [{ servers: { good: { transport: { type: 'stdio', command: '' } } } }, 'command'],
     [{ servers: { good: { transport: { type: 'stdio', command: 'server', cwd: 'relative' } } } }, 'absolute path'],

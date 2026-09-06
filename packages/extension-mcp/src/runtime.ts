@@ -1,18 +1,29 @@
 import type { Context, Logger } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRegistry, ToolSetRegistration } from '@doppelganger/doppelganger-protocols'
-import { McpClientGeneration, type McpClientOwner } from './client.ts'
+import { McpClientGeneration, type McpClientOwner, type McpStartupOutcome } from './client.ts'
 import type { NormalizedMcpPluginConfig, NormalizedMcpServerConfig } from './config.ts'
 import { McpImportError } from './errors.ts'
 import type { McpDiagnostic, McpImportRuntimeView, McpImportSnapshot } from './service.ts'
 
 const MAXIMUM_DIAGNOSTICS = 1_000
+const AWAIT_INITIAL_READY = Symbol('doppelganger.mcp.awaitInitialReady')
+
+function startupFailureMessage(errors: readonly McpImportError[]): string {
+  const details = errors.map(error => error.message).join('; ')
+  return `MCP await-ready startup failed: ${details}`.slice(0, 4_096)
+}
 
 interface ServerSlot {
   config: NormalizedMcpServerConfig
   generation: McpClientGeneration
   readonly registration: ToolSetRegistration
   definitions: readonly ToolDefinition[]
-  startup: Promise<void>
+}
+
+interface InitialGeneration {
+  readonly serverId: string
+  readonly generation: McpClientGeneration
+  readonly outcome: Promise<McpStartupOutcome>
 }
 
 function sameConfig(left: NormalizedMcpServerConfig, right: NormalizedMcpServerConfig): boolean {
@@ -26,10 +37,12 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
   readonly #diagnostics: McpDiagnostic[] = []
   readonly #background = new Set<Promise<void>>()
   readonly #cleanupFailures: unknown[] = []
+  readonly #initialGenerations: InitialGeneration[] = []
   #config: NormalizedMcpPluginConfig
   #diagnosticSequence = 0
   #started = false
   #disposed = false
+  #disposal: Promise<void> | undefined
 
   constructor(ctx: Context, config: NormalizedMcpPluginConfig) {
     this.#logger = ctx.logger('doppelganger-mcp')
@@ -111,8 +124,45 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
       }
       throw cause
     }
+    if (this.#config.startupMode === 'await-ready') {
+      for (const slot of installed) {
+        this.#initialGenerations.push(Object.freeze({
+          serverId: slot.config.id,
+          generation: slot.generation,
+          outcome: slot.generation.startupOutcome,
+        }))
+      }
+    }
     for (const slot of installed) this.#launch(slot)
-    this.#logger.info('component.active servers=%d', installed.length)
+    if (this.#config.startupMode === 'background') this.#logger.info('component.active servers=%d', installed.length)
+  }
+
+  async [AWAIT_INITIAL_READY](): Promise<void> {
+    if (!this.#started) throw new Error('MCP runtime is not started')
+    const captured = [...this.#initialGenerations]
+    try {
+      await Promise.all(captured.map(async initial => {
+        const outcome = await initial.outcome
+        if (outcome.state === 'active') return
+        throw new McpImportError(outcome.code, `${outcome.code}: ${outcome.message}`)
+      }))
+    } catch (cause) {
+      const failure = cause instanceof McpImportError
+        ? cause
+        : new McpImportError('MCP_STARTUP_FAILED', 'MCP_STARTUP_FAILED: MCP initial startup failed')
+      throw new AggregateError([failure], startupFailureMessage([failure]))
+    }
+
+    const failures: McpImportError[] = []
+    for (const initial of captured) {
+      if (this.isCurrent(initial.generation) && initial.generation.snapshot().state === 'active') continue
+      const diagnostic = [...this.#diagnostics].reverse().find(candidate => candidate.serverId === initial.serverId && candidate.level === 'error')
+      const code = diagnostic?.code ?? 'MCP_STARTUP_CANCELLED'
+      const message = diagnostic?.message ?? `MCP server ${initial.serverId} did not remain active through initial readiness`
+      failures.push(new McpImportError(code, `${code}: ${message}`))
+    }
+    if (failures.length > 0) throw new AggregateError(failures, startupFailureMessage(failures))
+    this.#logger.info('component.active servers=%d', captured.length)
   }
 
   update(config: NormalizedMcpPluginConfig): void {
@@ -152,7 +202,6 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
           generation,
           registration: current.registration,
           definitions: Object.freeze([]),
-          startup: Promise.resolve(),
         }
         this.#servers.set(id, slot)
         launch.push(slot)
@@ -168,7 +217,6 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
         generation,
         registration,
         definitions: Object.freeze([]),
-        startup: Promise.resolve(),
       }
       this.#servers.set(server.id, slot)
       launch.push(slot)
@@ -179,9 +227,13 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
     this.#logger.info('mcp.configuration.update.completed activeServers=%d refreshedServers=%d', this.#servers.size, launch.length)
   }
 
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
+    this.#disposal ??= this.#dispose()
+    return this.#disposal
+  }
+
+  async #dispose(): Promise<void> {
     this.#logger.info('component.disposal.started servers=%d', this.#servers.size)
-    if (this.#disposed) return
     this.#disposed = true
     const slots = [...this.#servers.values()]
     this.#servers.clear()
@@ -206,7 +258,6 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
       generation,
       registration: this.#tools.registerSet(this.#ownerId(config.id), []),
       definitions: Object.freeze([]),
-      startup: Promise.resolve(),
     }
     this.#servers.set(config.id, slot)
     return slot
@@ -215,7 +266,6 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
   #launch(slot: ServerSlot): void {
     this.#logger.debug('mcp.server.start.started server=%s transport=%s', slot.config.id, slot.config.transport.type)
     const startup = slot.generation.start()
-    slot.startup = startup
     this.#track(startup, slot.config.id, 'MCP_STARTUP_UNHANDLED')
   }
 
@@ -243,4 +293,8 @@ export class McpImportRuntime implements McpClientOwner, McpImportRuntimeView {
   #ownerId(serverId: string): string {
     return `doppelganger-extension-mcp:${serverId}`
   }
+}
+
+export function awaitMcpInitialReady(runtime: McpImportRuntime): Promise<void> {
+  return runtime[AWAIT_INITIAL_READY]()
 }

@@ -330,7 +330,15 @@ function activation(root: string, patches: readonly object[] = [], actorId?: str
     workspaceRoot: root,
     hostKind: 'omp' as const,
     watch: true,
-    ...(actorId === undefined ? {} : { actorId }),
+    hostExtensions: {
+      modules: [],
+      selections: [
+        { id: 'actor', config: null },
+        { id: 'omp-host-events', config: null },
+        { id: 'runtime-host', config: null },
+      ],
+      facts: { hostKind: 'omp', ...(actorId === undefined ? {} : { actorId }) },
+    },
   }
 }
 

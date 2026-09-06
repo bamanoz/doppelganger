@@ -106,7 +106,15 @@ function activation(root: string, sessionId: string, actorId?: string): Serializ
     workspaceRoot: root,
     hostKind: 'omp',
     watch: false,
-    ...(actorId === undefined ? {} : { actorId }),
+    hostExtensions: {
+      modules: [],
+      selections: [
+        { id: 'actor', config: null },
+        { id: 'omp-host-events', config: null },
+        { id: 'runtime-host', config: null },
+      ],
+      facts: { hostKind: 'omp', ...(actorId === undefined ? {} : { actorId }) },
+    },
   }
 }
 
@@ -178,7 +186,13 @@ describe('OMP adapter state machine', () => {
     expect(factory.connections).toHaveLength(0)
 
     const invalidActor = new OmpAdapterSession({
-      activation: { ...activation(join(process.cwd(), 'fixture'), 'invalid-actor'), actorId: ' ' },
+      activation: {
+        ...activation(join(process.cwd(), 'fixture'), 'invalid-actor'),
+        hostExtensions: {
+          ...activation(join(process.cwd(), 'fixture'), 'invalid-actor').hostExtensions,
+          facts: { hostKind: 'omp', actorId: ' ' },
+        },
+      },
       childFactory: factory,
     })
     expect(await invalidActor.start()).toMatchObject({

@@ -7,7 +7,9 @@ import {
   type JsonValue,
   type RuntimeHostBridge,
   type RuntimeHostCapabilities,
+  type ToolCatalogSnapshot,
   type ToolDefinition,
+  type ToolInvocationResult,
 } from '../../src/index.ts'
 
 export interface RuntimeHostConformanceTool extends Omit<ToolDefinition, 'invoke'> {
@@ -62,6 +64,84 @@ function descriptor(bridge: RuntimeHostBridge, name: string) {
   return value
 }
 
+export type RuntimeHostConformanceFailure =
+  | { readonly kind: 'result'; readonly code: string }
+  | { readonly kind: 'rejection'; readonly message: string | RegExp }
+
+export function expectRuntimeHostCatalogSnapshot(
+  snapshot: ToolCatalogSnapshot,
+  names: readonly string[],
+): void {
+  expect(snapshot.tools.map(value => value.name)).toEqual(names)
+}
+
+export function expectRuntimeHostCatalogUnchanged(
+  before: ToolCatalogSnapshot,
+  after: ToolCatalogSnapshot,
+): void {
+  expect(after).toBe(before)
+}
+
+export function expectRuntimeHostFixedCapabilities(
+  actual: RuntimeHostCapabilities,
+  expected: RuntimeHostCapabilities,
+): void {
+  expect(actual).toEqual(expected)
+  expect(Object.isFrozen(actual)).toBe(true)
+  expect(Object.isFrozen(actual.context)).toBe(true)
+  expect(Object.isFrozen(actual.tools)).toBe(true)
+  expect(Object.isFrozen(actual.lifecycle)).toBe(true)
+  expect(Object.isFrozen(actual.lifecycle.events)).toBe(true)
+}
+
+export function expectRuntimeHostActorState(
+  actual: ActorIdentity | undefined,
+  expected: 'absent' | 'unbound' | { readonly actorId: string },
+): void {
+  expect(actual).toEqual(expected === 'absent'
+    ? undefined
+    : expected === 'unbound'
+      ? { state: 'unbound' }
+      : { state: 'bound', actorId: expected.actorId })
+}
+
+export async function expectRuntimeHostSuccess(
+  invocation: Promise<ToolInvocationResult>,
+  value: JsonValue,
+): Promise<void> {
+  await expect(invocation).resolves.toEqual({ ok: true, value })
+}
+
+export async function expectRuntimeHostFailure(
+  invocation: Promise<unknown>,
+  failure: RuntimeHostConformanceFailure,
+): Promise<void> {
+  if (failure.kind === 'rejection') {
+    await expect(invocation).rejects.toThrow(failure.message)
+    return
+  }
+  await expect(invocation).resolves.toMatchObject({ ok: false, error: { code: failure.code } })
+}
+export async function expectRuntimeHostApprovalReplay(
+  approved: () => Promise<ToolInvocationResult>,
+  expectedValue: JsonValue,
+  replay: () => Promise<unknown>,
+  replayFailure: RuntimeHostConformanceFailure,
+): Promise<void> {
+  await expectRuntimeHostSuccess(approved(), expectedValue)
+  await expectRuntimeHostFailure(replay(), replayFailure)
+}
+
+export async function expectRuntimeHostCancellationAndCompletion(
+  cancelled: Promise<unknown>,
+  cancellationFailure: RuntimeHostConformanceFailure,
+  completed: () => Promise<ToolInvocationResult>,
+  completedValue: JsonValue,
+): Promise<void> {
+  await expectRuntimeHostFailure(cancelled, cancellationFailure)
+  await expectRuntimeHostSuccess(completed(), completedValue)
+}
+
 export async function conformanceCatalog(factory: RuntimeHostConformanceFactory): Promise<void> {
   const session = await factory.create({ tools: true })
   try {
@@ -70,14 +150,18 @@ export async function conformanceCatalog(factory: RuntimeHostConformanceFactory)
     const before = session.bridge.snapshotTools()
     const stale = descriptor(session.bridge, 'alpha.read')
     await expect(first.replace([tool('replacement.read', 'replacement'), tool('beta.read', 'collision')])).rejects.toThrow('already registered')
-    expect(session.bridge.snapshotTools()).toBe(before)
+    expectRuntimeHostCatalogUnchanged(before, session.bridge.snapshotTools())
     await first.replace([tool('alpha.read', 'updated')])
     expect(session.catalogChanges).toHaveLength(3)
-    await expect(session.bridge.invokeTool({ callId: 'stale-call', name: stale.name, toolRevision: stale.revision, input: {} }))
-      .resolves.toMatchObject({ ok: false, error: { code: 'TOOL_REVISION_STALE' } })
+    await expectRuntimeHostFailure(
+      session.bridge.invokeTool({ callId: 'stale-call', name: stale.name, toolRevision: stale.revision, input: {} }),
+      { kind: 'result', code: 'TOOL_REVISION_STALE' },
+    )
     const current = descriptor(session.bridge, 'alpha.read')
-    await expect(session.bridge.invokeTool({ callId: 'current-call', name: current.name, toolRevision: current.revision, input: {} }))
-      .resolves.toEqual({ ok: true, value: { value: 'updated' } })
+    await expectRuntimeHostSuccess(
+      session.bridge.invokeTool({ callId: 'current-call', name: current.name, toolRevision: current.revision, input: {} }),
+      { value: 'updated' },
+    )
   } finally { await session.dispose() }
 }
 
@@ -88,8 +172,12 @@ export async function conformanceApproval(factory: RuntimeHostConformanceFactory
     const current = descriptor(session.bridge, 'approval.write')
     const request = { callId: 'approved-call', name: current.name, toolRevision: current.revision, input: { exact: true } }
     const approval = { kind: 'one-shot' as const, grantId: 'conformance-grant', callId: request.callId, toolRevision: current.revision, inputDigest: digestToolInput(request.input) }
-    await expect(session.bridge.invokeTool({ ...request, approval })).resolves.toEqual({ ok: true, value: { value: 'approved' } })
-    await expect(session.bridge.invokeTool({ ...request, callId: 'replay-call', approval })).resolves.toMatchObject({ ok: false, error: { code: 'TOOL_APPROVAL_INVALID' } })
+    await expectRuntimeHostApprovalReplay(
+      () => session.bridge.invokeTool({ ...request, approval }),
+      { value: 'approved' },
+      () => session.bridge.invokeTool({ ...request, callId: 'replay-call', approval }),
+      { kind: 'result', code: 'TOOL_APPROVAL_INVALID' },
+    )
   } finally { await session.dispose() }
 }
 
@@ -102,9 +190,13 @@ export async function conformanceCallLifecycle(factory: RuntimeHostConformanceFa
     await session.waitForCall('waiting-call')
     await expect(session.bridge.cancelTool({ callId: 'waiting-call', reason: 'native cancellation' })).resolves.toEqual({ cancelled: true })
     await session.releaseCall('waiting-call')
-    await expect(invocation).resolves.toMatchObject({ ok: false, error: { code: 'TOOL_CANCELLED' } })
     const fast = descriptor(session.bridge, 'worker.fast')
-    await expect(session.bridge.invokeTool({ callId: 'fast-call', name: fast.name, toolRevision: fast.revision, input: {} })).resolves.toEqual({ ok: true, value: { value: 'fast' } })
+    await expectRuntimeHostCancellationAndCompletion(
+      invocation,
+      { kind: 'result', code: 'TOOL_CANCELLED' },
+      () => session.bridge.invokeTool({ callId: 'fast-call', name: fast.name, toolRevision: fast.revision, input: {} }),
+      { value: 'fast' },
+    )
     await expect(session.bridge.cancelTool({ callId: 'fast-call' })).resolves.toEqual({ cancelled: false })
   } finally { await session.dispose() }
 
@@ -116,7 +208,7 @@ export async function conformanceCallLifecycle(factory: RuntimeHostConformanceFa
     const invocation = retiring.bridge.invokeTool({ callId: 'dispose-call', name: current.name, toolRevision: current.revision, input: {} })
     await retiring.waitForCall('dispose-call')
     await retiring.dispose()
-    await expect(invocation).resolves.toMatchObject({ ok: false, error: { code: 'TOOL_CANCELLED' } })
+    await expectRuntimeHostFailure(invocation, { kind: 'result', code: 'TOOL_CANCELLED' })
     successor = await factory.create({ tools: true })
     await successor.registerSet('successor-owner', [tool('worker.successor', 'current')])
     const oldCount = retiring.catalogChanges.length
@@ -124,7 +216,7 @@ export async function conformanceCallLifecycle(factory: RuntimeHostConformanceFa
     await expect(registration.replace([tool('worker.late', 'late')])).rejects.toThrow('disposed')
     expect(retiring.catalogChanges).toHaveLength(oldCount)
     expect(successor.catalogChanges).toHaveLength(nextCount)
-    expect(successor.bridge.snapshotTools().tools.map(value => value.name)).toEqual(['worker.successor'])
+    expectRuntimeHostCatalogSnapshot(successor.bridge.snapshotTools(), ['worker.successor'])
   } finally {
     await retiring.dispose()
     await successor?.dispose()
@@ -139,8 +231,8 @@ export function runtimeHostConformance(label: string, factory: RuntimeHostConfor
       try {
         await first.registerSet('first-owner', [tool('first.read', 'first')])
         await second.registerSet('second-owner', [tool('second.read', 'second')])
-        expect(first.bridge.snapshotTools().tools.map(value => value.name)).toEqual(['first.read'])
-        expect(second.bridge.snapshotTools().tools.map(value => value.name)).toEqual(['second.read'])
+        expectRuntimeHostCatalogSnapshot(first.bridge.snapshotTools(), ['first.read'])
+        expectRuntimeHostCatalogSnapshot(second.bridge.snapshotTools(), ['second.read'])
       } finally { await Promise.all([first.dispose(), second.dispose()]) }
       const empty = await factory.create({ context: false, tools: false })
       try {
@@ -182,8 +274,11 @@ export function runtimeHostConformance(label: string, factory: RuntimeHostConfor
         for (const state of factory.actorStates ?? ['absent', 'unbound', 'bound']) {
           const session = await factory.create({ actor: state === 'bound' ? { actorId: 'actor-one' } : state })
           sessions.push(session)
-          expect(session.actorIdentity).toEqual(state === 'absent' ? undefined : state === 'bound' ? { state, actorId: 'actor-one' } : { state })
-          expect(session.bridge.capabilities).toEqual(sessions[0]!.bridge.capabilities)
+          expectRuntimeHostActorState(
+            session.actorIdentity,
+            state === 'absent' ? 'absent' : state === 'bound' ? { actorId: 'actor-one' } : 'unbound',
+          )
+          expectRuntimeHostFixedCapabilities(session.bridge.capabilities, sessions[0]!.bridge.capabilities)
         }
       } finally { await Promise.all(sessions.map(session => session.dispose())) }
     })

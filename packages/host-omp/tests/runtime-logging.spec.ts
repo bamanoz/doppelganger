@@ -127,6 +127,15 @@ function serializedActivation(
     workspaceRoot: root,
     hostKind: 'omp' as const,
     watch: false,
+    hostExtensions: {
+      modules: [],
+      selections: [
+        { id: 'actor', config: null },
+        { id: 'omp-host-events', config: null },
+        { id: 'runtime-host', config: null },
+      ],
+      facts: { hostKind: 'omp' as const },
+    },
   }
 }
 

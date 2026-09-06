@@ -7,6 +7,7 @@ export {
   normalizeMcpPluginConfig,
   type McpEnvironmentReference,
   type McpPluginConfig,
+  type McpStartupMode,
   type McpServerConfig,
   type McpStdioTransportConfig,
   type McpStreamableHttpTransportConfig,

@@ -458,15 +458,17 @@ describe('runtime logging integration', () => {
         ...definition,
         patches: [{ source: 'logging patch', filename: patchPath, optional: true }],
       }),
-      runtimePlugins: {
-        emitter: {
+      protectedComposition: {
+        entries: [
+          { id: 'emitter', plugin: {
           name: 'runtime-logging-emitter',
           inject: ['doppelgangerLogging'],
           apply(ctx) {
             runtimeActivationId = ctx.doppelgangerLogging.scope.runtimeActivationId
             emit = () => { ctx.logger('patch-emitter').debug('debug record') }
           },
-        },
+        } },
+        ],
       },
     })
     const logPath = logTemplate.replace('{runtimeActivationId}', runtimeActivationId)
@@ -557,11 +559,13 @@ describe('runtime logging integration', () => {
         ...definition,
         patches: [{ source: 'recovery fixture', baseUrl: root, patches: [{ insert: [exporter] }] }],
       }),
-      runtimePlugins: {
-        emitter: {
+      protectedComposition: {
+        entries: [
+          { id: 'emitter', plugin: {
           name: 'partial-recovery-emitter',
           apply(ctx) { emit = () => { ctx.logger('recovered').info('recovered record') } },
-        },
+        } },
+        ],
       },
     })
     emit()
@@ -598,18 +602,26 @@ describe('runtime logging integration', () => {
       runtime.activate({
         sessionId: 'shared-logical-session',
         composition: definition,
-        runtimePlugins: { emitter: { name: 'first-emitter', inject: ['doppelgangerLogging'], apply(ctx) {
+        protectedComposition: {
+          entries: [
+            { id: 'emitter', plugin: { name: 'first-emitter', inject: ['doppelgangerLogging'], apply(ctx) {
           firstActivationId = ctx.doppelgangerLogging.scope.runtimeActivationId
           emitFirst = () => { ctx.logger('first').info('first only') }
         } } },
+          ],
+        },
       }),
       runtime.activate({
         sessionId: 'shared-logical-session',
         composition: definition,
-        runtimePlugins: { emitter: { name: 'second-emitter', inject: ['doppelgangerLogging'], apply(ctx) {
+        protectedComposition: {
+          entries: [
+            { id: 'emitter', plugin: { name: 'second-emitter', inject: ['doppelgangerLogging'], apply(ctx) {
           secondActivationId = ctx.doppelgangerLogging.scope.runtimeActivationId
           emitSecond = () => { ctx.logger('second').info('second only') }
         } } },
+          ],
+        },
       }),
     ])
     const firstPath = pathTemplate.replace('{runtimeActivationId}', firstActivationId)

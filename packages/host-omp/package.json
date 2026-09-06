@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@doppelganger/doppelganger-composition-runtime": "0.0.0",
+    "@doppelganger/doppelganger-host-extensions": "0.0.0",
     "@doppelganger/doppelganger-protocols": "0.0.0",
     "@doppelganger/doppelganger-runtime-presets": "0.0.0",
     "@oh-my-pi/omptype": "18.0.9"

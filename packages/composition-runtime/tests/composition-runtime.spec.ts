@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -20,6 +21,7 @@ interface TestMcpSnapshot {
 declare global {
   var doppelgangerLifecycle: string[] | undefined
   var doppelgangerMcpSnapshot: (() => TestMcpSnapshot) | undefined
+  var doppelgangerMcpCatalogSnapshots: string[][] | undefined
 }
 const temporaryRoots: string[] = []
 const mcpFixture = fileURLToPath(new URL('../../extension-mcp/tests/fixtures/stdio-server.mjs', import.meta.url))
@@ -27,7 +29,12 @@ const mcpFixture = fileURLToPath(new URL('../../extension-mcp/tests/fixtures/std
 afterEach(async () => {
   globalThis.doppelgangerLifecycle = undefined
   globalThis.doppelgangerMcpSnapshot = undefined
+  globalThis.doppelgangerMcpCatalogSnapshots = undefined
   delete process.env.COMPOSITION_MCP_INITIALIZE_DELAY
+  delete process.env.COMPOSITION_MCP_ARGUMENT_MARKER
+  delete process.env.COMPOSITION_MCP_DISCOVERY_DELAY
+  delete process.env.COMPOSITION_MCP_EXIT_MARKER
+  delete process.env.COMPOSITION_MCP_INITIAL_DISCOVERY_MODE
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -61,7 +68,7 @@ async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
   }
 }
 
-async function mcpComposition(config: object): Promise<CompositionDefinition> {
+async function mcpComposition(config: object, options: { readonly observeCatalog?: boolean } = {}): Promise<CompositionDefinition> {
   const files = await composition([])
   const root = dirname(files.definition.loaderPath)
   const observer = await plugin(root, 'mcp-observer.mjs', [
@@ -69,6 +76,16 @@ async function mcpComposition(config: object): Promise<CompositionDefinition> {
     '  globalThis.doppelgangerMcpSnapshot = () => ctx.doppelgangerMcp.snapshot()',
     '} }',
   ].join('\n'))
+  const catalogObserver = options.observeCatalog === true
+    ? await plugin(root, 'mcp-catalog-observer.mjs', [
+        "export default { name: 'mcp-catalog-observer', inject: ['doppelgangerTools'], apply(ctx) {",
+        '  const capture = () => ctx.doppelgangerTools.snapshot().tools.map(tool => tool.name)',
+        '  globalThis.doppelgangerMcpCatalogSnapshots = [capture()]',
+        "  ctx.on('doppelganger/tools-changed', () => { globalThis.doppelgangerMcpCatalogSnapshots.push(capture()) })",
+        '  return () => { globalThis.doppelgangerMcpCatalogSnapshots.push(capture()) }',
+        '} }',
+      ].join('\n'))
+    : undefined
   return createCompositionDefinition({
     ...files.definition,
     patches: [{
@@ -80,6 +97,12 @@ async function mcpComposition(config: object): Promise<CompositionDefinition> {
           name: '@doppelganger/doppelganger-protocols/tools',
           isolate: { doppelgangerTools: 'session' },
         },
+        ...(catalogObserver === undefined ? [] : [{
+          id: 'mcp-catalog-observer',
+          name: catalogObserver,
+          inject: ['doppelgangerTools'],
+          isolate: { doppelgangerTools: 'session' },
+        }]),
         {
           id: 'doppelganger-mcp',
           name: '@doppelganger/doppelganger-extension-mcp/loader',
@@ -166,12 +189,20 @@ describe('layered activation and session isolation', () => {
       composition: definition,
       sessionId: 'first',
       workspaceRoot: root,
-      runtimePlugins: { host },
+      protectedComposition: {
+        entries: [
+          { id: 'host', plugin: host },
+        ],
+      },
     })
     const second = await runtime.activate({
       composition: definition,
       sessionId: 'second',
-      runtimePlugins: { host },
+      protectedComposition: {
+        entries: [
+          { id: 'host', plugin: host },
+        ],
+      },
     })
 
     expect(observed.get('first')).toEqual({
@@ -200,7 +231,11 @@ describe('layered activation and session isolation', () => {
     const session = await runtime.activate({
       composition: files.definition,
       sessionId: 'empty',
-      runtimePlugins: { host: { name: 'empty-host', apply: () => { attached = true } } },
+      protectedComposition: {
+        entries: [
+          { id: 'host', plugin: { name: 'empty-host', apply: () => { attached = true } } },
+        ],
+      },
     })
     expect(attached).toBe(true)
     expect(session.diagnostics().entries).toHaveLength(2)
@@ -233,10 +268,11 @@ describe('layered activation and session isolation', () => {
     await runtime.activate({
       composition: definition,
       sessionId: 'optional-realm',
-      runtimePlugins: {
-        host: { name: 'optional-host', apply: (ctx) => { hostContext = ctx } },
+      protectedComposition: {
+        entries: [
+          { id: 'host', plugin: { name: 'optional-host', apply: (ctx) => { hostContext = ctx } }, isolate: { optionalFeature: 'session' } },
+        ],
       },
-      runtimePluginIsolation: { host: ['optionalFeature'] },
     })
     if (hostContext === undefined) throw new Error('runtime-owned host did not activate')
     expect(hostContext.get('optionalFeature', false)).toBe('visible')
@@ -294,17 +330,23 @@ describe('layered activation and session isolation', () => {
       return runtime.activate({
         composition: files.definition,
         sessionId,
-        runtimePlugins: {
-          bridge,
-          ...(actorPlugin === undefined ? {} : { actor: actorPlugin }),
-          native,
-          observer,
-        },
-        runtimePluginIsolation: {
-          bridge: ['sharedHostBridge'],
-          ...(actorPlugin === undefined ? {} : { actor: ['doppelgangerActor'] }),
-          native: ['sharedHostBridge', 'ompNativeProvider'],
-          observer: ['sharedHostBridge', 'doppelgangerActor', 'ompNativeProvider'],
+        protectedComposition: {
+          entries: [
+            { id: 'bridge', plugin: bridge, isolate: { sharedHostBridge: 'session' } },
+            ...(actorPlugin === undefined
+              ? []
+              : [{ id: 'actor', plugin: actorPlugin, isolate: { doppelgangerActor: 'session' as const } }]),
+            { id: 'native', plugin: native, isolate: { sharedHostBridge: 'session', ompNativeProvider: 'session' } },
+            {
+              id: 'observer',
+              plugin: observer,
+              isolate: {
+                sharedHostBridge: 'session',
+                doppelgangerActor: 'session',
+                ompNativeProvider: 'session',
+              },
+            },
+          ],
         },
       })
     }
@@ -315,7 +357,7 @@ describe('layered activation and session isolation', () => {
     expect(observed.get('absent-session')?.actor).toBeUndefined()
     expect(observed.get('unbound-session')?.actor).toEqual({ state: 'unbound' })
     expect(observed.get('bound-session')?.actor).toEqual({ state: 'bound', actorId: 'bound-session' })
-    expect(observed.get('bound-session')?.order).toEqual(['actor', 'bridge', 'native', 'observer'])
+    expect(observed.get('bound-session')?.order).toEqual(['bridge', 'actor', 'native', 'observer'])
     expect(observed.get('absent-session')?.bridge).not.toBe(observed.get('bound-session')?.bridge)
     expect(observed.get('unbound-session')?.native).not.toBe(observed.get('bound-session')?.native)
     await Promise.all([absent.dispose(), unbound.dispose(), bound.dispose()])
@@ -374,11 +416,13 @@ describe('layered activation and session isolation', () => {
     await expect(runtime.activate({
       composition: files.definition,
       sessionId: 'failing-protected',
-      runtimePlugins: { bridge, actor, native, blocked },
-      runtimePluginIsolation: {
-        bridge: ['sharedHostBridge'],
-        actor: ['doppelgangerActor'],
-        native: ['sharedHostBridge', 'ompNativeProvider'],
+      protectedComposition: {
+        entries: [
+          { id: 'bridge', plugin: bridge, isolate: { sharedHostBridge: 'session' } },
+          { id: 'actor', plugin: actor, isolate: { doppelgangerActor: 'session' } },
+          { id: 'native', plugin: native, isolate: { sharedHostBridge: 'session', ompNativeProvider: 'session' } },
+          { id: 'blocked', plugin: blocked },
+        ],
       },
     })).rejects.toBeInstanceOf(CompositionActivationError)
     expect(attached).toBeUndefined()
@@ -474,6 +518,165 @@ describe('layered activation and session isolation', () => {
     ]))
     await runtime.dispose()
   })
+  it('awaits every enabled MCP server before activating an await-ready row', async () => {
+    process.env.COMPOSITION_MCP_INITIALIZE_DELAY = '180'
+    const definition = await mcpComposition({
+      startupMode: 'await-ready',
+      servers: {
+        ready: { transport: { type: 'stdio', command: process.execPath, args: [mcpFixture] } },
+        slow: {
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [mcpFixture],
+            environment: { MCP_INITIALIZE_DELAY_MS: { env: 'COMPOSITION_MCP_INITIALIZE_DELAY' } },
+          },
+        },
+      },
+    }, { observeCatalog: true })
+    const runtime = createCompositionRuntime({ watch: false })
+    let settled = false
+    const activation = runtime.activate({ composition: definition, sessionId: 'mcp-await-ready' })
+      .finally(() => { settled = true })
+
+    await waitFor(() => globalThis.doppelgangerMcpCatalogSnapshots?.some(names => names.includes('mcp-ready.echo-value')) === true)
+    expect(settled).toBe(false)
+    const session = await activation
+
+    expect(session.diagnostics().entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'doppelganger-mcp', state: 'active' }),
+    ]))
+    expect(globalThis.doppelgangerMcpSnapshot?.().servers).toEqual([
+      expect.objectContaining({ id: 'ready', state: 'active' }),
+      expect.objectContaining({ id: 'slow', state: 'active' }),
+    ])
+    await runtime.dispose()
+  })
+
+  it('rejects await-ready MCP activation and cleans successful sibling servers', async () => {
+    process.env.COMPOSITION_MCP_INITIALIZE_DELAY = '300'
+    process.env.COMPOSITION_MCP_INITIAL_DISCOVERY_MODE = 'duplicate'
+    const definition = await mcpComposition({
+      startupMode: 'await-ready',
+      servers: {
+        broken: {
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [mcpFixture],
+            environment: {
+              MCP_INITIALIZE_DELAY_MS: { env: 'COMPOSITION_MCP_INITIALIZE_DELAY' },
+              MCP_INITIAL_DISCOVERY_MODE: { env: 'COMPOSITION_MCP_INITIAL_DISCOVERY_MODE' },
+            },
+          },
+        },
+        healthy: { transport: { type: 'stdio', command: process.execPath, args: [mcpFixture] } },
+      },
+    }, { observeCatalog: true })
+    const runtime = createCompositionRuntime({ watch: false })
+    let failure: unknown
+    try {
+      await runtime.activate({ composition: definition, sessionId: 'mcp-await-ready-failed' })
+    } catch (cause) {
+      failure = cause
+    }
+
+    expect(failure).toBeInstanceOf(CompositionActivationError)
+    expect((failure as CompositionActivationError).diagnostics.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'doppelganger-composition',
+        state: 'failed',
+        error: expect.stringContaining('MCP_TOOL_DUPLICATE'),
+      }),
+    ]))
+    expect(globalThis.doppelgangerMcpCatalogSnapshots).toEqual(expect.arrayContaining([
+      expect.arrayContaining(['mcp-healthy.echo-value']),
+    ]))
+    expect(globalThis.doppelgangerMcpCatalogSnapshots?.at(-1)).toEqual([])
+    await runtime.dispose()
+  })
+
+  it('rejects timed out await-ready MCP activation and exhausts cleanup', async () => {
+    const marker = join(tmpdir(), `composition-mcp-${Date.now()}-timeout.closed`)
+    process.env.COMPOSITION_MCP_EXIT_MARKER = marker
+    process.env.COMPOSITION_MCP_INITIALIZE_DELAY = '200'
+    const definition = await mcpComposition({
+      startupMode: 'await-ready',
+      servers: {
+        timeout: {
+          startupTimeoutMs: 30,
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [mcpFixture],
+            environment: {
+              MCP_EXIT_MARKER: { env: 'COMPOSITION_MCP_EXIT_MARKER' },
+              MCP_INITIALIZE_DELAY_MS: { env: 'COMPOSITION_MCP_INITIALIZE_DELAY' },
+            },
+          },
+        },
+      },
+    }, { observeCatalog: true })
+    const runtime = createCompositionRuntime({ watch: false })
+    let failure: unknown
+    try {
+      await runtime.activate({ composition: definition, sessionId: 'mcp-await-ready-timeout' })
+    } catch (cause) {
+      failure = cause
+    }
+
+    expect(failure).toBeInstanceOf(CompositionActivationError)
+    expect((failure as CompositionActivationError).diagnostics.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'doppelganger-composition',
+        state: 'failed',
+        error: expect.stringContaining('MCP_INITIALIZE_TIMEOUT'),
+      }),
+    ]))
+    await waitFor(() => existsSync(marker))
+    expect(globalThis.doppelgangerMcpCatalogSnapshots?.at(-1)).toEqual([])
+    await runtime.dispose()
+  })
+
+  it('cancels await-ready MCP activation without late catalog publication', async () => {
+    const argumentMarker = join(tmpdir(), `composition-mcp-${Date.now()}-cancel.args`)
+    const exitMarker = join(tmpdir(), `composition-mcp-${Date.now()}-cancel.closed`)
+    process.env.COMPOSITION_MCP_ARGUMENT_MARKER = argumentMarker
+    process.env.COMPOSITION_MCP_DISCOVERY_DELAY = '400'
+    process.env.COMPOSITION_MCP_EXIT_MARKER = exitMarker
+    const definition = await mcpComposition({
+      startupMode: 'await-ready',
+      servers: {
+        cancelled: {
+          startupTimeoutMs: 10_000,
+          transport: {
+            type: 'stdio',
+            command: process.execPath,
+            args: [mcpFixture],
+            environment: {
+              MCP_ARGUMENT_MARKER: { env: 'COMPOSITION_MCP_ARGUMENT_MARKER' },
+              MCP_DISCOVERY_DELAY_MS: { env: 'COMPOSITION_MCP_DISCOVERY_DELAY' },
+              MCP_EXIT_MARKER: { env: 'COMPOSITION_MCP_EXIT_MARKER' },
+            },
+          },
+        },
+      },
+    }, { observeCatalog: true })
+    const runtime = createCompositionRuntime({ watch: false })
+    const activation = runtime.activate({ composition: definition, sessionId: 'mcp-await-ready-cancelled' })
+    await waitFor(() => existsSync(argumentMarker))
+
+    const disposalStartedAt = Date.now()
+    const disposal = runtime.dispose()
+    await expect(activation).rejects.toBeInstanceOf(CompositionActivationError)
+    await disposal
+    expect(Date.now() - disposalStartedAt).toBeLessThan(2_000)
+    expect(existsSync(exitMarker)).toBe(true)
+    await new Promise(resolve => setTimeout(resolve, 450))
+    expect(globalThis.doppelgangerMcpCatalogSnapshots?.some(names => names.some(name => name.startsWith('mcp-cancelled.')))).toBe(false)
+    expect(globalThis.doppelgangerMcpCatalogSnapshots?.at(-1)).toEqual([])
+  })
+
   it('never rewrites authored composition and disposes idempotently', async () => {
     const files = await composition([])
     const runtime = createCompositionRuntime({ watch: false })
@@ -517,11 +720,13 @@ describe('layered activation and session isolation', () => {
     await expect(runtime.activate({
       composition: definition,
       sessionId: 'watch-acquisition-failure',
-      runtimePlugins: {
-        effect: {
+      protectedComposition: {
+        entries: [
+          { id: 'effect', plugin: {
           name: 'watch-acquisition-session-effect',
           apply() { return () => { sessionDisposals += 1 } },
-        },
+        } },
+        ],
       },
     })).rejects.toThrow('second watch registration failed')
     expect(watchDisposals).toBe(1)
@@ -561,15 +766,17 @@ describe('layered activation and session isolation', () => {
     const failure = await runtime.activate({
       composition: definition,
       sessionId: 'aggregate-watch-failure',
-      runtimePlugins: {
-        failing: {
+      protectedComposition: {
+        entries: [
+          { id: 'failing', plugin: {
           name: 'aggregate-watch-failing-effect',
           apply() { return () => { throw new Error('attempted session cleanup failed') } },
-        },
-        sibling: {
+        } },
+          { id: 'sibling', plugin: {
           name: 'aggregate-watch-sibling-effect',
           apply() { return () => { siblingDisposals += 1 } },
-        },
+        } },
+        ],
       },
     }).catch(error => error)
     expect(failure).toBeInstanceOf(AggregateError)
@@ -606,19 +813,21 @@ describe('layered activation and session isolation', () => {
     const session = await runtime.activate({
       composition: files.definition,
       sessionId: 'failing-cleanup',
-      runtimePlugins: {
-        failing: {
+      protectedComposition: {
+        entries: [
+          { id: 'failing', plugin: {
           name: 'failing-session-effect',
           apply() {
             return () => { throw new Error('plugin disposal failed') }
           },
-        },
-        sibling: {
+        } },
+          { id: 'sibling', plugin: {
           name: 'observable-session-effect',
           apply() {
             return () => { siblingDisposals += 1 }
           },
-        },
+        } },
+        ],
       },
     })
 
@@ -673,12 +882,20 @@ describe('layered activation and session isolation', () => {
     const first = await runtime.activate({
       composition: files.definition,
       sessionId: 'aggregate-first',
-      runtimePlugins: { effect: effect('aggregate-first-effect') },
+      protectedComposition: {
+        entries: [
+          { id: 'effect', plugin: effect('aggregate-first-effect') },
+        ],
+      },
     })
     const second = await runtime.activate({
       composition: files.definition,
       sessionId: 'aggregate-second',
-      runtimePlugins: { effect: effect('aggregate-second-effect') },
+      protectedComposition: {
+        entries: [
+          { id: 'effect', plugin: effect('aggregate-second-effect') },
+        ],
+      },
     })
 
     const disposal = runtime.dispose()
@@ -710,11 +927,13 @@ describe('layered activation and session isolation', () => {
     const session = await runtime.activate({
       composition: files.definition,
       sessionId: 'owned-root-cleanup',
-      runtimePlugins: {
-        effect: {
+      protectedComposition: {
+        entries: [
+          { id: 'effect', plugin: {
           name: 'owned-root-effect',
           apply() { return () => { effectDisposals += 1 } },
-        },
+        } },
+        ],
       },
     })
     const sessionFailure = Promise.reject(new Error('injected session cleanup failure'))

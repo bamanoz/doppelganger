@@ -36,7 +36,10 @@ export interface McpServerConfig {
   readonly tools?: Readonly<Record<string, McpToolPolicy>>
 }
 
+export type McpStartupMode = 'background' | 'await-ready'
+
 export interface McpPluginConfig {
+  readonly startupMode?: McpStartupMode
   readonly servers: Readonly<Record<string, McpServerConfig>>
 }
 
@@ -78,6 +81,7 @@ export interface NormalizedMcpServerConfig {
 }
 
 export interface NormalizedMcpPluginConfig {
+  readonly startupMode: McpStartupMode
   readonly servers: readonly NormalizedMcpServerConfig[]
 }
 
@@ -121,6 +125,14 @@ function startupTimeout(value: unknown, label: string): number {
     throw new TypeError(`${label} must be an integer between 1 and ${MAXIMUM_STARTUP_TIMEOUT_MS}`)
   }
   return value as number
+}
+
+function startupMode(value: unknown): McpStartupMode {
+  if (value === undefined) return 'background'
+  if (value !== 'background' && value !== 'await-ready') {
+    throw new TypeError('MCP configuration.startupMode must be "background" or "await-ready"')
+  }
+  return value
 }
 
 function environmentReference(value: unknown, label: string): NormalizedMcpEnvironmentReference {
@@ -239,7 +251,7 @@ function normalizeServer(id: string, value: unknown): NormalizedMcpServerConfig 
 }
 
 export function normalizeMcpPluginConfig(value: McpPluginConfig | unknown): NormalizedMcpPluginConfig {
-  const input = record(value, 'MCP configuration', ['servers'])
+  const input = record(value, 'MCP configuration', ['servers', 'startupMode'])
   if (input.servers === undefined) throw new TypeError('MCP configuration.servers is required')
   if (input.servers === null || Array.isArray(input.servers) || typeof input.servers !== 'object') {
     throw new TypeError('MCP configuration.servers must be an object')
@@ -247,6 +259,7 @@ export function normalizeMcpPluginConfig(value: McpPluginConfig | unknown): Norm
   const entries = Object.entries(input.servers as Readonly<Record<string, unknown>>).sort(([left], [right]) => left.localeCompare(right))
   if (entries.length > MAXIMUM_SERVERS) throw new RangeError(`MCP configuration supports at most ${MAXIMUM_SERVERS} servers`)
   return Object.freeze({
+    startupMode: startupMode(input.startupMode),
     servers: Object.freeze(entries.map(([id, server]) => normalizeServer(id, server))),
   })
 }

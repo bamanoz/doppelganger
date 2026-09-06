@@ -1,6 +1,6 @@
 # OpenClaw host extension surface
 
-OpenClaw exposes a native TypeScript plugin system whose control plane discovers and validates plugin metadata before its runtime plane synchronously registers capabilities into a guarded registry. This record is static-source research of [OpenClaw](https://github.com/openclaw/openclaw), not evidence of live execution.
+OpenClaw exposes a native TypeScript plugin system whose control plane discovers and validates plugin metadata before its runtime plane synchronously registers capabilities into a guarded registry. This document preserves the original comparative static-source record and separately records the later implementation-target investigation. Neither source record is evidence that an installed native smoke passed.
 
 ## Snapshot
 
@@ -9,7 +9,36 @@ OpenClaw exposes a native TypeScript plugin system whose control plane discovers
 | Repository | `https://github.com/openclaw/openclaw` |
 | Exact commit | `fc895e4f00ce2a54b1ebd83deeb30d75bfde4922` |
 | Research date | 2026-09-03 |
-| Support status | Researched, not implemented |
+| Support status | Historical source research retained; Doppelganger adapter certified separately against installed `openclaw@2026.9.1` build `ad6fe23` on September 6, 2026 |
+
+### Current adapter target and separate source investigation
+
+| Field | Value |
+| --- | --- |
+| Adapter package | private workspace `@doppelganger/doppelganger-host-openclaw` |
+| Install candidate | `openclaw@2026.9.1` |
+| Published build SHA | `ad6fe23aecb9b833d68139b0ddc9f239b894d2f1` |
+| Adapter source investigation | OpenClaw commit `837e0b20f479f4fa060bd7a2d50112e279103fb8` |
+| Investigation checkout/date | `/tmp/doppelganger-openclaw-research-20260905`, 2026-09-05 |
+| Runtime evidence | repository adapter tests exist; installed-Gateway smoke outcome not yet recorded |
+
+The published build SHA and source commit are distinct evidence. The source checkout established the public SDK shape and informed the adapter, but it does not prove that the published `2026.9.1` build behaves identically. The private package pins the version, and [Verification](../../operations/verification.md#openclaw-evidence) owns the real installed-host result.
+
+The later source investigation found these implementation-critical constraints without altering the original snapshot below:
+
+- native registration and tool factories are guarded and synchronous, and returned tool names must be concretely manifest-declared;
+- normal embedded execution awaits `before_model_resolve` before constructing plugin tools, while locked-model or contained hook failure paths can continue without that warmup;
+- `before_prompt_build` preserves separate system and ordinary context additions on the supported embedded route;
+- public `before_tool_call` can return `requireApproval` with synchronous `onResolution`; the implemented adapter records exact pre-dispatch correlation for every declared tool and additionally requires `allow-once` for approval-required descriptors;
+- native cleanup subscriptions exist, but `agent_end` and transcript observations do not prove a portable committed turn;
+- plugin conversation hooks require configured host permission, and source/manifest changes require native inspection and restart rather than adapter-side registry mutation.
+
+The installed `2026.9.1` package was also inspected independently of the research checkout:
+
+- Its `openclaw/plugin-sdk/core` tool-factory context does not expose `runId`; the adapter obtains optional run correlation from the actual `before_tool_call` context instead of inventing a factory field or substituting the session ID. The published `plugin-sdk/types` entry does not provide the expected declaration surface, so shipping imports use the public core exports and callback-compatible local hook contracts.
+- `dist/embedded-agent-DaSvA-Yk.js` constructs the ordinary embedded hook context with `runId`, `agentId`, canonical `sessionKey`, `sessionId`, and `workspaceDir` and forwards it through model setup. `dist/setup-1lxp_-pZ.js` awaits `runBeforeModelResolve` but returns earlier for locked model selection. This is installed-source evidence of ordering and available identities, not proof that every ingress executes the hook.
+- `api.runtime.agent.session.getSessionEntry({ agentId, sessionKey, readConsistency: 'latest' })` is an existing synchronous public metadata reader returning the actual session entry when needed. The asynchronous `session_start` notification is not an awaited warmup barrier; gateway `sessions.resolve` returns route identity only and `sessions.get` returns messages, not a session-generation lookup.
+- An isolated native installation was observed as loaded and activated through public runtime inspection with five typed hooks and three finite optional tools. Registration and installation evidence alone does not certify successful context/tool execution; that remains owned by the installed-Gateway smoke.
 
 ## Native extension model
 
@@ -82,6 +111,14 @@ Reload is explicit metadata rather than an observed generic plugin watcher API: 
 4. **Reload is configuration metadata.** Prefix-based restart/hot/no-op guidance does not establish a portable live-reload protocol or a generic file watcher.
 5. **Host-only presentation and packaging.** Control UI descriptors, gateway-local routes, CLI registrations, channel integrations, manifest/install resolution, and bundled/global/workspace precedence belong to the OpenClaw adapter, not the portable core.
 6. **Lifecycle timing is native.** OpenClaw's bounded five-second terminal-event wait is a host implementation policy. Portable state cleanup should preserve the terminal-state invariant without promising identical timing on other hosts.
+
+## Implemented Doppelganger boundary
+
+The implemented adapter chose an in-process direct Composition Runtime rather than the earlier sidecar candidate. A generated artifact freezes concrete `dg_...` names and descriptor contracts before native installation. Runtime registration remains synchronous; `before_model_resolve` performs bounded warmup, `before_prompt_build` projects correlated context, and a synchronous factory exposes only ready prepared tools. `before_tool_call` records the exact binding, native call ID, optional run ID, names, revision, and catalog generation for every declared tool; dispatch consumes that correlation once. Ordinary tools may use valid final arguments changed by native middleware, while approval-required tools additionally need genuine `allow-once` and exact final-input digest equality.
+
+The adapter does not use OpenClaw's privileged gateway, subagent, node, sandbox, worktree, provider, control-UI, session-extension, trusted-policy, or arbitrary registry surfaces. Runtime catalog changes can withdraw or refresh compatible declared descriptors but cannot add names. New names, incompatible contracts, or arbitrary generated Runtime Plugin tools require regenerated artifacts and native restart. Standard lifecycle capabilities are empty, so the integration provides no automatic committed-turn capture.
+
+Actor custody is explicit configuration: a native `(agentId, sessionKey, workspaceRoot)` route maps to one actor ID, and every unmatched route is unbound. External harness, background/group principal inference, locked-model warmup bypass, context-engine takeover, and unrestricted mid-loop catalog replacement remain outside the supported profile. See [OpenClaw](../../hosts/openclaw.md) for the operational contract.
 
 ## Source evidence
 

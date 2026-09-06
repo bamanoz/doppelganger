@@ -12,7 +12,6 @@ import {
 import {
   LIFECYCLE_PROTOCOL_VERSION,
   cloneJsonValue,
-  createActorIdentity,
   digestToolInput,
   serializeLifecycleValue,
   type JsonValue,
@@ -27,10 +26,12 @@ import {
   defineHostContextResult,
   defineToolCancellationResult,
   defineToolInvocationResult,
+  type OmpHostExtensionConfiguration,
   type SerializedOmpActivation,
 } from './contracts.ts'
 import { OMP_HOST_EVENT_PROTOCOL_VERSION } from './omp-host-events.ts'
 import { NodeOmpChildFactory } from './process.ts'
+import { prepareOmpHostExtensions } from './host-extensions.ts'
 
 const INITIALIZE_TOOL = 'doppelganger_initialize'
 const PROXY_PREFIX = 'doppelganger_'
@@ -206,6 +207,7 @@ export interface OmpActivationRequest {
 export interface DoppelgangerOmpExtensionOptions {
   readonly home?: string
   readonly actorId?: string
+  readonly hostExtensions?: OmpHostExtensionConfiguration
   readonly explicitRuntimePreset?: string
   readonly runtimePresets?: Omit<RuntimePresetRosterConfig, 'home'>
   readonly patches?: readonly CompositionPatchInput[]
@@ -233,7 +235,7 @@ export async function resolveOmpActivation(
   options: DoppelgangerOmpExtensionOptions,
   request: OmpActivationRequest,
 ): Promise<SerializedOmpActivation | undefined> {
-  const actor = createActorIdentity(options.actorId)
+  const hostExtensions = await prepareOmpHostExtensions(options.hostExtensions, request.cwd, options.actorId)
   const project = await discoverOmpProject(request.cwd)
   const selection = await runtimePresetRoster(options).select({
     ...(options.explicitRuntimePreset === undefined ? {} : { explicitRuntimePreset: options.explicitRuntimePreset }),
@@ -255,7 +257,7 @@ export async function resolveOmpActivation(
     },
     sessionId: request.sessionId,
     ...(project === undefined ? {} : { workspaceRoot: project.workspaceRoot }),
-    ...(actor.state === 'bound' ? { actorId: actor.actorId } : {}),
+    hostExtensions,
     hostKind: 'omp',
     ...(options.watch === undefined ? {} : { watch: options.watch }),
   })

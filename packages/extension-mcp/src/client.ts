@@ -33,6 +33,10 @@ export interface McpClientOwner {
 
 type McpStartupStage = 'initialize' | 'discover' | 'commit'
 
+export type McpStartupOutcome =
+  | Readonly<{ state: 'active' }>
+  | Readonly<{ state: 'failed' | 'cancelled'; code: string; message: string }>
+
 class McpStartupTimeoutError extends Error {
   readonly stage: McpStartupStage
 
@@ -127,6 +131,7 @@ export class McpClientGeneration {
   readonly #activeCalls = new Set<AbortController>()
   readonly #settlements = new Set<Promise<void>>()
   readonly #startupController = new AbortController()
+  readonly #startupOutcome = Promise.withResolvers<McpStartupOutcome>()
   #transport: Transport | undefined
   #state: McpServerSnapshot['state'] = 'connecting'
   #toolCount = 0
@@ -137,6 +142,7 @@ export class McpClientGeneration {
   #startupStage: McpStartupStage = 'initialize'
   #startupExpired = false
   #disposing = false
+  #startupOutcomeSettled = false
 
   constructor(owner: McpClientOwner, config: NormalizedMcpServerConfig) {
     this.#owner = owner
@@ -161,6 +167,10 @@ export class McpClientGeneration {
     return this.#config
   }
 
+  get startupOutcome(): Promise<McpStartupOutcome> {
+    return this.#startupOutcome.promise
+  }
+
   snapshot(): McpServerSnapshot {
     return Object.freeze({
       id: this.#config.id,
@@ -178,6 +188,7 @@ export class McpClientGeneration {
     }
     this.#toolCount = toolCount
     this.#state = 'active'
+    this.#settleStartup(Object.freeze({ state: 'active' }))
   }
 
   #fail(code: string, message: string): void {
@@ -185,6 +196,13 @@ export class McpClientGeneration {
     this.#state = 'failed'
     this.#toolCount = 0
     this.#owner.failGeneration(this, code, message)
+    this.#settleStartup(Object.freeze({ state: 'failed', code, message }))
+  }
+
+  #settleStartup(outcome: McpStartupOutcome): void {
+    if (this.#startupOutcomeSettled) return
+    this.#startupOutcomeSettled = true
+    this.#startupOutcome.resolve(outcome)
   }
 
   async start(): Promise<void> {
@@ -436,6 +454,11 @@ export class McpClientGeneration {
   async dispose(): Promise<void> {
     if (this.#state === 'disposed') return
     this.#disposing = true
+    this.#settleStartup(Object.freeze({
+      state: 'cancelled',
+      code: 'MCP_STARTUP_CANCELLED',
+      message: `MCP server ${this.#config.id} startup was cancelled before readiness`,
+    }))
     this.#state = 'disposed'
     this.#toolCount = 0
     this.#startupController.abort('MCP server generation disposed')

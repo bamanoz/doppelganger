@@ -783,7 +783,10 @@ describe('local OMP plugin package', () => {
     try {
       await writeToolBearingPreset(fixture)
       const run = await runLinkedOmp(fixture, 'test-actor')
-      expect(activationRequest(run).params).toMatchObject({ composition: { id: 'tool-projection-test' }, actorId: 'test-actor' })
+      expect(activationRequest(run).params).toMatchObject({
+        composition: { id: 'tool-projection-test' },
+        hostExtensions: { facts: { actorId: 'test-actor' } },
+      })
       expect(projectedContext(run)).toContain('Tool projection smoke context.')
       expect(activatedToolNames(run)).toContain('test.actor')
     } finally {
@@ -796,7 +799,10 @@ describe('local OMP plugin package', () => {
     try {
       await writeEvolutionPreset(fixture)
       const run = await runLinkedOmp(fixture, 'test-actor', fixture.workspace, fixture.doppelgangerHome, undefined, true)
-      expect(activationRequest(run).params).toMatchObject({ composition: { id: 'evolution-test' }, actorId: 'test-actor' })
+      expect(activationRequest(run).params).toMatchObject({
+        composition: { id: 'evolution-test' },
+        hostExtensions: { facts: { actorId: 'test-actor' } },
+      })
       expect(projectedContext(run)).toContain('[Doppelganger Evolution Policy]')
       expect(activatedToolNames(run).filter(name => name.startsWith('evolution.'))).toEqual([
         'evolution.inspect',
@@ -844,7 +850,7 @@ describe('local OMP plugin package', () => {
       const run = await runLinkedOmp(fixture, 'test-actor', delegatedWorkspace)
       expect(activationRequest(run).params).toMatchObject({
         composition: { id: 'tool-projection-test' },
-        actorId: 'test-actor',
+        hostExtensions: { facts: { actorId: 'test-actor' } },
       })
       expect(projectedContext(run)).toContain('Tool projection smoke context.')
       expect(activatedToolNames(run)).toContain('test.actor')
@@ -918,7 +924,7 @@ describe('local OMP plugin package', () => {
       }, false, 'codegraph-test/gpt-4o')
       expect(activationRequest(run).params).toMatchObject({
         composition: { id: 'codegraph-test' },
-        actorId: 'test-actor',
+        hostExtensions: { facts: { actorId: 'test-actor' } },
         workspaceRoot: delegatedWorkspace,
       })
       expect(activatedToolNames(run).filter(name => name.startsWith('codegraph.'))).toEqual([
@@ -1068,7 +1074,7 @@ describe('local OMP plugin package', () => {
       })
       expect(activationRequest(run).params).toMatchObject({
         composition: { id: 'evolution-test' },
-        actorId: 'test-actor',
+        hostExtensions: { facts: { actorId: 'test-actor' } },
         workspaceRoot: delegatedWorkspace,
       })
       expect(projectedContext(run)).toContain('[Doppelganger Evolution Policy]')
@@ -1089,7 +1095,7 @@ describe('local OMP plugin package', () => {
     const fixture = await createLinkedOmpFixture()
     try {
       const run = await runLinkedOmp(fixture, 'test-actor')
-      expect(activationRequest(run).params).toMatchObject({ actorId: 'test-actor' })
+      expect(activationRequest(run).params).toMatchObject({ hostExtensions: { facts: { actorId: 'test-actor' } } })
       const authoredFiles = [
         new URL('../package.json', import.meta.url),
         new URL('../src/index.ts', import.meta.url),

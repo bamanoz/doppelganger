@@ -476,7 +476,7 @@ describe('Doppelganger OMP extension', () => {
     await pi.handlers.get('session_start')!({ type: 'session_start' }, ctx)
     expect(factory.connection.requests[0]).toMatchObject({
       method: 'session.activate',
-      params: { actorId: 'actor-one' },
+      params: { hostExtensions: { facts: { hostKind: 'omp', actorId: 'actor-one' } } },
     })
     expect(pi.activeTools()).toEqual(['read', 'bash', 'doppelganger_memory_search'])
     await expect(pi.handlers.get('before_agent_start')!({
@@ -1109,10 +1109,12 @@ describe('Doppelganger OMP extension', () => {
 
     expect(firstFactory.connection).not.toBe(secondFactory.connection)
     expect(firstFactory.connection.requests).toContainEqual(expect.objectContaining({
-      method: 'session.activate', params: expect.objectContaining({ actorId: 'actor-one' }),
+      method: 'session.activate',
+      params: expect.objectContaining({ hostExtensions: expect.objectContaining({ facts: { hostKind: 'omp', actorId: 'actor-one' } }) }),
     }))
     expect(secondFactory.connection.requests).toContainEqual(expect.objectContaining({
-      method: 'session.activate', params: expect.objectContaining({ actorId: 'actor-two' }),
+      method: 'session.activate',
+      params: expect.objectContaining({ hostExtensions: expect.objectContaining({ facts: { hostKind: 'omp', actorId: 'actor-two' } }) }),
     }))
     firstFactory.connection.notifications.get('runtime.failed')?.({ message: 'first child failed' })
     await vi.waitFor(() => expect(firstPi.activeTools()).toEqual(['read', 'bash']))

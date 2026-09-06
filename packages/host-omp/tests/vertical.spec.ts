@@ -446,7 +446,10 @@ describe('full-stack test Runtime Preset vertical', () => {
 
 
   it('fails memory activation before canonical storage opens when the host actor is unbound', async () => {
-    const activation = await resolveOmpActivation({ home: homePath, watch: false }, { cwd: workspacePath, sessionId: 'unbound-memory' })
+    const activation = await resolveOmpActivation(
+      { home: homePath, watch: false },
+      { cwd: workspacePath, sessionId: 'unbound-memory' },
+    )
     const adapter = new OmpAdapterSession({
       ...(activation === undefined ? {} : { activation }),
       childFactory: new NodeOmpChildFactory({ childPath, shutdownTimeoutMs: 1000 }),
@@ -456,6 +459,32 @@ describe('full-stack test Runtime Preset vertical', () => {
     expect(await adapter.start()).toMatchObject({
       state: 'failed',
       diagnostic: { message: expect.stringContaining('memory requires a bound host actor') },
+    })
+    await expect(access(join(storagePath, 'storage', 'memory.sqlite'))).rejects.toThrow()
+  })
+
+  it('fails memory activation before canonical storage opens when Actor Identity is omitted', async () => {
+    const selected = await resolveOmpActivation(
+      { home: homePath, watch: false },
+      { cwd: workspacePath, sessionId: 'omitted-actor-memory' },
+    )
+    if (selected === undefined) throw new Error('memory fixture Runtime Preset did not resolve')
+    const activation = {
+      ...selected,
+      hostExtensions: {
+        ...selected.hostExtensions,
+        selections: selected.hostExtensions.selections.filter(selection => selection.id !== 'actor'),
+      },
+    }
+    const adapter = new OmpAdapterSession({
+      activation,
+      childFactory: new NodeOmpChildFactory({ childPath, shutdownTimeoutMs: 1000 }),
+    })
+    activeAdapters.push(adapter)
+
+    expect(await adapter.start()).toMatchObject({
+      state: 'failed',
+      diagnostic: { message: expect.stringContaining('doppelgangerActor') },
     })
     await expect(access(join(storagePath, 'storage', 'memory.sqlite'))).rejects.toThrow()
   })

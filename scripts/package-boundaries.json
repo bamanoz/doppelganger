@@ -41,10 +41,27 @@
         "@doppelganger/doppelganger-protocols"
       ]
     },
+    "@doppelganger/doppelganger-host-extensions": {
+      "directory": "host-extension-runtime",
+      "dependencies": [
+        "@doppelganger/doppelganger-composition-runtime",
+        "@doppelganger/doppelganger-protocols"
+      ]
+    },
     "@doppelganger/doppelganger-host-omp": {
       "directory": "host-omp",
       "dependencies": [
         "@doppelganger/doppelganger-composition-runtime",
+        "@doppelganger/doppelganger-host-extensions",
+        "@doppelganger/doppelganger-protocols",
+        "@doppelganger/doppelganger-runtime-presets"
+      ]
+    },
+    "@doppelganger/doppelganger-host-openclaw": {
+      "directory": "host-openclaw",
+      "dependencies": [
+        "@doppelganger/doppelganger-composition-runtime",
+        "@doppelganger/doppelganger-host-extensions",
         "@doppelganger/doppelganger-protocols",
         "@doppelganger/doppelganger-runtime-presets"
       ]

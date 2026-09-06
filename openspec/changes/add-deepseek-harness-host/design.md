@@ -16,7 +16,7 @@ The research gate was revalidated against DeepSeek Harness commit `4e84901e6471b
 - `packages/preset/agent-presets/src/index.ts` and `mount.ts`: standing preset scopes, live-mount-first inventory, per-runtime mount filtering, and descendant-agent routing; shared standing plugin objects remain unsuitable for Doppelganger's per-session mutable plugin trees.
 - `packages/extensions/cordis-{host,client}-runner`: trusted dynamic-code façades, explicitly not containment; the refreshed host runner preserves the same immutable Package, guarded evaluator, current/next, and Fiber lifecycle model and remains unnecessary for this adapter.
 
-Doppelganger's host-neutral seams exist in `runtime-presets`, `composition-runtime`, and `extension-protocols`. The implemented roster is the authoritative ordered multi-root service and supplies the `standard` deployment default. `CompositionRuntime` accepts a caller-owned Context and mounts protected runtime plugins after authored layers. `extension-protocols` now provides the actor-neutral shared Runtime Host plugin, its closed semantic capability profile, revisioned tool catalogs, exact invocation/approval/cancellation contracts, declared lifecycle availability, and a transport-independent conformance suite. The remaining work is a DSH lifecycle owner and direct projection adapter using those contracts unchanged.
+Doppelganger's host-neutral seams exist in `runtime-presets`, `composition-runtime`, `extension-protocols`, and `host-extension-runtime`. The implemented roster is the authoritative ordered multi-root service and supplies the `standard` deployment default. `CompositionRuntime` accepts a caller-owned Context and one immutable `ProtectedComposition` after authored layers. `host-extension-runtime` validates versioned Host Extension definitions, normalizes ordered selections, and instantiates fresh protected entries for each Runtime Session. `extension-protocols` provides the actor-neutral shared Runtime Host bridge, closed semantic capability profile, revisioned tool catalogs, exact invocation/approval/cancellation contracts, declared lifecycle availability, and transport-independent conformance suite. The remaining work is a DSH lifecycle owner and direct projection adapter using those contracts unchanged.
 
 ## Goals / Non-Goals
 
@@ -50,7 +50,7 @@ Doppelganger's host-neutral seams exist in `runtime-presets`, `composition-runti
 
 `packages/host-dsh` exports one ordinary Cordis plugin and configuration schema. It injects the public `doppelgangerRuntimePresets` service, normally mounted beside it in the same standing DSH composition. Because DSH scoped events flow from descendant agents to ancestor listeners, one plugin instance can observe every joined agent while still creating a separate adapter state and Composition Runtime per agent.
 
-The package declares `@deepseek-ai/cordis` and each consumed `@deepseek-ai/dsh-*` package as peers, with matching development dependencies. It never imports upstream `cordis`, DSH private source subpaths, OMP, Persona, memory, SQLite, or a named Runtime Preset. Its only internal edges are `runtime-presets`, `composition-runtime`, and `extension-protocols`; the roster service owns roots, trust, discovery, authoring, and deployment default semantics outside the host adapter.
+The package declares `@deepseek-ai/cordis` and each consumed `@deepseek-ai/dsh-*` package as peers, with matching development dependencies. It never imports upstream `cordis`, DSH private source subpaths, OMP, Persona, memory, SQLite, or a named Runtime Preset. Its only internal edges are `runtime-presets`, `composition-runtime`, `extension-protocols`, and `host-extension-runtime`; the roster service owns roots, trust, discovery, authoring, and deployment-default semantics, while the Host Extension catalog owns runtime-owned protected composition.
 
 Alternative considered: add the adapter directly to DSH. Rejected because Doppelganger owns Runtime Preset selection and protocol translation, and the portable host package must remain versioned and testable with this repository.
 
@@ -68,31 +68,35 @@ Alternative considered: activate only on first prompt assembly. Rejected because
 
 Alternative considered: require every DSH agent creator to compose Doppelganger through `CreateAgentOptions.setup`. That would give an earlier awaited boundary, but it would require invasive changes across Web, ACP, headless, subagent, and custom factories. The scoped listener plus awaited assembly barrier uses existing public extension points and covers all factory callers.
 
-### 3. One caller-owned Composition Runtime per DSH agent
+### 3. One caller-owned Composition Runtime and Host Extension plan per DSH agent
 
-Each state creates `createCompositionRuntime({ context: agent.ctx, watch, onReload, onReloadFailure })`, resolves selection through the injected `ctx.doppelgangerRuntimePresets.select(...)`, creates a Composition Definition, and activates it with:
+Host setup creates one immutable `HostExtensionCatalog<DshHostSessionFacts>` from the standard `runtime-host` and `actor` definitions plus explicitly configured trusted DSH-only definitions. Configuration names ordered Host Extension selections and JSON-compatible configuration; the adapter validates and normalizes that plan before creating a Composition Runtime. The `runtime-host` selection is required whenever a Runtime Preset is selected. The `actor` selection is independent and may be omitted.
+
+Each state resolves Runtime Preset selection through `ctx.doppelgangerRuntimePresets.select(...)`, creates a Composition Definition, freezes closed DSH session facts containing only `hostKind`, DSH session identity, optional absolute workspace root, and bounded host-owned routing facts, then instantiates a fresh `ProtectedComposition` from the normalized Host Extension plan. It activates `createCompositionRuntime({ context: agent.ctx, watch, onReload, onReloadFailure })` with:
 
 - `sessionId: String(agent.session.id)`;
 - `workspaceRoot: agent.session.header.cwd` when present;
 - canonical user and project patch paths returned by roster selection;
 - optional trusted host patches from plugin configuration;
-- the shared `createRuntimeHostPlugin(binding, DSH_RUNTIME_HOST_CAPABILITIES)` protected runtime plugin;
-- a separate `createActorIdentityPlugin(...)` only when DSH is configured to provide explicit unbound or immutable bound Actor Identity;
-- explicit session isolation for every service consumed or provided by each protected plugin, including `doppelgangerRuntimeSession`, `doppelgangerHostCapabilities`, `doppelgangerContext`, `doppelgangerTools`, `doppelgangerLifecycle`, and separately `doppelgangerActor` when installed.
+- the instantiated protected composition, whose ordered entries receive explicit session isolation from their definitions.
 
-The roster applies strict first-match precedence: explicit host selection, project selection, user default, then deployment default. Its normal Cordis plugin deployment defaults to the shipped `standard` Runtime Preset. A deployment that intentionally needs an inactive no-selection state configures the roster service without a deployment default; the DSH host does not invent a second host-local switch or discovery path.
+The standard `runtime-host` definition creates the shared Runtime Host plugin from the state's one direct binding and `DSH_RUNTIME_HOST_CAPABILITIES`. The standard `actor` definition resolves the configured DSH actor mode from the closed session facts and creates the separate actor plugin. `host-dsh` never builds a second protected-plugin map, lets authored Loader rows select Host Extensions, or passes raw Agent, Session, Context, registry, approval, logger, filesystem, process, network, or credential objects through facts or extension configuration.
+
+The roster applies strict first-match precedence: explicit host selection, project selection, user default, then deployment default. Its normal Cordis plugin deployment defaults to the shipped `standard` Runtime Preset. A deployment that intentionally needs an inactive no-selection state configures the roster service without a deployment default; the DSH host does not invent a second host-local switch or discovery path. A defaultless no-selection state creates no Runtime Session or protected composition.
 
 Using `agent.ctx` makes the runtime a descendant of the DSH agent scope and preserves the single Cordis root. The adapter still owns an explicit memoized `runtime.dispose()` because Composition Runtime must drain watches and mutation queues before the enclosing agent Fiber completes. Cleanup is registered immediately through `agent.ctx.effect`, before activation awaits, so agent teardown racing startup finds the same disposal promise.
 
-A defaultless no-selection state is valid and installs no protected runtime bridge, context, or tools. A selection or configuration failure marks only that state failed, logs an actionable diagnostic, removes any partial projection, and disposes the attempted runtime.
+Unknown, duplicate, incompatible, or invalidly configured Host Extension selections fail before Fiber creation. A later Runtime Preset selection or activation failure marks only that state failed, logs an actionable diagnostic, removes any partial projection, and disposes the attempted runtime.
 
-Alternative considered: one Composition Runtime shared by every DSH agent. Rejected because Runtime Sessions need independent plugin trees, reload state, protocol services, and disposal; sharing also couples sibling cleanup.
+Alternative considered: one Composition Runtime shared by every DSH agent. Rejected because Runtime Sessions need independent plugin trees, Host Extension instances, reload state, protocol services, and disposal; sharing also couples sibling cleanup.
 
 Alternative considered: create a second root Context per agent. Rejected because it splits Cordis service identity and prevents direct scoped DSH projection.
 
-### 4. Consume the shared Runtime Host API directly
+Alternative considered: accept ad hoc protected plugin objects directly in host configuration. Rejected because it bypasses definition API compatibility, JSON-compatible normalization, deterministic selection, trust admission, and fresh per-session instantiation.
 
-`extension-protocols` owns the single protected actor-neutral Runtime Host plugin and bridge contract. `host-dsh` imports `createRuntimeHostPlugin`, `RuntimeHostBridge`, `RuntimeHostBinding`, the capability types, tool snapshots, exact invocation and cancellation requests, and approval helpers from that public package. It does not define a DSH-local bridge interface, copy protocol-service lookup logic, or expose native DSH objects through the common API.
+### 4. Consume the shared Runtime Host API through one standard Host Extension
+
+`extension-protocols` owns the actor-neutral Runtime Host bridge contract. `host-dsh` imports `RuntimeHostBridge`, `RuntimeHostBinding`, capability types, tool snapshots, exact invocation and cancellation requests, and approval helpers from that public package. Its standard `runtime-host` definition is built with `createRuntimeHostExtension(...)` from `host-extension-runtime`; `host-dsh` does not call `createRuntimeHostPlugin(...)` during activation, define a DSH-local bridge interface, copy protocol-service lookup logic, or expose native DSH objects through the common API.
 
 Each agent state owns one direct in-memory `RuntimeHostBinding`. `attach` accepts exactly one bridge, `detach` clears only that bridge, and `toolCatalogChanged(revision)` enqueues a snapshot refresh for the current state. A second attachment before exact detach is an activation error. Delayed callbacks from a detached or replaced state are ignored through exact state identity and committed catalog revision checks.
 
@@ -105,21 +109,22 @@ The bridge surface is used unchanged:
 - `publishLifecycle(event)` constrained by the declared capability profile;
 - `attach`, `detach`, and the single explicit `toolCatalogChanged(revision)` callback.
 
-DSH has no bridge transport: the adapter and protected plugins share the agent-owned Cordis process and lifecycle. A future DSH-only hook must use a separate typed `doppelganger/host/dsh/...` service or event plugin in the same protected layer and in-process binding; it cannot add a generic notification envelope, second bridge, router, connection, sidecar, or session-binding path. Such a contract remains host-specific until two implemented adapters prove the common-API promotion criteria.
+DSH has no bridge transport: the adapter and instantiated Host Extensions share the agent-owned Cordis process and lifecycle. A DSH-only service or event must be one typed Host Extension definition admitted into the catalog by trusted host configuration. Its factory returns a fresh entry in the same protected composition and may use only closed facts and explicitly captured host-owned capabilities; it cannot expose raw DSH runtime objects or add a generic notification envelope, second bridge, router, connection, sidecar, or session-binding path. Such a contract remains host-specific until two implemented adapters prove the common-API promotion criteria.
 
 Alternative considered: duplicate an approximately equivalent bridge in `host-dsh`. Rejected because it would create a second protocol implementation, bypass shared capability and approval validation, and drift from the conformance suite.
 
-### 5. Actor Identity is a separate optional protected plugin
+### 5. Actor Identity is an independently selected standard Host Extension
 
-The checked-out DSH source has no authenticated account/principal service. It does provide `@deepseek-ai/dsh-anonymous-user-id`, a stable random UUID per `$DSH_HOME`, already shared by telemetry, feedback, and DeepSeek requests. The default DSH actor resolver uses `getOrCreateAnonymousUserId()` and prefixes or namespaces the value as documented so it cannot be confused with a future account identifier.
+The checked-out DSH source has no authenticated account/principal service. It does provide `@deepseek-ai/dsh-anonymous-user-id`, a stable random UUID per `$DSH_HOME`, already shared by telemetry, feedback, and DeepSeek requests. Before session activation, host-owned actor resolution maps configuration to one immutable actor result: default namespaced anonymous-home identity, explicit unbound, explicit bound, trusted deployment resolver result, or provider absence.
 
-Configuration may instead select explicit unbound mode, disable Actor Identity entirely, or provide a trusted host callback/API entry point for a deployment-specific actor ID. Bound and unbound modes mount `createActorIdentityPlugin(...)` as a sibling of the shared Runtime Host plugin; disabled mode leaves `doppelgangerActor` absent. Runtime Presets, project manifests, session metadata, prompts, tools, the Runtime Host capability profile, and the bridge cannot supply or infer actor state. The resolved value is snapshotted once per Runtime Session and cannot change on reload.
+When Actor Identity is enabled, the ordered Host Extension selection includes `actor`; its standard definition closes over the trusted resolver and uses `createActorIdentityHostExtension(...)` to produce one fresh session-isolated actor entry. Disabled mode omits the `actor` selection entirely, leaving `doppelgangerActor` absent. The `runtime-host` selection, bridge, capability profile, Runtime Preset, project files, prompts, tools, and session metadata cannot supply or infer actor state. The resolved value is snapshotted once per Runtime Session and cannot change on reload.
 
 This is installation identity, not authenticated human identity. Actor onboarding and multi-user account binding remain deferred. Deleting the DSH anonymous ID file intentionally creates a new actor partition on a later process launch.
 
-Alternative considered: put actor identity back into the shared bridge. Rejected because actor absence, explicit unbound, and immutable bound state are independent from context, tools, cancellation, and lifecycle capabilities.
+Alternative considered: put actor identity back into the shared bridge or `runtime-host` Host Extension. Rejected because actor absence, explicit unbound, and immutable bound state are independent from context, tools, cancellation, and lifecycle capabilities.
 
 Alternative considered: use the DSH session ID, workspace, hostname, git remote, or model-visible metadata. Rejected because those values are neither stable user identity nor host-authoritative privacy-preserving binding.
+
 
 ### 6. Resolve context once per DSH turn and preserve authority
 
@@ -246,3 +251,4 @@ Alternative considered: rely only on parent Fiber recursive disposal. Rejected b
 - **Turn text projection**: memory capture accepts only strings, while DSH supports rich blocks. Mitigation: use only direct user/model text for capture and never stringify image or tool metadata into invented principal text.
 - **Standing plugin lifetime**: one host plugin observes many descendant agents. Mitigation: WeakMap by exact Agent, exact Session filtering, per-agent queues, per-agent Composition Runtime ownership, and exhaustive host-plugin disposal.
 - **Same-process failure boundary**: unlike OMP, a malicious or non-cooperative plugin can affect the DSH process. This is an explicit trust model, not a regression hidden by sandbox language. The milestone provides lifecycle containment for ordinary failures, not hostile-code isolation.
+- **Host Extension trust**: DSH runs native plugins and admitted Host Extension modules in-process. Mitigation: admit definitions only through explicit host-owned configuration, validate API version and JSON-compatible configuration before Fiber creation, pass only closed bounded session facts, instantiate fresh entries per agent, and make no sandbox claim.

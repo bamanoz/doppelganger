@@ -640,7 +640,11 @@ describe('CodeGraph portable extension', () => {
       composition: createCompositionDefinition({ id: 'codegraph-reload', revision: 'one', loaderPath }),
       sessionId: 'codegraph-reload',
       workspaceRoot: workspace,
-      runtimePlugins: { host },
+      protectedComposition: {
+        entries: [
+          { id: 'host', plugin: host },
+        ],
+      },
     })
     if (tools === undefined) throw new Error('host tools did not activate')
     expect(await invokePortable(tools, 'codegraph.explore', { query: 'before' })).toMatchObject({ ok: true, value: { maxFiles: 3 } })

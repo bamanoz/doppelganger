@@ -183,6 +183,7 @@ describe('package boundary checker', () => {
     )) as { dependencies: Record<string, string> }
     expect(manifest.packages['@doppelganger/doppelganger-host-omp']?.dependencies).toEqual([
       '@doppelganger/doppelganger-composition-runtime',
+      '@doppelganger/doppelganger-host-extensions',
       '@doppelganger/doppelganger-protocols',
       '@doppelganger/doppelganger-runtime-presets',
     ])
@@ -209,6 +210,7 @@ describe('package boundary checker', () => {
     expect(manifest.packages).not.toHaveProperty('@doppelganger/doppelganger-logging')
     expect(Object.keys(hostManifest.dependencies).filter(name => name.startsWith('@doppelganger/')).sort()).toEqual([
       '@doppelganger/doppelganger-composition-runtime',
+      '@doppelganger/doppelganger-host-extensions',
       '@doppelganger/doppelganger-protocols',
       '@doppelganger/doppelganger-runtime-presets',
     ])

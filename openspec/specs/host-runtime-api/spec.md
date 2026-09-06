@@ -43,25 +43,25 @@ The bridge SHALL expose a frozen versioned closed capability profile containing 
 - **THEN** validation rejects the profile before bridge attachment
 
 ### Requirement: Actor identity remains outside the Runtime Host API
-The shared Runtime Host bridge, binding, capability profile, requests, tool-catalog callback, and lifecycle contracts SHALL contain no `actorId` and SHALL NOT install or infer actor identity. Actor Identity has three distinct observable states: absence of `doppelgangerActor` means unsupported or not installed; `{ state: "unbound" }` means the independent provider is installed without a resolved user; `{ state: "bound", actorId }` means one immutable resolved user. Persona activation SHALL NOT own or derive that binding.
+The shared Runtime Host bridge, binding, capability profile, requests, tool-catalog callback, and lifecycle contracts SHALL contain no `actorId` and SHALL NOT install, configure, or infer Actor Identity. Actor Identity has three distinct observable states: absence of `doppelgangerActor` means the Host Extension Composition omitted the provider; `{ state: "unbound" }` means the independent Host Extension is installed without a resolved user; `{ state: "bound", actorId }` means the extension resolved one immutable host-authoritative user from trusted session facts and configuration. Persona activation SHALL NOT own or derive that binding.
 
 #### Scenario: Actor-independent preset activates
 - **ID**: `host.runtime.api.actor-independent-preset-activates`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::rejects a second attachment and keeps actor absence, unbound, and bound states independent`
-- **WHEN** a Runtime Preset uses context, tools, or lifecycle but no actor-aware plugin
-- **THEN** the shared bridge activates without an actor provider or synthetic actor identity
+- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
+- **WHEN** a Runtime Preset uses context, tools, or lifecycle but its Host Extension Composition omits Actor Identity
+- **THEN** the shared bridge activates without an actor provider or synthetic actor state
 
 #### Scenario: Actor-aware plugin is selected
 - **ID**: `host.runtime.api.actor-aware-plugin-is-selected`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::rejects a second attachment and keeps actor absence, unbound, and bound states independent`
-- **WHEN** a selected plugin explicitly requires `doppelgangerActor` and the host has a stable principal identity
-- **THEN** the adapter mounts a separate actor provider whose isolated service is available to that plugin without changing the Runtime Host API
+- **EVIDENCE**: `packages/host-openclaw/tests/identity.spec.ts::isolates trusted actor and workspace bindings across gateway sessions in one adapter`
+- **WHEN** a selected plugin explicitly requires `doppelgangerActor` and the trusted Actor Host Extension resolves a stable principal
+- **THEN** that extension provides the isolated actor service without changing the Runtime Host API
 
 #### Scenario: Host supports Actor Identity without a resolved user
 - **ID**: `host.runtime.api.host-supports-actor-identity-without-a-resolved-user`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::rejects a second attachment and keeps actor absence, unbound, and bound states independent`
-- **WHEN** an adapter implements Actor Identity but has no configured or authenticated user
-- **THEN** it mounts the separate provider in explicit `unbound` state while the shared Runtime Host API remains unchanged
+- **EVIDENCE**: `packages/host-omp/tests/runtime-host-conformance.spec.ts::keeps Actor Identity absent, unbound, and bound through the real OMP adapter`
+- **WHEN** the Host Extension Composition installs Actor Identity but its trusted resolution produces no user
+- **THEN** consumers observe explicit `unbound` state while the shared Runtime Host API remains unchanged
 
 ### Requirement: Correlated context resolution
 Each context request SHALL carry a non-empty adapter-minted request identity, current principal input, optional stable turn identity, and non-negative token budget. The bridge SHALL return authority-separated assembled context with deterministic accepted and omitted provenance and SHALL NOT receive or mutate native prompt, message, or provider objects.
@@ -157,25 +157,31 @@ The Runtime Host binding SHALL expose exactly one runtime-to-host change callbac
 - **THEN** it remains outside the shared API until an explicit versioned contract is designed instead of being sent through a generic notification channel
 
 ### Requirement: Protected host-specific extensions
-A host adapter MAY install additional runtime-owned Cordis plugins that provide explicitly typed host-namespaced services or events. These extensions SHALL be isolated to the owning Runtime Session, use Cordis effects for registration and cleanup, validate transported values, and reuse the one adapter-owned in-process binding or existing transport, router, and process lifecycle. They SHALL NOT expose a raw native host runtime, unrestricted event bus, credential store, or registry, and SHALL NOT create a second host RPC connection, socket, sidecar, request router, or session-binding path. External service connections owned by ordinary Runtime Preset plugins such as MCP are not host-adapter channels and remain separately scoped.
+A host adapter MAY activate one separate trusted Host Extension Composition beside the actor-neutral shared Runtime Host bridge. The composition MAY provide explicitly typed host-namespaced services or events from closed immutable session facts and SHALL use the ordinary Cordis Loader, injection, isolation, effect, audit, and disposal model inside the owning Runtime Session. Host Extension selection and configuration SHALL remain host/deployment-owned and unavailable to Runtime Presets and patches. Extensions SHALL validate transported values and reuse the one adapter-owned in-process binding or existing transport, router, and process lifecycle. They SHALL NOT expose a raw native host runtime, unrestricted event bus, credential store, UI, provider, registry, or authority channel, and SHALL NOT create a second bridge, RPC connection, socket, sidecar, request router, or session-binding path. External connections owned by ordinary Runtime Preset plugins such as MCP remain separate and are not host-adapter channels.
 
-#### Scenario: OMP supplies a native-only todo hook
+#### Scenario: OMP supplies a native-only todo hook through its Host Extension Composition
 - **ID**: `host.runtime.api.omp-supplies-a-native-only-todo-hook`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
-- **WHEN** OMP has a `todo_completed` hook with no proven portable equivalent
-- **THEN** the OMP adapter may publish a typed `doppelganger/host/omp/todo-completed` event for explicitly OMP-bound plugins without adding it to the common lifecycle union
+- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::routes validated OMP todo reminders through the child runtime plugin`
+- **WHEN** OMP has a `todo_completed` hook with no proven portable equivalent and its trusted Host Extension Composition enables the OMP event provider
+- **THEN** the provider publishes the typed OMP-namespaced event through the existing session transport without adding it to the common lifecycle union
 
-#### Scenario: Host-bound preset runs on another host
+#### Scenario: Host-bound preset runs without its Host Extension
 - **ID**: `host.runtime.api.host-bound-preset-runs-on-another-host`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
-- **WHEN** a Runtime Preset plugin requires an OMP-specific service and the selected host does not provide it
-- **THEN** that plugin fails activation visibly rather than receiving an approximate service with different semantics
+- **EVIDENCE**: `packages/composition-runtime/tests/composition-runtime.spec.ts::reports missing services and cleans partially activated resources`
+- **WHEN** a Runtime Preset plugin requires a typed host-specific service and the active Host Extension Composition does not provide it
+- **THEN** activation fails visibly rather than receiving an approximate service with different semantics
 
 #### Scenario: Host-specific provider needs transported events
 - **ID**: `host.runtime.api.host-specific-provider-needs-transported-events`
-- **EVIDENCE**: `packages/extension-protocols/tests/runtime-host.spec.ts::attaches without actor identity and preserves canonical empty optional protocols`
-- **WHEN** an OMP-specific provider must receive a native hook in the runtime child
-- **THEN** `host-omp` validates and routes it over the existing per-session framed RPC rather than allowing the provider to open another connection
+- **EVIDENCE**: `packages/host-omp/tests/child-integration.spec.ts::routes validated OMP todo reminders through the child runtime plugin`
+- **WHEN** an OMP Host Extension must receive a native hook inside the runtime child
+- **THEN** `host-omp` validates and routes it over the existing per-session framed RPC and the extension owns only its Cordis subscription and cleanup
+
+#### Scenario: OpenClaw extension resolves identity from native facts
+- **ID**: `host.runtime.api.openclaw-extension-resolves-identity`
+- **EVIDENCE**: `packages/host-openclaw/tests/identity.spec.ts::isolates trusted actor and workspace bindings across gateway sessions in one adapter`
+- **WHEN** the OpenClaw Actor extension consumes its closed session fact service
+- **THEN** the extension can provide Actor Identity without the shared bridge gaining actor fields or the core adapter importing an actor-aware feature consumer
 
 ### Requirement: Every adapter passes common conformance
 Before a host adapter is supported, it SHALL pass the same transport-independent conformance suite for two-session isolation, empty context and tools, closed capability validation, atomic catalog replacement, stale tool revision, approval replay, cancellation/completion races, undeclared lifecycle rejection, independence of the Actor Identity states supported by that adapter, disposal during active calls, and late callbacks after binding replacement.
@@ -257,4 +263,3 @@ A valid owned-set replacement SHALL commit one complete immutable catalog revisi
 - **EVIDENCE**: `packages/extension-protocols/tests/tool-registry.spec.ts::replaces complete owner sets atomically and preserves the old set on validation failure`
 - **WHEN** a plugin commits a valid owned-set replacement and an observer fails
 - **THEN** the new set remains current, the mutation succeeds, independent observers may continue, and removed active implementations cannot report successful current completion
-
